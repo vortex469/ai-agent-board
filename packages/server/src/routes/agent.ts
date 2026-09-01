@@ -155,7 +155,7 @@ export function createAgentRouter(
       updated,
       async (status) => {
         if (status === 'complete' || status === 'failed') await repo.clearRun(task.id);
-        await makeStatusCallback(repo, task.id)(status);
+        await makeStatusCallback(repo, task.id, agentManager, updated)(status);
       },
       makeWorktreeCallback(repo, task.id),
     );

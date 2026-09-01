@@ -4,7 +4,7 @@ import { execFileSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import type { Project, Task, TaskGroup } from '../types.js';
+import type { AgentEvent, Project, Task, TaskGroup } from '../types.js';
 import { isValidPriority, isValidColumnId, isValidAgentType, isValidAgentTimeoutMinutes, VALID_AGENT_TYPES, MAX_TITLE_LENGTH, MAX_DESCRIPTION_LENGTH, MIN_AGENT_TIMEOUT_MINUTES, MAX_AGENT_TIMEOUT_MINUTES } from '@ai-agent-board/shared/constants.js';
 import { errorMessage } from '../utils.js';
 import { getCloneRoot } from '../config.js';
@@ -545,16 +545,122 @@ export function buildTask(body: Record<string, any>): Task {
 
 // ─── Agent lifecycle helpers ────────────────────────────────────────
 
-export function makeStatusCallback(repo: TaskRepository, taskId: string): (status: Task['agentStatus']) => void {
+export function makeStatusCallback(
+  repo: TaskRepository,
+  taskId: string,
+  agentManager?: AgentManager,
+  taskState?: Task,
+): (status: Task['agentStatus']) => void {
   return async (status) => {
-    const statusUpdates: Partial<Task> = { agentStatus: status };
     if (status === 'complete') {
-      statusUpdates.completedAt = Date.now();
-      statusUpdates.columnId = 'review';
+      await autoProgressCompletedTask(repo, taskId, agentManager, taskState);
+      return;
     }
+
+    const statusUpdates: Partial<Task> = { agentStatus: status };
     const t = await repo.update(taskId, statusUpdates);
     if (t) broadcastTaskUpdate(t);
   };
+}
+
+async function emitTaskLifecycleEvent(
+  repo: TaskRepository,
+  task: Task,
+  type: AgentEvent['type'],
+  content: string,
+  metadata?: AgentEvent['metadata'],
+): Promise<void> {
+  const event: AgentEvent = {
+    id: uuid(),
+    taskId: task.id,
+    type,
+    content,
+    timestamp: Date.now(),
+    metadata,
+  };
+  try {
+    await repo.insertEvent(event);
+  } catch (err: unknown) {
+    console.error('[agent-lifecycle] failed to persist lifecycle event:', errorMessage(err));
+  }
+  broadcast({ type: 'agent_event', payload: event });
+}
+
+export async function autoProgressCompletedTask(
+  repo: TaskRepository,
+  taskId: string,
+  agentManager?: AgentManager,
+  taskState?: Task,
+): Promise<Task | undefined> {
+  const completedAt = Date.now();
+  const reviewUpdates: Partial<Task> = {
+    agentStatus: 'complete',
+    columnId: 'review',
+    completedAt,
+  };
+
+  const storedTask = await repo.getById(taskId);
+  const task = storedTask ? { ...taskState, ...storedTask, worktreePath: storedTask.worktreePath ?? taskState?.worktreePath } : taskState;
+  if (!task) return undefined;
+
+  const moveToReview = async (eventContent?: string): Promise<Task | undefined> => {
+    const reviewed = await repo.update(taskId, reviewUpdates);
+    if (reviewed) broadcastTaskUpdate(reviewed);
+    if (eventContent) {
+      await emitTaskLifecycleEvent(repo, reviewed ?? { ...task, ...reviewUpdates }, 'error', eventContent, {
+        agentType: task.agentType,
+        error: eventContent,
+      });
+    }
+    return reviewed;
+  };
+
+  if (!agentManager || !task.useWorktree) {
+    return moveToReview();
+  }
+
+  if (!task.repoPath || !task.branchName || !task.worktreePath) {
+    return moveToReview(
+      'Auto-merge skipped: task is missing repo, branch, or managed worktree state. Review the task and merge manually when ready.',
+    );
+  }
+
+  const readiness = agentManager.getMergeReadiness(task);
+  if (!readiness.ready) {
+    return moveToReview(`Auto-merge skipped: ${readiness.reason ?? 'merge readiness could not be confirmed'}`);
+  }
+
+  let mergeResult: Awaited<ReturnType<AgentManager['mergeLocal']>>;
+  try {
+    mergeResult = await agentManager.mergeLocal(task);
+  } catch (err: unknown) {
+    return moveToReview(`Auto-merge failed: ${errorMessage(err)}`);
+  }
+
+  const cleanup = agentManager.removeWorktree(task);
+  if (cleanup.status === 'blocked') {
+    return moveToReview(
+      `Auto-merge succeeded into ${mergeResult.baseBranch}, but worktree cleanup was blocked: ${cleanup.reason}. The task remains in Review for recovery.`,
+    );
+  }
+
+  const done = await repo.update(taskId, {
+    agentStatus: 'complete',
+    columnId: 'done',
+    completedAt,
+    worktreePath: undefined,
+  });
+  if (!done) return undefined;
+
+  broadcastTaskUpdate(done);
+  await emitTaskLifecycleEvent(
+    repo,
+    done,
+    'output',
+    `Auto-merged ${task.branchName} into ${mergeResult.baseBranch}, cleaned the worktree, and moved the task to Done.`,
+    { agentType: task.agentType, command: 'git merge' },
+  );
+  return done;
 }
 
 export function makeWorktreeCallback(repo: TaskRepository, taskId: string): (worktreePath: string) => void {
@@ -583,7 +689,7 @@ export async function startAgentForTask(
   const updated = await repo.update(task.id, updates);
   if (updated) {
     broadcastTaskUpdate(updated);
-    const onStatusChange = makeStatusCallback(repo, task.id);
+    const onStatusChange = makeStatusCallback(repo, task.id, agentManager, updated);
     agentManager.startAgent(
       updated,
       async (status) => {

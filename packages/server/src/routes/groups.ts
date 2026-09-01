@@ -483,7 +483,7 @@ async function startGroupExecution(
   agentManager.startGroup(
     group,
     pendingChildren,
-    (task: Task) => makeStatusCallback(taskRepo, task.id),
+    (task: Task) => makeStatusCallback(taskRepo, task.id, agentManager, task),
     (task: Task) => makeWorktreeCallback(taskRepo, task.id),
     onChildComplete,
   );
