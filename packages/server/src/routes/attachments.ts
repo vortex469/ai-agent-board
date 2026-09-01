@@ -16,8 +16,6 @@ const ALLOWED_MIME_TYPES = new Set([
   'image/png', 'image/jpeg', 'image/gif', 'image/webp',
 ]);
 
-fs.mkdirSync(UPLOADS_DIR, { recursive: true });
-
 export type { AttachmentStore } from '../repositories/attachment-types.js';
 
 // ─── Multer config ──────────────────────────────────────────────────

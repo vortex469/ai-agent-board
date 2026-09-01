@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { execFileSync } from 'child_process';
+import type { Task } from '../types.js';
 import type { TaskRepository } from '../repositories/types.js';
 import type { AgentManager } from '../services/agent-manager.js';
 import { asyncHandler, paramId, broadcastTaskUpdate } from './helpers.js';
@@ -93,14 +94,28 @@ export function createGitRouter(repo: TaskRepository, agentManager: AgentManager
     }
     try {
       const result = await agentManager.mergeLocal(task);
-      // Clean up worktree after successful merge — branch is merged, directory is no longer needed
+
+      // A successful local merge completes the board lifecycle. Cleanup remains
+      // fail-closed: a blocked worktree is retained for recovery and startup
+      // reconciliation, but the successfully merged task still advances to Done.
+      const updates: Partial<Task> = {
+        columnId: 'done',
+        completedAt: Date.now(),
+      };
+
       if (task.worktreePath) {
         const cleanup = agentManager.removeWorktree(task);
         if (cleanup.status !== 'blocked') {
-          const updated = await repo.update(id, { worktreePath: undefined });
-          if (updated) broadcastTaskUpdate(updated);
+          updates.worktreePath = undefined;
         }
       }
+
+      const updated = await repo.update(id, updates);
+      if (!updated) {
+        res.status(500).json({ error: 'merge succeeded but failed to update task state' });
+        return;
+      }
+      broadcastTaskUpdate(updated);
       res.json(result);
     } catch (err: unknown) {
       res.status(500).json({ error: err instanceof Error ? err.message : 'Failed to merge' });

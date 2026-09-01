@@ -46,6 +46,7 @@ async function withRoutes(
   const manager = {
     isRunning: () => false,
     removeWorktree: () => cleanup,
+    mergeLocal: async () => ({ merged: true as const, baseBranch: 'main' }),
     clearEvents: () => {},
   } as unknown as AgentManager;
 
@@ -105,6 +106,38 @@ test('dirty cleanup blocks delete and manual cleanup without losing task state',
     assert.equal(state.task?.columnId, 'review');
     assert.equal(state.task?.worktreePath, baseTask.worktreePath);
   });
+});
+
+test('successful local merge moves Review to Done and clears a clean worktree', async () => {
+  await withRoutes({ status: 'removed' }, async (baseUrl, state) => {
+    const response = await fetch(`${baseUrl}/api/tasks/task-1/merge-local`, { method: 'POST' });
+    assert.equal(response.status, 200);
+
+    const body = await response.json();
+    assert.equal(body.merged, true);
+    assert.equal(body.baseBranch, 'main');
+
+    assert.equal(state.task?.columnId, 'done');
+    assert.equal(typeof state.task?.completedAt, 'number');
+    assert.equal(state.task?.worktreePath, undefined);
+  });
+});
+
+test('successful local merge moves to Done but retains a blocked worktree for recovery', async () => {
+  await withRoutes(
+    { status: 'blocked', reason: 'Worktree has uncommitted, untracked, or non-disposable ignored files.' },
+    async (baseUrl, state) => {
+      const response = await fetch(`${baseUrl}/api/tasks/task-1/merge-local`, { method: 'POST' });
+      assert.equal(response.status, 200);
+
+      const body = await response.json();
+      assert.equal(body.merged, true);
+
+      assert.equal(state.task?.columnId, 'done');
+      assert.equal(typeof state.task?.completedAt, 'number');
+      assert.equal(state.task?.worktreePath, baseTask.worktreePath);
+    },
+  );
 });
 
 test('archive, delete, and manual cleanup clear clean worktree state', async () => {
