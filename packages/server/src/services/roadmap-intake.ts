@@ -32,9 +32,10 @@ export function parseRoadmapText(input: unknown): RoadmapParseResult | string {
 
   const lines = text.split('\n');
   const versionBlocks = parseVersionBlocks(lines);
-  const blocks = versionBlocks.length >= 2 ? versionBlocks : parseListBlocks(lines);
+  const listBlocks = versionBlocks.length > 0 ? [] : parseListBlocks(lines);
+  const blocks = versionBlocks.length > 0 ? versionBlocks : listBlocks.length > 0 ? listBlocks : parsePlainTextBlock(lines);
 
-  if (blocks.length < 2) {
+  if (blocks.length === 0) {
     return 'Could not find clear task boundaries. Use version headings, bullets, or numbered items.';
   }
   if (blocks.length > ROADMAP_TASK_LIMIT) {
@@ -107,7 +108,7 @@ function parseListBlocks(lines: string[]): ParsedBlock[] {
     if (current) {
       if (!rawLine.trim()) {
         current.lines.push(rawLine);
-      } else if (/^\s{2,}\S/.test(rawLine)) {
+      } else {
         current.lines.push(rawLine);
       }
     }
@@ -115,6 +116,15 @@ function parseListBlocks(lines: string[]): ParsedBlock[] {
 
   if (current) blocks.push({ titleSeed: current.titleSeed, sourceText: trimBlankEdges(current.lines).join('\n') });
   return blocks.filter((block) => block.sourceText.trim().length > 0);
+}
+
+function parsePlainTextBlock(lines: string[]): ParsedBlock[] {
+  const trimmedLines = trimBlankEdges(lines);
+  const meaningfulLines = trimmedLines.filter((line) => line.trim());
+  if (meaningfulLines.length !== 1) return [];
+
+  const sourceText = meaningfulLines[0].trim();
+  return [{ titleSeed: sourceText, sourceText }];
 }
 
 function parseItemLine(line: string): string | null {
