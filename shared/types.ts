@@ -159,6 +159,25 @@ export interface ProjectPathValidation {
   warning?: string;
 }
 
+export interface RoadmapProposedTask {
+  order: number;
+  title: string;
+  description: string;
+  sourceText: string;
+}
+
+export interface RoadmapPreview {
+  project: {
+    id: string;
+    repoPath?: string;
+    defaultAgentType?: AgentType;
+    defaultPriority?: Priority;
+    defaultBaseBranch?: string;
+    defaultUseWorktree?: boolean;
+  };
+  tasks: RoadmapProposedTask[];
+}
+
 export type AgentEventType =
   | 'thinking'
   | 'tool_call'

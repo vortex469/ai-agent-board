@@ -9,6 +9,8 @@ export type {
   ProjectTaskCounts,
   ProjectConfig,
   ProjectPathValidation,
+  RoadmapPreview,
+  RoadmapProposedTask,
   CreateProjectRequest,
   UpdateProjectRequest,
   Task,

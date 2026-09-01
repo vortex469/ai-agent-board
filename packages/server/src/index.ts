@@ -15,6 +15,7 @@ import { createGroupsRouter } from './routes/groups.js';
 import { createAttachmentsRouter } from './routes/attachments.js';
 import { createProjectsRouter } from './routes/projects.js';
 import { createOrchestrationsRouter } from './routes/orchestrations.js';
+import { createRoadmapIntakeRouter } from './routes/roadmap-intake.js';
 import type { AttachmentStore } from './repositories/attachment-types.js';
 import { AgentManager } from './services/agent-manager.js';
 import { authMiddleware } from './middleware/auth.js';
@@ -115,6 +116,7 @@ const agentManager = new AgentManager();
 
   app.use('/api/projects', createProjectsRouter(projectRepo, taskRepo, groupRepo, agentManager));
   app.use('/api/orchestrations', createOrchestrationsRouter(taskRepo, projectRepo, agentManager));
+  app.use('/api/roadmap-intake', createRoadmapIntakeRouter(projectRepo));
   app.use('/api/tasks', createTaskRouter(taskRepo, agentManager, projectRepo));
   app.use('/api/tasks', createAgentRouter(taskRepo, agentManager, groupRepo, projectRepo));
   app.use('/api/tasks', createGitRouter(taskRepo, agentManager));

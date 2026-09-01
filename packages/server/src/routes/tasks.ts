@@ -107,10 +107,13 @@ export function createTaskRouter(repo: TaskRepository, agentManager: AgentManage
       taskDefs[i] = body;
     }
 
-    // Create all tasks
+    // Create all tasks. Stagger createdAt by 1ms so repository ordering remains
+    // deterministic for ordered batch/intake workflows.
     const created: Task[] = [];
-    for (const def of taskDefs) {
-      const task = buildTask(def);
+    const createdAtBase = Date.now();
+    for (let i = 0; i < taskDefs.length; i++) {
+      const def = taskDefs[i];
+      const task = buildTask({ ...def, createdAt: createdAtBase + i });
       await repo.create(task);
       broadcastTaskUpdate(task);
       created.push(task);

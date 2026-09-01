@@ -1,4 +1,4 @@
-const { mkdirSync, rmSync } = require('node:fs');
+const { existsSync, mkdirSync, rmSync } = require('node:fs');
 const { spawn } = require('node:child_process');
 const path = require('node:path');
 
@@ -27,7 +27,12 @@ rmSync(dbPath, { force: true });
 rmSync(agentboardHome, { recursive: true, force: true });
 mkdirSync(agentboardHome, { recursive: true });
 
-const child = spawn(isWindows ? 'npx tsx src/index.ts' : 'npx', isWindows ? [] : ['tsx', 'src/index.ts'], {
+const builtServer = path.join(repoRoot, 'packages', 'server', 'dist', 'index.js');
+const useBuiltServer = existsSync(builtServer);
+const command = useBuiltServer ? 'node' : (isWindows ? 'npx tsx src/index.ts' : 'npx');
+const args = useBuiltServer ? [builtServer] : (isWindows ? [] : ['tsx', 'src/index.ts']);
+
+const child = spawn(command, args, {
   cwd: path.join(repoRoot, 'packages', 'server'),
   env: {
     ...process.env,

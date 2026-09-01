@@ -13,6 +13,7 @@ import type {
   UpdateProjectRequest,
   ProjectPathValidation,
   ProjectConfig,
+  RoadmapPreview,
 } from '@/types';
 
 export interface TaskGroupWithChildren extends TaskGroup {
@@ -99,6 +100,12 @@ export const api = {
 
   createTask: (data: { title: string; description?: string; priority?: Priority; columnId?: ColumnId; agentType?: AgentType; repoPath?: string; branchName?: string; baseBranch?: string; useWorktree?: boolean; autoRun?: boolean; projectId?: string; timeoutMinutes?: number | null }) =>
     request<Task>('/tasks', { method: 'POST', body: JSON.stringify(data) }),
+
+  createTasksBatch: (tasks: { title: string; description?: string; priority?: Priority; columnId?: ColumnId; agentType?: AgentType; repoPath?: string; branchName?: string; baseBranch?: string; useWorktree?: boolean; autoRun?: boolean; projectId?: string; timeoutMinutes?: number | null }[]) =>
+    request<{ tasks: Task[] }>('/tasks/batch', { method: 'POST', body: JSON.stringify({ tasks }) }),
+
+  previewRoadmapIntake: (data: { text: string; projectId?: string }) =>
+    request<RoadmapPreview>('/roadmap-intake/preview', { method: 'POST', body: JSON.stringify(data) }),
 
   updateTask: (id: string, data: Partial<Task>) =>
     request<Task>(`/tasks/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),

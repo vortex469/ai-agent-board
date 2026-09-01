@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { ArrowLeft, Kanban, Search, Archive, ArrowUpDown, Filter, Plus, X, Menu } from 'lucide-react';
+import { ArrowLeft, Kanban, Search, Archive, ArrowUpDown, Filter, Plus, X, Menu, ClipboardList } from 'lucide-react';
 import { ThemeToggle } from './ThemeToggle';
 import { FilterChips, type StatusFilter } from './FilterChips';
 import { useConnectionStatus } from '@/hooks/useConnectionStatus';
@@ -26,6 +26,7 @@ interface HeaderProps {
   onClearFilters: () => void;
   onNewTask: () => void;
   onNewGroup: () => void;
+  onRoadmapIntake: () => void;
   title?: string;
   onBackToProjects?: () => void;
 }
@@ -37,7 +38,7 @@ const SORT_OPTIONS: { value: SortBy; label: string }[] = [
   { value: 'status', label: 'Status' },
 ];
 
-export function Header({ theme, toggleTheme, searchQuery, onSearchChange, showArchived, onToggleArchived, sortBy, sortDir, onSortByChange, onSortDirChange, activeAgentTypes, activeStatuses, onToggleAgentType, onToggleStatus, onClearFilters, onNewTask, onNewGroup, title = 'AI Agent Board', onBackToProjects }: HeaderProps) {
+export function Header({ theme, toggleTheme, searchQuery, onSearchChange, showArchived, onToggleArchived, sortBy, sortDir, onSortByChange, onSortDirChange, activeAgentTypes, activeStatuses, onToggleAgentType, onToggleStatus, onClearFilters, onNewTask, onNewGroup, onRoadmapIntake, title = 'AI Agent Board', onBackToProjects }: HeaderProps) {
   const [showFilters, setShowFilters] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const mobileMenuSearchRef = useRef<HTMLInputElement>(null);
@@ -114,6 +115,14 @@ export function Header({ theme, toggleTheme, searchQuery, onSearchChange, showAr
             >
               <Plus className="h-3.5 w-3.5 shrink-0" />
               <span>New Group</span>
+            </button>
+            <button
+              onClick={onRoadmapIntake}
+              className="flex items-center gap-1.5 h-8 rounded-lg border border-zinc-700 bg-zinc-800 px-3 text-xs font-medium text-zinc-300 transition-colors hover:bg-zinc-700 hover:text-zinc-100"
+              aria-label="Roadmap Intake"
+            >
+              <ClipboardList className="h-3.5 w-3.5 shrink-0" />
+              <span>Roadmap Intake</span>
             </button>
           </div>
 
@@ -229,7 +238,7 @@ export function Header({ theme, toggleTheme, searchQuery, onSearchChange, showAr
             />
           </div>
 
-          {/* New Task + New Group */}
+          {/* New Task + New Group + Roadmap */}
           <div className="flex gap-2">
             <button
               onClick={() => { onNewTask(); setMobileMenuOpen(false); }}
@@ -244,6 +253,13 @@ export function Header({ theme, toggleTheme, searchQuery, onSearchChange, showAr
             >
               <Plus className="h-3.5 w-3.5 shrink-0" />
               New Group
+            </button>
+            <button
+              onClick={() => { onRoadmapIntake(); setMobileMenuOpen(false); }}
+              className="flex flex-1 items-center justify-center gap-1.5 h-11 rounded-lg border border-zinc-700 bg-zinc-800 text-xs font-medium text-zinc-300 transition-colors hover:bg-zinc-700 hover:text-zinc-100"
+            >
+              <ClipboardList className="h-3.5 w-3.5 shrink-0" />
+              Roadmap
             </button>
           </div>
 

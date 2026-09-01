@@ -55,6 +55,20 @@ export function useTasks(projectId = 'default') {
     }
   }, [projectId]);
 
+  const addTasksBatch = useCallback(async (taskDefs: (Omit<Task, 'id' | 'createdAt' | 'agentStatus'> & { autoRun?: boolean })[]) => {
+    try {
+      const result = await api.createTasksBatch(taskDefs.map((task) => ({ ...task, projectId: task.projectId ?? projectId })));
+      setTasks((prev) => {
+        const existing = new Set(prev.map((task) => task.id));
+        return [...prev, ...result.tasks.filter((task) => !existing.has(task.id))];
+      });
+      return result.tasks;
+    } catch (err) {
+      setError(`Failed to create roadmap tasks: ${(err as Error).message}`);
+      return undefined;
+    }
+  }, [projectId]);
+
   const runTask = useCallback(async (id: string) => {
     try {
       const updated = await api.runTask(id);
@@ -196,5 +210,5 @@ export function useTasks(projectId = 'default') {
 
   const clearError = useCallback(() => setError(null), []);
 
-  return { tasks, error, clearError, showArchived, setShowArchived, addTask, updateTask, moveTask, runTask, stopTask, deleteTask, archiveTask, unarchiveTask, configureAndRunTask, createPR, mergeLocal, cleanupWorktree };
+  return { tasks, error, clearError, showArchived, setShowArchived, addTask, addTasksBatch, updateTask, moveTask, runTask, stopTask, deleteTask, archiveTask, unarchiveTask, configureAndRunTask, createPR, mergeLocal, cleanupWorktree };
 }

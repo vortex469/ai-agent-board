@@ -16,6 +16,7 @@ import type { StatusFilter } from '@/components/FilterChips';
 import { statusFilterToStatuses } from '@/components/FilterChips';
 import { Board } from '@/components/Board';
 import { TaskDialog } from '@/components/TaskDialog';
+import { RoadmapIntakeDialog } from '@/components/RoadmapIntakeDialog';
 import { TaskGroupDialog } from '@/components/TaskGroupDialog';
 import { GroupPanel } from '@/components/GroupPanel';
 import { AgentPanel } from '@/components/AgentPanel';
@@ -60,9 +61,10 @@ function BoardPage({
     defaultBaseBranch: project.defaultBaseBranch,
     defaultUseWorktree: project.defaultUseWorktree,
   };
-  const { tasks, error, clearError, showArchived, setShowArchived, addTask, updateTask, moveTask, runTask, stopTask, deleteTask, archiveTask, unarchiveTask, configureAndRunTask, createPR, mergeLocal, cleanupWorktree } = useTasks(project.id);
+  const { tasks, error, clearError, showArchived, setShowArchived, addTask, addTasksBatch, updateTask, moveTask, runTask, stopTask, deleteTask, archiveTask, unarchiveTask, configureAndRunTask, createPR, mergeLocal, cleanupWorktree } = useTasks(project.id);
   const { groups, createGroup, runGroup, stopGroup, deleteGroup, updateGroup, refreshGroup } = useTaskGroups(project.id);
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [roadmapDialogOpen, setRoadmapDialogOpen] = useState(false);
   const [groupDialogOpen, setGroupDialogOpen] = useState(false);
   const [editingGroup, setEditingGroup] = useState<TaskGroupWithChildren | null>(null);
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
@@ -242,6 +244,10 @@ function BoardPage({
     setGroupDialogOpen(true);
   }, []);
 
+  const handleOpenRoadmapDialog = useCallback(() => {
+    setRoadmapDialogOpen(true);
+  }, []);
+
   const handleCloseDialog = useCallback(() => {
     setDialogOpen(false);
     setEditingTask(null);
@@ -343,6 +349,8 @@ function BoardPage({
       setDeletingGroupId(null);
     } else if (groupDialogOpen) {
       setGroupDialogOpen(false);
+    } else if (roadmapDialogOpen) {
+      setRoadmapDialogOpen(false);
     } else if (dialogOpen) {
       setDialogOpen(false);
       setEditingTask(null);
@@ -352,11 +360,11 @@ function BoardPage({
     } else if (selectedTaskId) {
       setSelectedTaskId(null);
     }
-  }, [deletingTask, deletingGroupId, groupDialogOpen, dialogOpen, selectedGroupId, selectedTaskId]);
+  }, [deletingTask, deletingGroupId, groupDialogOpen, roadmapDialogOpen, dialogOpen, selectedGroupId, selectedTaskId]);
 
   const isAnyOpen = useCallback(
-    () => dialogOpen || groupDialogOpen || selectedTaskId !== null || selectedGroupId !== null || deletingTask !== null || deletingGroupId !== null,
-    [dialogOpen, groupDialogOpen, selectedTaskId, selectedGroupId, deletingTask, deletingGroupId]
+    () => dialogOpen || groupDialogOpen || roadmapDialogOpen || selectedTaskId !== null || selectedGroupId !== null || deletingTask !== null || deletingGroupId !== null,
+    [dialogOpen, groupDialogOpen, roadmapDialogOpen, selectedTaskId, selectedGroupId, deletingTask, deletingGroupId]
   );
 
   useKeyboardShortcuts({
@@ -395,6 +403,7 @@ function BoardPage({
         onClearFilters={handleClearFilters}
         onNewTask={handleOpenDialog}
         onNewGroup={handleOpenGroupDialog}
+        onRoadmapIntake={handleOpenRoadmapDialog}
       />
 
       <main className="flex-1 overflow-hidden">
@@ -439,6 +448,17 @@ function BoardPage({
         onEditSubmit={handleEditGroupSubmit}
         lockedRepoPath={lockedRepoPath}
         projectDefaults={projectDefaults}
+      />
+
+      <RoadmapIntakeDialog
+        open={roadmapDialogOpen}
+        onClose={() => setRoadmapDialogOpen(false)}
+        project={project}
+        onCreateTasks={(taskDefs) => addTasksBatch(taskDefs.map((task) => ({
+          ...task,
+          projectId: project.id,
+          repoPath: lockedRepoPath || task.repoPath,
+        })))}
       />
 
       <AgentPanel task={selectedTask} onClose={handleClosePanel} onRun={handleRunWithConfig} onStop={stopTask} onCreatePR={createPR} onMergeLocal={mergeLocal} onCleanupWorktree={cleanupWorktree} onReconfigureRetry={handleReconfigureRetry} theme={theme} />
