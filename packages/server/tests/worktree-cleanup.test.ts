@@ -54,7 +54,17 @@ function fixture(): { repoPath: string; worktreePath: string; branchName: string
   git(['config', 'user.email', 'agentboard-tests@example.invalid'], repoPath);
   git(['config', 'user.name', 'Agent Board Tests'], repoPath);
   writeFileSync(path.join(repoPath, 'README.md'), 'base\n');
-  writeFileSync(path.join(repoPath, '.gitignore'), '.env\nnode_modules/\n');
+  writeFileSync(path.join(repoPath, '.gitignore'), [
+    '.env',
+    'node_modules/',
+    'dist/',
+    'coverage/',
+    'test-results/',
+    'playwright-report/',
+    'ignored-data/',
+    'ignored-file.log',
+    '',
+  ].join('\n'));
   git(['add', 'README.md', '.gitignore'], repoPath);
   git(['commit', '-m', 'base'], repoPath);
   git(['worktree', 'add', '-b', branchName, worktreePath, 'main'], repoPath);
@@ -156,6 +166,44 @@ test('cleanup permits generated dependencies but blocks ignored files that may c
   } finally {
     generated.dispose();
     valuable.dispose();
+  }
+});
+
+test('cleanup permits nested ignored build artifacts but blocks unrelated ignored files', () => {
+  const generated = fixture();
+  const unsafeDirectory = fixture();
+  const unsafeFile = fixture();
+  try {
+    for (const filePath of [
+      ['packages', 'client', 'dist', 'assets', 'index.js'],
+      ['shared', 'dist', 'index.js'],
+      ['packages', 'client', 'coverage', 'report.html'],
+      ['packages', 'e2e', 'test-results', 'run', 'trace.zip'],
+      ['packages', 'e2e', 'playwright-report', 'index.html'],
+    ]) {
+      const absolutePath = path.join(generated.worktreePath, ...filePath);
+      mkdirSync(path.dirname(absolutePath), { recursive: true });
+      writeFileSync(absolutePath, 'generated\n');
+    }
+    assert.deepEqual(cleanupTaskWorktree(generated.task), { status: 'removed' });
+
+    const ignoredDirectoryFile = path.join(unsafeDirectory.worktreePath, 'ignored-data', 'payload.db');
+    mkdirSync(path.dirname(ignoredDirectoryFile), { recursive: true });
+    writeFileSync(ignoredDirectoryFile, 'keep\n');
+    const directoryResult = cleanupTaskWorktree(unsafeDirectory.task);
+    assert.equal(directoryResult.status, 'blocked');
+    assert.match(directoryResult.status === 'blocked' ? directoryResult.reason : '', /non-disposable ignored/i);
+    assert.equal(existsSync(ignoredDirectoryFile), true);
+
+    writeFileSync(path.join(unsafeFile.worktreePath, 'ignored-file.log'), 'keep\n');
+    const fileResult = cleanupTaskWorktree(unsafeFile.task);
+    assert.equal(fileResult.status, 'blocked');
+    assert.match(fileResult.status === 'blocked' ? fileResult.reason : '', /non-disposable ignored/i);
+    assert.equal(existsSync(path.join(unsafeFile.worktreePath, 'ignored-file.log')), true);
+  } finally {
+    generated.dispose();
+    unsafeDirectory.dispose();
+    unsafeFile.dispose();
   }
 });
 

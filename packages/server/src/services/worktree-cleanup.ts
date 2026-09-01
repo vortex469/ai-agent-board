@@ -92,10 +92,11 @@ function isDisposableIgnoredPath(value: string): boolean {
   const normalized = value.replace(/\\/g, '/').replace(/\/$/, '');
   const parts = normalized.split('/');
   const name = parts[parts.length - 1] ?? '';
+  const disposableDirectories = ['dist', 'coverage', 'test-results', 'playwright-report'];
   return parts.includes('node_modules')
     || parts.includes('__pycache__')
     || parts.includes('.pytest_cache')
-    || ['dist', 'coverage', 'test-results', 'playwright-report'].includes(name)
+    || parts.some((part) => disposableDirectories.includes(part))
     || name.endsWith('.tsbuildinfo')
     || name.endsWith('.pyc');
 }
