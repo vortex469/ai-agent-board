@@ -107,42 +107,128 @@ function processEntryDisappeared(error: unknown): boolean {
     && ((error as NodeJS.ErrnoException).code === 'ENOENT' || (error as NodeJS.ErrnoException).code === 'ESRCH');
 }
 
+function processEntryRestricted(error: unknown): boolean {
+  return !!error && typeof error === 'object' && 'code' in error
+    && ((error as NodeJS.ErrnoException).code === 'EACCES' || (error as NodeJS.ErrnoException).code === 'EPERM');
+}
+
+type LinkInspection = 'clear' | 'in-use' | 'restricted' | 'missing' | 'unknown';
+
+interface ProcessInspectionFs {
+  readdirSync(target: string): string[];
+  readlinkSync(target: string): string | Buffer;
+  realpathSync(target: string): string;
+}
+
+type ProcessInspectionExec = (
+  file: string,
+  args: string[],
+  options: { stdio: ['ignore', 'pipe', 'pipe']; timeout: number },
+) => string | Buffer;
+
+export interface WorktreeProcessInspectionOptions {
+  fs?: ProcessInspectionFs;
+  execFileSync?: ProcessInspectionExec;
+}
+
+function stripDeletedSuffix(value: string): string {
+  return value.endsWith(' (deleted)') ? value.slice(0, -' (deleted)'.length) : value;
+}
+
+function inspectProcessLink(linkPath: string, root: string, fsImpl: ProcessInspectionFs): LinkInspection {
+  try {
+    const target = stripDeletedSuffix(fsImpl.readlinkSync(linkPath).toString());
+    if (path.isAbsolute(target) && isWithin(normalizedPath(path.resolve(target)), normalizedPath(root))) {
+      return 'in-use';
+    }
+  } catch (error) {
+    if (processEntryDisappeared(error)) return 'missing';
+    if (processEntryRestricted(error)) return 'restricted';
+    return 'unknown';
+  }
+
+  try {
+    if (isWithin(fsImpl.realpathSync(linkPath), root)) return 'in-use';
+    return 'clear';
+  } catch (error) {
+    if (processEntryDisappeared(error)) return 'missing';
+    if (processEntryRestricted(error)) return 'restricted';
+    return 'unknown';
+  }
+}
+
+function parseLsofProcessUseOutput(output: unknown): WorktreeProcessUse | undefined {
+  const text = Buffer.isBuffer(output) ? output.toString() : String(output ?? '');
+  return /^p\d+$/m.test(text) ? 'in-use' : undefined;
+}
+
+function inspectWorktreeProcessUseWithLsof(root: string, execImpl: ProcessInspectionExec): WorktreeProcessUse {
+  try {
+    const output = execImpl('lsof', ['-w', '-F', 'p', '+D', root], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 5000,
+    });
+    return parseLsofProcessUseOutput(output) ?? 'clear';
+  } catch (error) {
+    const outputResult = parseLsofProcessUseOutput((error as { stdout?: unknown }).stdout);
+    if (outputResult) return outputResult;
+    const execError = error as NodeJS.ErrnoException & { killed?: boolean; signal?: string; status?: number };
+    if (execError.code === 'ENOENT' || execError.killed || execError.signal) return 'unknown';
+    const stderr = (error as { stderr?: unknown }).stderr;
+    const stderrText = Buffer.isBuffer(stderr) ? stderr.toString() : String(stderr ?? '');
+    if (stderrText.trim()) return 'unknown';
+    return execError.status === 1 ? 'clear' : 'unknown';
+  }
+}
+
 export function inspectWorktreeProcessUse(
   worktreePath: string,
   platform = process.platform,
   procRoot = '/proc',
+  options: WorktreeProcessInspectionOptions = {},
 ): WorktreeProcessUse {
   if (platform !== 'linux') return 'unknown';
+  const fsImpl: ProcessInspectionFs = options.fs ?? {
+    readdirSync: (target) => fs.readdirSync(target),
+    readlinkSync: (target) => fs.readlinkSync(target),
+    realpathSync: (target) => fs.realpathSync(target),
+  };
+  const execImpl: ProcessInspectionExec = options.execFileSync ?? ((file, args, execOptions) => execFileSync(file, args, execOptions));
   let processes: string[];
+  let root: string;
   try {
-    processes = fs.readdirSync(procRoot).filter((entry) => /^\d+$/.test(entry));
+    root = fsImpl.realpathSync(worktreePath);
+    processes = fsImpl.readdirSync(procRoot).filter((entry) => /^\d+$/.test(entry));
   } catch {
     return 'unknown';
   }
-  const root = fs.realpathSync(worktreePath);
+  let scanWasIncomplete = false;
   for (const pid of processes) {
     for (const link of [`${procRoot}/${pid}/cwd`, `${procRoot}/${pid}/exe`]) {
-      try {
-        if (isWithin(fs.realpathSync(link), root)) return 'in-use';
-      } catch (error) {
-        if (!processEntryDisappeared(error)) return 'unknown';
-      }
+      const result = inspectProcessLink(link, root, fsImpl);
+      if (result === 'in-use') return 'in-use';
+      if (result === 'restricted') scanWasIncomplete = true;
+      if (result === 'unknown') return 'unknown';
     }
     let descriptors: string[];
     try {
-      descriptors = fs.readdirSync(`${procRoot}/${pid}/fd`);
+      descriptors = fsImpl.readdirSync(`${procRoot}/${pid}/fd`);
     } catch (error) {
       if (processEntryDisappeared(error)) continue;
+      if (processEntryRestricted(error)) {
+        scanWasIncomplete = true;
+        continue;
+      }
       return 'unknown';
     }
     for (const descriptor of descriptors) {
-      try {
-        if (isWithin(fs.realpathSync(`${procRoot}/${pid}/fd/${descriptor}`), root)) return 'in-use';
-      } catch (error) {
-        if (!processEntryDisappeared(error)) return 'unknown';
-      }
+      const result = inspectProcessLink(`${procRoot}/${pid}/fd/${descriptor}`, root, fsImpl);
+      if (result === 'in-use') return 'in-use';
+      if (result === 'restricted') scanWasIncomplete = true;
+      if (result === 'unknown') return 'unknown';
     }
   }
+  if (scanWasIncomplete) return inspectWorktreeProcessUseWithLsof(root, execImpl);
   return 'clear';
 }
 

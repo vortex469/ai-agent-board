@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import fs, { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -15,6 +15,34 @@ import {
 
 function git(args: string[], cwd: string): string {
   return execFileSync('git', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim();
+}
+
+function errno(code: string): NodeJS.ErrnoException {
+  return Object.assign(new Error(code), { code });
+}
+
+function procFixture(): { procRoot: string; dispose(): void } {
+  const procRoot = mkdtempSync(path.join(os.tmpdir(), 'agentboard-proc-'));
+  return {
+    procRoot,
+    dispose() {
+      rmSync(procRoot, { recursive: true, force: true });
+    },
+  };
+}
+
+function addProcEntry(
+  procRoot: string,
+  pid: string,
+  options: { cwd?: string; exe?: string; fds?: string[] } = {},
+): void {
+  const pidPath = path.join(procRoot, pid);
+  mkdirSync(path.join(pidPath, 'fd'), { recursive: true });
+  symlinkSync(options.cwd ?? '/', path.join(pidPath, 'cwd'));
+  symlinkSync(options.exe ?? process.execPath, path.join(pidPath, 'exe'));
+  for (const [index, target] of (options.fds ?? []).entries()) {
+    symlinkSync(target, path.join(pidPath, 'fd', String(index)));
+  }
 }
 
 function fixture(): { repoPath: string; worktreePath: string; branchName: string; task: Task; dispose(): void } {
@@ -141,10 +169,162 @@ test('process-use inspection fails closed when the platform or process table can
   }
 });
 
+test('process-use inspection reports clear for an ordinary clean proc table', () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'agentboard-process-check-'));
+  const proc = procFixture();
+  try {
+    addProcEntry(proc.procRoot, '100');
+    assert.equal(inspectWorktreeProcessUse(root, 'linux', proc.procRoot), 'clear');
+  } finally {
+    proc.dispose();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('process-use inspection detects an open descriptor inside the worktree', () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'agentboard-process-check-'));
+  const proc = procFixture();
+  try {
+    const heldFile = path.join(root, 'held.txt');
+    writeFileSync(heldFile, 'held\n');
+    addProcEntry(proc.procRoot, '100', { fds: [heldFile] });
+    assert.equal(inspectWorktreeProcessUse(root, 'linux', proc.procRoot), 'in-use');
+  } finally {
+    proc.dispose();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('process-use inspection uses lsof fallback for inaccessible or transient unrelated proc entries', () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'agentboard-process-check-'));
+  const proc = procFixture();
+  let lsofCalls = 0;
+  try {
+    addProcEntry(proc.procRoot, '100');
+    addProcEntry(proc.procRoot, '101');
+    const result = inspectWorktreeProcessUse(root, 'linux', proc.procRoot, {
+      fs: {
+        readdirSync: (target) => {
+          const targetPath = String(target);
+          if (targetPath.endsWith(`${path.sep}100${path.sep}fd`)) throw errno('EACCES');
+          if (targetPath.endsWith(`${path.sep}101${path.sep}fd`)) throw errno('ENOENT');
+          return fs.readdirSync(target) as string[];
+        },
+        readlinkSync: (target) => {
+          const targetPath = String(target);
+          if (targetPath.endsWith(`${path.sep}100${path.sep}cwd`)) throw errno('EACCES');
+          if (targetPath.endsWith(`${path.sep}101${path.sep}cwd`)) throw errno('ENOENT');
+          return fs.readlinkSync(target);
+        },
+        realpathSync: fs.realpathSync,
+      },
+      execFileSync: ((command, args) => {
+        lsofCalls += 1;
+        assert.equal(command, 'lsof');
+        assert.deepEqual(args, ['-w', '-F', 'p', '+D', fs.realpathSync(root)]);
+        return Buffer.from('');
+      }) as typeof execFileSync,
+    });
+
+    assert.equal(result, 'clear');
+    assert.equal(lsofCalls, 1);
+  } finally {
+    proc.dispose();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('process-use inspection preserves in-use detection from lsof fallback', () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'agentboard-process-check-'));
+  const proc = procFixture();
+  try {
+    addProcEntry(proc.procRoot, '100');
+    const result = inspectWorktreeProcessUse(root, 'linux', proc.procRoot, {
+      fs: {
+        readdirSync: (target) => {
+          const targetPath = String(target);
+          if (targetPath.endsWith(`${path.sep}100${path.sep}fd`)) throw errno('EACCES');
+          return fs.readdirSync(target) as string[];
+        },
+        readlinkSync: (target) => {
+          const targetPath = String(target);
+          if (targetPath.endsWith(`${path.sep}100${path.sep}cwd`)) throw errno('EACCES');
+          return fs.readlinkSync(target);
+        },
+        realpathSync: fs.realpathSync,
+      },
+      execFileSync: (() => Buffer.from('p123\n')) as typeof execFileSync,
+    });
+
+    assert.equal(result, 'in-use');
+  } finally {
+    proc.dispose();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('process-use inspection fails closed when proc scan is incomplete and lsof is unavailable', () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'agentboard-process-check-'));
+  const proc = procFixture();
+  try {
+    addProcEntry(proc.procRoot, '100');
+    const result = inspectWorktreeProcessUse(root, 'linux', proc.procRoot, {
+      fs: {
+        readdirSync: (target) => {
+          const targetPath = String(target);
+          if (targetPath.endsWith(`${path.sep}100${path.sep}fd`)) throw errno('EACCES');
+          return fs.readdirSync(target) as string[];
+        },
+        readlinkSync: (target) => {
+          const targetPath = String(target);
+          if (targetPath.endsWith(`${path.sep}100${path.sep}cwd`)) throw errno('EACCES');
+          return fs.readlinkSync(target);
+        },
+        realpathSync: fs.realpathSync,
+      },
+      execFileSync: (() => {
+        throw errno('ENOENT');
+      }) as typeof execFileSync,
+    });
+
+    assert.equal(result, 'unknown');
+  } finally {
+    proc.dispose();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('cleanup blocks while a process is using the worktree', async () => {
   if (process.platform !== 'linux') return;
   const f = fixture();
   const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 10_000)'], { cwd: f.worktreePath });
+  await new Promise<void>((resolve, reject) => {
+    child.once('spawn', resolve);
+    child.once('error', reject);
+  });
+  try {
+    const result = cleanupTaskWorktree(f.task);
+    assert.equal(result.status, 'blocked');
+    assert.match(result.status === 'blocked' ? result.reason : '', /running process/i);
+    assert.equal(existsSync(f.worktreePath), true);
+  } finally {
+    child.kill();
+    f.dispose();
+  }
+});
+
+test('cleanup blocks while a process has an open descriptor inside the worktree', async () => {
+  if (process.platform !== 'linux') return;
+  const f = fixture();
+  const heldFile = path.join(f.worktreePath, 'held.txt');
+  writeFileSync(heldFile, 'held\n');
+  git(['add', 'held.txt'], f.worktreePath);
+  git(['commit', '-m', 'add held file'], f.worktreePath);
+  const child = spawn(process.execPath, [
+    '-e',
+    'const fs = require("fs"); fs.openSync(process.argv[1], "r"); setTimeout(() => {}, 10_000);',
+    heldFile,
+  ], { cwd: os.tmpdir() });
   await new Promise<void>((resolve, reject) => {
     child.once('spawn', resolve);
     child.once('error', reject);
