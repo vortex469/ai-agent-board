@@ -130,7 +130,7 @@ export const api = {
     request<{ merged: boolean; baseBranch: string }>(`/tasks/${id}/merge-local`, { method: 'POST' }),
 
   getGitInfo: (id: string) =>
-    request<{ hasRemote: boolean }>(`/tasks/${id}/git-info`),
+    request<{ hasRemote: boolean; mergeReady?: boolean; mergeBlockedReason?: string }>(`/tasks/${id}/git-info`),
 
   sendMessage: (id: string, message: string, attachmentIds?: string[]) =>
     request<{ success: boolean }>(`/tasks/${id}/message`, { method: 'POST', body: JSON.stringify({ message, attachmentIds }) }),

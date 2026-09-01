@@ -314,7 +314,7 @@ export class AgentManager {
     try {
       const out = execFileSync('git', ['worktree', 'list', '--porcelain'], {
         cwd: repoPath,
-        stdio: 'pipe',
+        stdio: ['ignore', 'pipe', 'pipe'],
       }).toString();
       const norm = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
       const target = norm(worktreePath);
@@ -329,6 +329,100 @@ export class AgentManager {
       /* fall through — treat as not reusable */
     }
     return false;
+  }
+
+  private branchExists(repoPath: string, branchName: string): boolean {
+    try {
+      execFileSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branchName}`], {
+        cwd: repoPath,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private verifyTaskWorktree(task: Task): string {
+    if (!task.repoPath || !task.branchName || !task.worktreePath) {
+      throw new Error('Task has no worktree, repo path, or branch configured');
+    }
+    const resolvedRepo = path.resolve(task.repoPath);
+    const resolvedWorktree = path.resolve(task.worktreePath);
+    if (resolvedRepo === resolvedWorktree) {
+      throw new Error('Refusing to use the main repository checkout as a task worktree');
+    }
+    if (!fs.existsSync(resolvedWorktree)) {
+      throw new Error('Task worktree directory is missing');
+    }
+    if (!this.worktreeRegisteredForBranch(resolvedRepo, resolvedWorktree, task.branchName)) {
+      throw new Error('Task worktree is not registered on the expected branch');
+    }
+
+    const topLevel = execFileSync('git', ['rev-parse', '--show-toplevel'], {
+      cwd: resolvedWorktree,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).toString().trim();
+    const worktreeCommon = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], {
+      cwd: resolvedWorktree,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).toString().trim();
+    const repoCommon = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], {
+      cwd: resolvedRepo,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).toString().trim();
+    if (
+      path.resolve(topLevel) !== fs.realpathSync(resolvedWorktree) ||
+      path.resolve(worktreeCommon) !== path.resolve(repoCommon)
+    ) {
+      throw new Error('Task worktree identity does not match its repository');
+    }
+    return resolvedWorktree;
+  }
+
+  private ensureNoUncommittedWork(task: Task): void {
+    if (!task.worktreePath) return;
+    const worktreePath = this.verifyTaskWorktree(task);
+    const status = execFileSync('git', ['status', '--porcelain=v1', '-z', '--untracked-files=all'], {
+      cwd: worktreePath,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).toString();
+    if (status.length > 0) {
+      throw new Error('Worktree has uncommitted or untracked changes. Commit, discard, or rerun the task before merging or creating a PR.');
+    }
+  }
+
+  getMergeReadiness(task: Task): { ready: boolean; reason?: string } {
+    try {
+      this.ensureNoUncommittedWork(task);
+      return { ready: true };
+    } catch (err: unknown) {
+      return { ready: false, reason: errorMessage(err) };
+    }
+  }
+
+  private commitWorktreeChanges(task: Task): { committed: boolean; commit?: string } {
+    const worktreePath = this.verifyTaskWorktree(task);
+    execFileSync('git', ['add', '-A'], { cwd: worktreePath, stdio: ['ignore', 'pipe', 'pipe'] });
+    try {
+      execFileSync('git', ['diff', '--cached', '--quiet', '--exit-code'], {
+        cwd: worktreePath,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      return { committed: false };
+    } catch {
+      const safeTitle = task.title.replace(/\s+/g, ' ').replace(/[^\x20-\x7E]/g, '').trim();
+      const subject = `Agent Board: ${safeTitle || task.id}`.slice(0, 72);
+      execFileSync('git', ['commit', '-m', subject, '-m', `Automated commit for Agent Board task ${task.id}.`], {
+        cwd: worktreePath,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      const commit = execFileSync('git', ['rev-parse', '--short', 'HEAD'], {
+        cwd: worktreePath,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }).toString().trim();
+      return { committed: true, commit };
+    }
   }
 
   setupWorktree(task: Task): string | undefined {
@@ -353,7 +447,7 @@ export class AgentManager {
     // Clear stale worktree records (e.g. dirs deleted out from under git) so a
     // fresh add for this branch isn't blocked by a dangling registration.
     try {
-      execFileSync('git', ['worktree', 'prune'], { cwd: task.repoPath, stdio: 'pipe' });
+      execFileSync('git', ['worktree', 'prune'], { cwd: task.repoPath, stdio: ['ignore', 'pipe', 'pipe'] });
     } catch {
       /* best effort */
     }
@@ -361,28 +455,26 @@ export class AgentManager {
     const worktreePath = fs.mkdtempSync(path.join(os.tmpdir(), `agentboard-${task.id}-`));
     const baseBranch = task.baseBranch || 'main';
 
+    const branchExists = this.branchExists(task.repoPath, task.branchName);
+
     try {
       execFileSync(
-        'git', ['worktree', 'add', '-b', task.branchName, worktreePath, baseBranch],
-        { cwd: task.repoPath, stdio: 'pipe' },
+        'git',
+        branchExists
+          ? ['worktree', 'add', worktreePath, task.branchName]
+          : ['worktree', 'add', '-b', task.branchName, worktreePath, baseBranch],
+        { cwd: task.repoPath, stdio: ['ignore', 'pipe', 'pipe'] },
       );
-      console.log(`[worktree] created at ${worktreePath} from ${baseBranch}`);
+      console.log(branchExists
+        ? `[worktree] attached existing branch ${task.branchName} at ${worktreePath}`
+        : `[worktree] created at ${worktreePath} from ${baseBranch}`);
       return worktreePath;
-    } catch {
-      try {
-        execFileSync(
-          'git', ['worktree', 'add', worktreePath, task.branchName],
-          { cwd: task.repoPath, stdio: 'pipe' },
-        );
-        console.log(`[worktree] attached existing branch ${task.branchName} at ${worktreePath}`);
-        return worktreePath;
-      } catch (err2: unknown) {
-        console.error(`[worktree] failed:`, errorMessage(err2));
-        if (!this.worktreeRegisteredForBranch(task.repoPath, worktreePath, task.branchName)) {
-          try { fs.rmSync(worktreePath, { recursive: true, force: true }); } catch { /* best effort */ }
-        }
-        throw new Error(`Failed to create worktree: ${errorMessage(err2)}`);
+    } catch (err: unknown) {
+      console.error(`[worktree] failed:`, errorMessage(err));
+      if (!this.worktreeRegisteredForBranch(task.repoPath, worktreePath, task.branchName)) {
+        try { fs.rmSync(worktreePath, { recursive: true, force: true }); } catch { /* best effort */ }
       }
+      throw new Error(`Failed to create worktree: ${errorMessage(err)}`);
     }
   }
 
@@ -409,7 +501,7 @@ export class AgentManager {
 
     // Check that a remote named 'origin' exists
     try {
-      const remoteUrl = execFileSync('git', ['remote', 'get-url', 'origin'], { cwd, stdio: 'pipe' }).toString().trim();
+      const remoteUrl = execFileSync('git', ['remote', 'get-url', 'origin'], { cwd, stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim();
       if (!remoteUrl) throw new Error('empty');
     } catch {
       throw new Error(
@@ -420,13 +512,14 @@ export class AgentManager {
     }
 
     try {
-      execFileSync('git', ['push', '-u', 'origin', task.branchName], { cwd, stdio: 'pipe' });
+      this.ensureNoUncommittedWork(task);
+      execFileSync('git', ['push', '-u', 'origin', task.branchName], { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
       const prTitle = task.title.replace(/[<>]/g, '').slice(0, 200);
       const result = execFileSync(
         'gh',
         ['pr', 'create', '--base', baseBranch, '--head', task.branchName,
          '--title', prTitle, '--body', `Automated PR from Kanban task ${task.id}`, '--'],
-        { cwd, stdio: 'pipe' },
+        { cwd, stdio: ['ignore', 'pipe', 'pipe'] },
       );
       const url = result.toString().trim();
       console.log(`[pr] created: ${url}`);
@@ -463,12 +556,13 @@ export class AgentManager {
 
     return this.withRepoLock(repoPath, () => {
       try {
-        execFileSync('git', ['checkout', baseBranch], { cwd: repoPath, stdio: 'pipe' });
-        execFileSync('git', ['merge', branchName, '--no-edit'], { cwd: repoPath, stdio: 'pipe' });
+        this.ensureNoUncommittedWork(task);
+        execFileSync('git', ['checkout', baseBranch], { cwd: repoPath, stdio: ['ignore', 'pipe', 'pipe'] });
+        execFileSync('git', ['merge', branchName, '--no-edit'], { cwd: repoPath, stdio: ['ignore', 'pipe', 'pipe'] });
         console.log(`[merge] merged ${branchName} into ${baseBranch}`);
         return { merged: true as const, baseBranch };
       } catch (err: unknown) {
-        try { execFileSync('git', ['merge', '--abort'], { cwd: repoPath, stdio: 'pipe' }); } catch { /* already clean */ }
+        try { execFileSync('git', ['merge', '--abort'], { cwd: repoPath, stdio: ['ignore', 'pipe', 'pipe'] }); } catch { /* already clean */ }
         const stderr = getErrorStderr(err);
         const msg = stderr || errorMessage(err);
         console.error(`[merge] failed:`, msg);
@@ -566,7 +660,7 @@ export class AgentManager {
           if (reused) {
             try {
               const status = execFileSync('git', ['status', '--porcelain'], {
-                cwd: worktreePath, stdio: 'pipe',
+                cwd: worktreePath, stdio: ['ignore', 'pipe', 'pipe'],
               }).toString().trim();
               dirtyHint = status ? '\nNote: worktree has uncommitted changes from a prior run.' : '';
             } catch {
@@ -771,6 +865,17 @@ Optional list of any work you did not complete or that should be followed up. Om
           // stale summary from a previous run. Never let this block completion.
           if (result.status === 'complete') {
             try {
+              if (worktreePath) {
+                const commit = this.commitWorktreeChanges(task);
+                if (commit.committed) {
+                  this.emitEvent(task.id, {
+                    id: uuid(), taskId: task.id, type: 'output',
+                    content: `Committed worktree changes on ${task.branchName}: ${commit.commit}`,
+                    timestamp: Date.now(),
+                    metadata: { command: 'git commit' },
+                  });
+                }
+              }
               const summary = extractTaskSummary(summaryBuffer);
               await this.eventRepo?.update(task.id, { summary });
               const fullOutput = extractFullAgentOutput(resultBuffer);
@@ -781,7 +886,9 @@ Optional list of any work you did not complete or that should be followed up. Om
                 });
               }
             } catch (err) {
-              console.error(`[agent-manager] failed to persist result for task ${task.id}:`, errorMessage(err));
+              console.error(`[agent-manager] failed to finalize result for task ${task.id}:`, errorMessage(err));
+              result.status = 'failed';
+              result.error = `Worktree changes were not committed: ${errorMessage(err)}`;
             }
           }
           terminateOnce(result.status, result.error);

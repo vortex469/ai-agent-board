@@ -14,7 +14,7 @@ import {
 } from '../src/services/worktree-cleanup.js';
 
 function git(args: string[], cwd: string): string {
-  return execFileSync('git', args, { cwd, stdio: 'pipe' }).toString().trim();
+  return execFileSync('git', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim();
 }
 
 function fixture(): { repoPath: string; worktreePath: string; branchName: string; task: Task; dispose(): void } {

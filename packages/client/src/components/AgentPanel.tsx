@@ -448,6 +448,8 @@ export function AgentPanel({ task, onClose, onRun, onStop, onCreatePR, onMergeLo
   const agentDisplay = task?.agentType ? getAgentDisplay(task.agentType) : undefined;
   const [showWorktreeConfirm, setShowWorktreeConfirm] = useState(false);
   const [hasRemote, setHasRemote] = useState<boolean | null>(null);
+  const [mergeReady, setMergeReady] = useState<boolean | null>(null);
+  const [mergeBlockedReason, setMergeBlockedReason] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const taskId = task?.id ?? null;
@@ -472,6 +474,8 @@ export function AgentPanel({ task, onClose, onRun, onStop, onCreatePR, onMergeLo
     setMergeError(null);
     setShowWorktreeConfirm(false);
     setHasRemote(null);
+    setMergeReady(null);
+    setMergeBlockedReason(null);
     setFollowUpMessage('');
     setSending(false);
     setFollowUpImages([]);
@@ -480,9 +484,6 @@ export function AgentPanel({ task, onClose, onRun, onStop, onCreatePR, onMergeLo
 
     // Load existing events from server
     api.getEvents(taskId).then(setEvents).catch(console.error);
-
-    // Check if repo has a git remote (for showing Create PR vs Merge to main)
-    api.getGitInfo(taskId).then((info) => setHasRemote(info.hasRemote)).catch(() => setHasRemote(false));
 
     // Listen for live agent events via WS
     const disconnect = connectWS((msg) => {
@@ -520,6 +521,22 @@ export function AgentPanel({ task, onClose, onRun, onStop, onCreatePR, onMergeLo
       setStreaming(false);
     };
   }, [taskId]);
+
+  useEffect(() => {
+    if (!taskId) return;
+    setHasRemote(null);
+    setMergeReady(null);
+    setMergeBlockedReason(null);
+    api.getGitInfo(taskId).then((info) => {
+      setHasRemote(info.hasRemote);
+      setMergeReady(info.mergeReady ?? true);
+      setMergeBlockedReason(info.mergeBlockedReason ?? null);
+    }).catch(() => {
+      setHasRemote(false);
+      setMergeReady(null);
+      setMergeBlockedReason(null);
+    });
+  }, [taskId, task?.branchName, task?.repoPath, task?.worktreePath, task?.agentStatus]);
 
   // Fix #4: Sync streaming state with agentStatus (avoids stale closure on [taskId] effect)
   useEffect(() => {
@@ -813,7 +830,7 @@ export function AgentPanel({ task, onClose, onRun, onStop, onCreatePR, onMergeLo
               {/* PR / Cleanup actions — show when task is done or complete */}
               {(task.agentStatus === 'complete' || task.columnId === 'done') && (
                 <div className="flex items-center gap-2 overflow-x-auto pb-0.5 pt-1">
-                  {!prUrl && onCreatePR && hasRemote === true && (
+                  {!prUrl && onCreatePR && hasRemote === true && mergeReady !== false && (
                     <button
                       onClick={async () => {
                         setPrLoading(true);
@@ -844,7 +861,7 @@ export function AgentPanel({ task, onClose, onRun, onStop, onCreatePR, onMergeLo
                       View PR
                     </a>
                   )}
-                  {!mergeResult && task.branchName && onMergeLocal && (
+                  {!mergeResult && task.branchName && onMergeLocal && mergeReady !== false && (
                     <button
                       onClick={async () => {
                         setMergeLoading(true);
@@ -868,6 +885,11 @@ export function AgentPanel({ task, onClose, onRun, onStop, onCreatePR, onMergeLo
                     <span className="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border max-lg:min-h-11 border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-400">
                       <GitMerge className="h-3 w-3" />
                       Merged to {mergeResult}
+                    </span>
+                  )}
+                  {mergeReady === false && (
+                    <span className="min-w-0 text-xs text-amber-600 dark:text-amber-300">
+                      Not merge-ready: {mergeBlockedReason || 'worktree needs attention'}
                     </span>
                   )}
                   {task.worktreePath && onCleanupWorktree && (

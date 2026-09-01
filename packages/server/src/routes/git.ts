@@ -14,13 +14,14 @@ export function createGitRouter(repo: TaskRepository, agentManager: AgentManager
     if (!task) { res.status(404).json({ error: 'task not found' }); return; }
     if (!task.repoPath) { res.json({ hasRemote: false }); return; }
 
+    const readiness = agentManager.getMergeReadiness(task);
     try {
       const remote = execFileSync('git', ['remote', 'get-url', 'origin'], {
-        cwd: task.repoPath, stdio: 'pipe',
+        cwd: task.repoPath, stdio: ['ignore', 'pipe', 'pipe'],
       }).toString().trim();
-      res.json({ hasRemote: !!remote });
+      res.json({ hasRemote: !!remote, mergeReady: readiness.ready, mergeBlockedReason: readiness.reason });
     } catch {
-      res.json({ hasRemote: false });
+      res.json({ hasRemote: false, mergeReady: readiness.ready, mergeBlockedReason: readiness.reason });
     }
   }));
 
@@ -41,7 +42,10 @@ export function createGitRouter(repo: TaskRepository, agentManager: AgentManager
       // Clean up worktree after successful PR — branch is pushed, directory is no longer needed
       if (task.worktreePath) {
         const cleanup = agentManager.removeWorktree(task);
-        if (cleanup.status !== 'blocked') await repo.update(id, { worktreePath: undefined });
+        if (cleanup.status !== 'blocked') {
+          const updated = await repo.update(id, { worktreePath: undefined });
+          if (updated) broadcastTaskUpdate(updated);
+        }
       }
       res.json(result);
     } catch (err: unknown) {
@@ -92,7 +96,10 @@ export function createGitRouter(repo: TaskRepository, agentManager: AgentManager
       // Clean up worktree after successful merge — branch is merged, directory is no longer needed
       if (task.worktreePath) {
         const cleanup = agentManager.removeWorktree(task);
-        if (cleanup.status !== 'blocked') await repo.update(id, { worktreePath: undefined });
+        if (cleanup.status !== 'blocked') {
+          const updated = await repo.update(id, { worktreePath: undefined });
+          if (updated) broadcastTaskUpdate(updated);
+        }
       }
       res.json(result);
     } catch (err: unknown) {

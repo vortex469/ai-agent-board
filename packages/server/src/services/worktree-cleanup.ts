@@ -38,7 +38,7 @@ function isWithin(candidate: string, root: string): boolean {
 export function listRegisteredWorktrees(repoPath: string): RegisteredWorktree[] {
   const output = execFileSync('git', ['worktree', 'list', '--porcelain', '-z'], {
     cwd: repoPath,
-    stdio: 'pipe',
+    stdio: ['ignore', 'pipe', 'pipe'],
   }).toString();
   const entries: RegisteredWorktree[] = [];
   let current: RegisteredWorktree | undefined;
@@ -177,7 +177,7 @@ function inspectRegisteredPath(
     return { status: 'blocked', reason: 'The registered worktree branch does not match the task branch.' };
   }
   if (!fs.existsSync(resolvedWorktree)) {
-    try { execFileSync('git', ['worktree', 'prune'], { cwd: resolvedRepo, stdio: 'pipe' }); } catch { /* best effort */ }
+    try { execFileSync('git', ['worktree', 'prune'], { cwd: resolvedRepo, stdio: ['ignore', 'pipe', 'pipe'] }); } catch { /* best effort */ }
     return { status: 'missing' };
   }
 
@@ -185,10 +185,10 @@ function inspectRegisteredPath(
   try {
     before = fs.lstatSync(resolvedWorktree);
     if (!before.isDirectory() || before.isSymbolicLink()) throw new Error('not a directory');
-    const topLevel = execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd: resolvedWorktree, stdio: 'pipe' }).toString().trim();
-    const worktreeCommon = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: resolvedWorktree, stdio: 'pipe' }).toString().trim();
-    const repoCommon = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: resolvedRepo, stdio: 'pipe' }).toString().trim();
-    const branch = execFileSync('git', ['symbolic-ref', 'HEAD'], { cwd: resolvedWorktree, stdio: 'pipe' }).toString().trim();
+    const topLevel = execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd: resolvedWorktree, stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim();
+    const worktreeCommon = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: resolvedWorktree, stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim();
+    const repoCommon = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: resolvedRepo, stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim();
+    const branch = execFileSync('git', ['symbolic-ref', 'HEAD'], { cwd: resolvedWorktree, stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim();
     if (normalizedPath(topLevel) !== normalizedPath(fs.realpathSync(resolvedWorktree))
       || normalizedPath(worktreeCommon) !== normalizedPath(repoCommon)
       || branch !== `refs/heads/${expectedBranch}`) {
@@ -197,7 +197,7 @@ function inspectRegisteredPath(
 
     const records = execFileSync(
       'git', ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored=matching'],
-      { cwd: resolvedWorktree, stdio: 'pipe' },
+      { cwd: resolvedWorktree, stdio: ['ignore', 'pipe', 'pipe'] },
     ).toString().split('\0').filter(Boolean);
     const unsafe = records.filter((record) => {
       const status = record.slice(0, 2);
@@ -233,7 +233,7 @@ function cleanupRegisteredPath(repoPath: string, worktreePath: string, expectedB
     }
     execFileSync('git', ['worktree', 'remove', '--', resolvedWorktree], {
       cwd: path.resolve(repoPath),
-      stdio: 'pipe',
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
     return { status: 'removed' };
   } catch (error) {
