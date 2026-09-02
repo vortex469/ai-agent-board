@@ -669,6 +669,208 @@ export async function autoProgressCompletedTask(
   return done;
 }
 
+type BranchRecoveryInspection =
+  | { status: 'merged'; baseBranch: string; branchHead: string; branchSubject: string }
+  | { status: 'unmerged-linear'; baseBranch: string; branchHead: string; branchSubject: string }
+  | { status: 'diverged'; baseBranch: string; branchHead: string; branchSubject: string; reason: string }
+  | { status: 'blocked'; reason: string };
+
+function gitOutput(repoPath: string, args: string[]): string {
+  return execFileSync('git', args, { cwd: repoPath, stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim();
+}
+
+function gitSucceeds(repoPath: string, args: string[]): boolean {
+  try {
+    execFileSync('git', args, { cwd: repoPath, stdio: ['ignore', 'pipe', 'pipe'] });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function inspectTaskBranchForRecovery(task: Task): BranchRecoveryInspection {
+  try {
+    if (!task.repoPath || !task.branchName) return { status: 'blocked', reason: 'task is missing repository or branch metadata' };
+    const baseBranch = task.baseBranch || 'main';
+    if (!isValidGitRef(task.branchName) || !isValidGitRef(baseBranch)) {
+      return { status: 'blocked', reason: 'task branch or base branch is not a valid git ref' };
+    }
+    const allowedRootError = isUnderAllowedRoots(task.repoPath);
+    if (allowedRootError) return { status: 'blocked', reason: allowedRootError };
+    if (!gitSucceeds(task.repoPath, ['rev-parse', '--git-dir'])) {
+      return { status: 'blocked', reason: 'task repository is not a valid git repository' };
+    }
+    if (gitOutput(task.repoPath, ['status', '--porcelain=v1', '-z']).length > 0) {
+      return { status: 'blocked', reason: 'repository has uncommitted changes' };
+    }
+    if (!gitSucceeds(task.repoPath, ['show-ref', '--verify', '--quiet', `refs/heads/${task.branchName}`])) {
+      return { status: 'blocked', reason: `task branch ${task.branchName} does not exist locally` };
+    }
+    if (!gitSucceeds(task.repoPath, ['show-ref', '--verify', '--quiet', `refs/heads/${baseBranch}`])) {
+      return { status: 'blocked', reason: `base branch ${baseBranch} does not exist locally` };
+    }
+
+    const branchHead = gitOutput(task.repoPath, ['rev-parse', `${task.branchName}^{commit}`]);
+    gitOutput(task.repoPath, ['cat-file', '-e', `${branchHead}^{commit}`]);
+    const branchSubject = gitOutput(task.repoPath, ['log', '-1', '--format=%s', branchHead]);
+    const baseHead = gitOutput(task.repoPath, ['rev-parse', `${baseBranch}^{commit}`]);
+    const branchReachableFromBase = gitSucceeds(task.repoPath, ['merge-base', '--is-ancestor', branchHead, baseHead]);
+    if (branchReachableFromBase) return { status: 'merged', baseBranch, branchHead, branchSubject };
+
+    const baseReachableFromBranch = gitSucceeds(task.repoPath, ['merge-base', '--is-ancestor', baseHead, branchHead]);
+    if (baseReachableFromBranch) return { status: 'unmerged-linear', baseBranch, branchHead, branchSubject };
+
+    return {
+      status: 'diverged',
+      baseBranch,
+      branchHead,
+      branchSubject,
+      reason: `task branch ${task.branchName} has diverged from ${baseBranch}; review and merge manually`,
+    };
+  } catch (err: unknown) {
+    return { status: 'blocked', reason: `git recovery inspection failed: ${errorMessage(err)}` };
+  }
+}
+
+function branchHeadMatchesCommittedEvent(events: AgentEvent[], branchName: string, branchHead: string): boolean {
+  const escapedBranch = branchName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const commitEvent = new RegExp(`Committed worktree changes on ${escapedBranch}:\\s*([0-9a-f]{7,40})`, 'i');
+  return events.some((event) => {
+    const match = commitEvent.exec(event.content);
+    return !!match?.[1] && branchHead.startsWith(match[1].toLowerCase());
+  });
+}
+
+function hasCompletedBranchEvidence(task: Task, events: AgentEvent[], branchHead: string, branchSubject: string): boolean {
+  if (task.agentStatus === 'complete') return true;
+  if (!task.branchName) return false;
+  if (branchSubject.startsWith('Agent Board: ')) return true;
+  return branchHeadMatchesCommittedEvent(events, task.branchName, branchHead);
+}
+
+async function emitRecoveryReason(repo: TaskRepository, task: Task, reason: string): Promise<void> {
+  await emitTaskLifecycleEvent(repo, task, 'error', `Startup recovery paused: ${reason}.`, {
+    agentType: task.agentType,
+    error: reason,
+  });
+}
+
+/**
+ * Reconcile tasks interrupted after agent completion without trusting DB state
+ * alone. Git branch existence and reachability decide whether Done is safe.
+ */
+export async function reconcileInterruptedTaskCompletion(
+  repo: TaskRepository,
+  task: Task,
+  agentManager: AgentManager,
+): Promise<Task | undefined> {
+  if (task.archived || task.columnId === 'done' || !task.repoPath || !task.branchName) return undefined;
+  if (!['planning', 'executing', 'complete', 'failed'].includes(task.agentStatus) && task.columnId !== 'review') {
+    return undefined;
+  }
+
+  const inspection = inspectTaskBranchForRecovery(task);
+  if (inspection.status === 'blocked') {
+    if (task.agentStatus === 'planning' || task.agentStatus === 'executing') await repo.clearRun(task.id);
+    await emitRecoveryReason(repo, task, inspection.reason);
+    return undefined;
+  }
+
+  const events = await repo.getEventsByTaskId(task.id);
+  if (!hasCompletedBranchEvidence(task, events, inspection.branchHead, inspection.branchSubject)) {
+    if (task.agentStatus === 'planning' || task.agentStatus === 'executing') await repo.clearRun(task.id);
+    await emitRecoveryReason(repo, task, 'could not prove the task branch contains completed agent work');
+    return undefined;
+  }
+
+  const completedAt = task.completedAt ?? Date.now();
+  const cleanupUpdates: Partial<Task> = {};
+  if (task.worktreePath) {
+    const worktree = agentManager.inspectWorktree(task);
+    if (worktree.status === 'blocked') {
+      const reviewed = await repo.update(task.id, {
+        agentStatus: 'complete',
+        columnId: 'review',
+        completedAt,
+      });
+      await repo.clearRun(task.id);
+      const latest = reviewed ?? { ...task, agentStatus: 'complete' as const, columnId: 'review' as const, completedAt };
+      broadcastTaskUpdate(latest);
+      await emitRecoveryReason(repo, latest, `worktree cleanup cannot be proven safe: ${worktree.reason}`);
+      return latest;
+    }
+    if (inspection.status === 'merged') {
+      const cleanup = agentManager.removeWorktree(task);
+      if (cleanup.status === 'blocked') {
+        const reviewed = await repo.update(task.id, {
+          agentStatus: 'complete',
+          columnId: 'review',
+          completedAt,
+        });
+        await repo.clearRun(task.id);
+        const latest = reviewed ?? { ...task, agentStatus: 'complete' as const, columnId: 'review' as const, completedAt };
+        broadcastTaskUpdate(latest);
+        await emitRecoveryReason(repo, latest, `worktree cleanup was blocked: ${cleanup.reason}`);
+        return latest;
+      }
+      cleanupUpdates.worktreePath = undefined;
+    } else if (worktree.status === 'missing') {
+      cleanupUpdates.worktreePath = undefined;
+    }
+  }
+
+  if (inspection.status === 'merged') {
+    await repo.clearRun(task.id);
+    let transitionTask = task;
+    if (task.columnId !== 'review') {
+      const reviewed = await repo.update(task.id, {
+        agentStatus: 'complete',
+        columnId: 'review',
+        completedAt,
+        ...cleanupUpdates,
+      });
+      if (!reviewed) return undefined;
+      transitionTask = reviewed;
+      broadcastTaskUpdate(reviewed);
+    }
+    const done = await repo.update(task.id, {
+      agentStatus: 'complete',
+      columnId: 'done',
+      completedAt,
+      ...(transitionTask.columnId === 'review' ? cleanupUpdates : {}),
+    });
+    if (!done) return undefined;
+    broadcastTaskUpdate(done);
+    await emitTaskLifecycleEvent(
+      repo,
+      done,
+      'output',
+      `Startup recovery verified ${task.branchName} is already merged into ${inspection.baseBranch} and moved the task to Done.`,
+      { agentType: task.agentType, command: 'git merge-base --is-ancestor' },
+    );
+    await triggerAutomaticDependentProgression(repo, done, agentManager);
+    return done;
+  }
+
+  await repo.clearRun(task.id);
+  const reviewed = await repo.update(task.id, {
+    agentStatus: 'complete',
+    columnId: 'review',
+    completedAt,
+    ...cleanupUpdates,
+  });
+  if (!reviewed) return undefined;
+  broadcastTaskUpdate(reviewed);
+  await emitRecoveryReason(
+    repo,
+    reviewed,
+    inspection.status === 'diverged'
+      ? inspection.reason
+      : `task branch ${task.branchName} contains completed work but is not merged into ${inspection.baseBranch}`,
+  );
+  return reviewed;
+}
+
 export async function triggerAutomaticDependentProgression(
   repo: TaskRepository,
   completedTask: Task,

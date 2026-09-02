@@ -23,7 +23,7 @@ import type { TaskRepository } from './repositories/types.js';
 import type { TemplateRepository } from './repositories/template-types.js';
 import type { TaskGroupRepository } from './repositories/group-types.js';
 import type { ProjectRepository } from './repositories/project-types.js';
-import { startAgentForTask } from './routes/helpers.js';
+import { reconcileInterruptedTaskCompletion, startAgentForTask } from './routes/helpers.js';
 import { isLoopbackAddress } from './network-policy.js';
 import { reconcileManagedWorktrees } from './services/worktree-cleanup.js';
 
@@ -146,6 +146,26 @@ const agentManager = new AgentManager();
 
   await agentManager.initialize();
 
+  // Reconcile task branches that completed around a restart before dispatch
+  // recovery can accidentally rerun already-committed work, including children
+  // that belong to in-progress groups.
+  const branchRecoveredIds = new Set<string>();
+  try {
+    const projects = await projectRepo.getAllWithCounts();
+    const allRecoverableTasks = (await Promise.all(projects.map(async (project) => {
+      const standalone = await taskRepo.getAll(true, project.id);
+      const groups = await groupRepo.getAll(true, project.id);
+      const children = (await Promise.all(groups.map((group) => groupRepo.getChildTasks(group.id)))).flat();
+      return [...standalone, ...children];
+    }))).flat();
+    for (const task of allRecoverableTasks) {
+      if (branchRecoveredIds.has(task.id)) continue;
+      const recovered = await reconcileInterruptedTaskCompletion(taskRepo, task, agentManager);
+      if (recovered) branchRecoveredIds.add(task.id);
+    }
+  } catch (err) {
+    console.error('[server] interrupted task completion recovery failed:', err);
+  }
 
   // Recover orphaned task groups first — group children get group-aware
   // recovery (planning → idle for re-queue, executing → failed) before the
@@ -158,6 +178,7 @@ const agentManager = new AgentManager();
         const children = await groupRepo.getChildTasks(group.id);
         for (const child of children) {
           groupChildIds.add(child.id);
+          if (branchRecoveredIds.has(child.id)) continue;
           if (child.agentStatus === 'executing') {
             await taskRepo.update(child.id, { agentStatus: 'failed', completedAt: Date.now() });
             await taskRepo.clearRun(child.id);
@@ -185,6 +206,7 @@ const agentManager = new AgentManager();
   // Re-dispatch durable requests left unclaimed by a crash.
   const recoveredRunIds = new Set<string>();
   for (const pending of await taskRepo.getPendingRuns(Date.now())) {
+    if (branchRecoveredIds.has(pending.id)) continue;
     console.warn(`[server] recovering requested run ${pending.id}`);
     recoveredRunIds.add(pending.id);
     await startAgentForTask(pending, taskRepo, agentManager);
@@ -197,6 +219,7 @@ const agentManager = new AgentManager();
     (t.agentStatus === 'planning' || t.agentStatus === 'executing')
       && !groupChildIds.has(t.id)
       && !recoveredRunIds.has(t.id)
+      && !branchRecoveredIds.has(t.id)
   );
   for (const task of orphaned) {
     await taskRepo.update(task.id, {
