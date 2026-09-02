@@ -77,15 +77,25 @@ function fakeSuccessfulNpmScript(calls: Array<{ file: string; args: readonly str
   }) as typeof execFile;
 }
 
+type FakePythonProbeResult = string | null | { executable: string | null; pytestAvailable?: boolean };
+
 function fakePythonProbe(
   calls: Array<{ file: string; args: readonly string[] }>,
-  results: Record<string, string | null>,
+  results: Record<string, FakePythonProbeResult>,
 ): typeof execFileSync {
   return ((file: string, args: readonly string[]) => {
     calls.push({ file, args });
     const result = results[file];
     if (!result) throw new Error(`${file} unavailable`);
-    return `${result}\n`;
+    if (args[0] === '-m' && args[1] === 'pytest') {
+      if (typeof result === 'object' && result.pytestAvailable === false) {
+        throw new Error(`pytest unavailable for ${file}`);
+      }
+      return 'pytest 8.0.0\n';
+    }
+    const executable = typeof result === 'object' ? result.executable : result;
+    if (!executable) throw new Error(`${file} unavailable`);
+    return `${executable}\n`;
   }) as typeof execFileSync;
 }
 
@@ -118,25 +128,40 @@ test('python environment detection prefers worktree venv before repository venv'
     assert.deepEqual(detectProjectPythonEnvironment(worktree, {
       repoPath: repo,
       env: { AGENTBOARD_PYTHON_INTERPRETER: '/configured/python' },
-      execFileSyncImpl: fakePythonProbe(calls, { '/configured/python': '/configured/python' }),
+      execFileSyncImpl: fakePythonProbe(calls, {
+        [repoPython]: repoPython,
+        [worktreePython]: worktreePython,
+        '/configured/python': '/configured/python',
+      }),
     }), {
       source: 'worktree-venv',
       interpreterPath: worktreePython,
       venvPath: path.join(worktree, '.venv'),
+      pytestAvailable: true,
     });
-    assert.equal(calls.length, 0);
+    assert.deepEqual(calls, [{
+      file: worktreePython,
+      args: ['-m', 'pytest', '--version'],
+    }]);
 
     fs.rmSync(path.join(worktree, '.venv'), { recursive: true, force: true });
     assert.deepEqual(detectProjectPythonEnvironment(worktree, {
       repoPath: repo,
       env: { AGENTBOARD_PYTHON_INTERPRETER: '/configured/python' },
-      execFileSyncImpl: fakePythonProbe(calls, { '/configured/python': '/configured/python' }),
+      execFileSyncImpl: fakePythonProbe(calls, {
+        [repoPython]: repoPython,
+        '/configured/python': '/configured/python',
+      }),
     }), {
       source: 'repo-venv',
       interpreterPath: repoPython,
       venvPath: path.join(repo, '.venv'),
+      pytestAvailable: true,
     });
-    assert.equal(calls.length, 0);
+    assert.deepEqual(calls.at(-1), {
+      file: repoPython,
+      args: ['-m', 'pytest', '--version'],
+    });
   } finally {
     fs.rmSync(repo, { recursive: true, force: true });
     fs.rmSync(worktree, { recursive: true, force: true });
@@ -153,9 +178,14 @@ test('python environment detection falls back to configured then system interpre
     }), {
       source: 'configured',
       interpreterPath: '/opt/project-python',
+      pytestAvailable: true,
     });
     assert.equal(configuredCalls[0]!.file, '/opt/project-python');
     assert.deepEqual(configuredCalls[0]!.args, ['-c', 'import sys; print(sys.executable)']);
+    assert.deepEqual(configuredCalls[1], {
+      file: '/opt/project-python',
+      args: ['-m', 'pytest', '--version'],
+    });
 
     const systemCalls: Array<{ file: string; args: readonly string[] }> = [];
     const firstSystemCandidate = process.platform === 'win32' ? 'py' : 'python3';
@@ -164,13 +194,21 @@ test('python environment detection falls back to configured then system interpre
       : ['-c', 'import sys; print(sys.executable)'];
     assert.deepEqual(detectProjectPythonEnvironment(worktree, {
       env: {},
-      execFileSyncImpl: fakePythonProbe(systemCalls, { [firstSystemCandidate]: '/usr/bin/python3' }),
+      execFileSyncImpl: fakePythonProbe(systemCalls, {
+        [firstSystemCandidate]: '/usr/bin/python3',
+        '/usr/bin/python3': '/usr/bin/python3',
+      }),
     }), {
       source: 'system',
       interpreterPath: '/usr/bin/python3',
+      pytestAvailable: true,
     });
     assert.equal(systemCalls[0]!.file, firstSystemCandidate);
     assert.deepEqual(systemCalls[0]!.args, firstSystemArgs);
+    assert.deepEqual(systemCalls[1], {
+      file: '/usr/bin/python3',
+      args: ['-m', 'pytest', '--version'],
+    });
   } finally {
     fs.rmSync(worktree, { recursive: true, force: true });
   }
@@ -188,11 +226,18 @@ test('python environment detection accepts the configured Atlas interpreter for 
     }), {
       source: 'configured',
       interpreterPath: '/opt/atlas/.venv/bin/python',
+      pytestAvailable: true,
     });
-    assert.deepEqual(calls, [{
-      file: '/opt/atlas/.venv/bin/python',
-      args: ['-c', 'import sys; print(sys.executable)'],
-    }]);
+    assert.deepEqual(calls, [
+      {
+        file: '/opt/atlas/.venv/bin/python',
+        args: ['-c', 'import sys; print(sys.executable)'],
+      },
+      {
+        file: '/opt/atlas/.venv/bin/python',
+        args: ['-m', 'pytest', '--version'],
+      },
+    ]);
   } finally {
     fs.rmSync(worktree, { recursive: true, force: true });
   }
@@ -207,13 +252,41 @@ test('python environment detection may select the source repository venv for a w
     assert.deepEqual(detectProjectPythonEnvironment(worktree, {
       repoPath: repo,
       env: {},
+      execFileSyncImpl: fakePythonProbe([], { [repoPython]: repoPython }),
     }), {
       source: 'repo-venv',
       interpreterPath: repoPython,
       venvPath: path.join(repo, '.venv'),
+      pytestAvailable: true,
     });
   } finally {
     fs.rmSync(repo, { recursive: true, force: true });
+    fs.rmSync(worktree, { recursive: true, force: true });
+  }
+});
+
+test('python environment detection reports missing pytest without rejecting the selected interpreter', () => {
+  const worktree = makeDir('agentboard-python-missing-pytest-');
+  const calls: Array<{ file: string; args: readonly string[] }> = [];
+  try {
+    const worktreePython = writeVenvPython(worktree);
+
+    assert.deepEqual(detectProjectPythonEnvironment(worktree, {
+      env: {},
+      execFileSyncImpl: fakePythonProbe(calls, {
+        [worktreePython]: { executable: worktreePython, pytestAvailable: false },
+      }),
+    }), {
+      source: 'worktree-venv',
+      interpreterPath: worktreePython,
+      venvPath: path.join(worktree, '.venv'),
+      pytestAvailable: false,
+    });
+    assert.deepEqual(calls, [{
+      file: worktreePython,
+      args: ['-m', 'pytest', '--version'],
+    }]);
+  } finally {
     fs.rmSync(worktree, { recursive: true, force: true });
   }
 });

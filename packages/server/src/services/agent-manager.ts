@@ -82,11 +82,13 @@ export function buildAgentSystemPrompt(args: {
 Python environment:
 - Selected interpreter: ${args.pythonEnvironment.interpreterPath}
 - Selection source: ${args.pythonEnvironment.source}
+- Pytest availability: ${args.pythonEnvironment.pytestAvailable ? 'detected' : `not detected with \`${args.pythonEnvironment.interpreterPath} -m pytest --version\``}
 - Run Python tests from ${args.workingDirectory} with the selected interpreter module form, for example: \`cd ${args.workingDirectory} && ${args.pythonEnvironment.interpreterPath} -m pytest\`.
 - Do not run bare \`pytest\`, a different Python executable, or tests from another checkout when a selected interpreter is listed here.
 ${args.worktreePath && args.repoPath && !path.resolve(args.pythonEnvironment.interpreterPath).startsWith(`${path.resolve(args.worktreePath)}${path.sep}`)
   ? `- The interpreter may live outside the task worktree, but it is allowed only as the Python executable for commands run in ${args.workingDirectory}; keep all file reads, writes, and test working directories inside ${args.worktreePath}.`
   : ''}
+- If pytest is required but unavailable from the selected interpreter, report \`Environment error: pytest is not installed for ${args.pythonEnvironment.interpreterPath}\` instead of claiming test validation passed.
 - If Python packages are needed, never install them globally. ${args.pythonEnvironment.venvPath
   ? `Use \`${args.pythonEnvironment.interpreterPath} -m pip\` so packages install into ${args.pythonEnvironment.venvPath}.`
   : `Create or use a project-local virtual environment under ${args.workingDirectory} before installing packages.`}
@@ -779,9 +781,12 @@ export class AgentManager {
         });
 
         if (pythonEnvironment) {
+          const pytestStatus = pythonEnvironment.pytestAvailable
+            ? 'pytest detected'
+            : 'pytest not detected; report an Environment error if pytest is required before installing it into a project-local virtual environment';
           this.emitEvent(task.id, {
             id: uuid(), taskId: task.id, type: 'output',
-            content: `Selected Python interpreter: ${pythonEnvironment.interpreterPath} (${pythonEnvironment.source}).`,
+            content: `Selected Python interpreter: ${pythonEnvironment.interpreterPath} (${pythonEnvironment.source}); ${pytestStatus}.`,
             timestamp: Date.now(),
           });
         } else {

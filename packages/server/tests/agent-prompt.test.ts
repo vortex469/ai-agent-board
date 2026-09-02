@@ -35,11 +35,13 @@ test('agent system prompt records selected Python interpreter and forbids global
       source: 'worktree-venv',
       interpreterPath: '/tmp/worktree/.venv/bin/python',
       venvPath: '/tmp/worktree/.venv',
+      pytestAvailable: true,
     },
   });
 
   assert.match(systemPrompt, /Selected interpreter: \/tmp\/worktree\/\.venv\/bin\/python/);
   assert.match(systemPrompt, /Selection source: worktree-venv/);
+  assert.match(systemPrompt, /Pytest availability: detected/);
   assert.match(systemPrompt, /cd \/tmp\/worktree && \/tmp\/worktree\/\.venv\/bin\/python -m pytest/);
   assert.match(systemPrompt, /Do not run bare `pytest`, a different Python executable, or tests from another checkout/);
   assert.match(systemPrompt, /never install them globally/i);
@@ -57,6 +59,7 @@ test('agent system prompt permits an external selected interpreter only for work
       source: 'repo-venv',
       interpreterPath: '/opt/atlas/.venv/bin/python',
       venvPath: '/opt/atlas/.venv',
+      pytestAvailable: true,
     },
   });
 
@@ -65,4 +68,25 @@ test('agent system prompt permits an external selected interpreter only for work
   assert.match(systemPrompt, /interpreter may live outside the task worktree/);
   assert.match(systemPrompt, /allowed only as the Python executable for commands run in \/tmp\/agentboard-task-worktree/);
   assert.match(systemPrompt, /keep all file reads, writes, and test working directories inside \/tmp\/agentboard-task-worktree/);
+});
+
+test('agent system prompt reports missing pytest and still forbids global installs', () => {
+  const systemPrompt = buildAgentSystemPrompt({
+    workingDirectory: '/tmp/python-worktree',
+    taskTitle: 'Run pytest',
+    repoPath: '/tmp/source-repo',
+    worktreePath: '/tmp/python-worktree',
+    hasGit: true,
+    pythonEnvironment: {
+      source: 'system',
+      interpreterPath: '/usr/bin/python3',
+      pytestAvailable: false,
+    },
+  });
+
+  assert.match(systemPrompt, /Pytest availability: not detected with `\/usr\/bin\/python3 -m pytest --version`/);
+  assert.match(systemPrompt, /Environment error: pytest is not installed for \/usr\/bin\/python3/);
+  assert.match(systemPrompt, /Create or use a project-local virtual environment under \/tmp\/python-worktree before installing packages/);
+  assert.match(systemPrompt, /never install them globally/i);
+  assert.doesNotMatch(systemPrompt, /\/usr\/bin\/python3 -m pip install/);
 });

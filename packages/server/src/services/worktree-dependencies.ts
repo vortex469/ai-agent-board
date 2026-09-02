@@ -29,6 +29,7 @@ export interface PythonEnvironmentSelection {
   interpreterPath: string;
   source: PythonEnvironmentSource;
   venvPath?: string;
+  pytestAvailable: boolean;
 }
 
 export type WorktreeDependencyProvisionResult =
@@ -125,10 +126,30 @@ function virtualEnvPythonCandidates(rootPath: string): Array<{ venvPath: string;
   return candidates;
 }
 
+function pythonPytestProbeArgs(): string[] {
+  return ['-m', 'pytest', '--version'];
+}
+
+function detectPytestAvailable(
+  interpreterPath: string,
+  execFileSyncImpl: typeof execFileSync,
+): boolean {
+  try {
+    execFileSyncImpl(interpreterPath, pythonPytestProbeArgs(), {
+      stdio: ['ignore', 'pipe', 'ignore'],
+      encoding: 'utf8',
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function detectVirtualEnvPython(
   rootPath: string | undefined,
   source: Extract<PythonEnvironmentSource, 'worktree-venv' | 'repo-venv'>,
   fsImpl: Pick<typeof fs, 'existsSync'>,
+  execFileSyncImpl: typeof execFileSync,
 ): PythonEnvironmentSelection | null {
   if (!rootPath) return null;
   for (const candidate of virtualEnvPythonCandidates(rootPath)) {
@@ -137,6 +158,7 @@ function detectVirtualEnvPython(
         source,
         interpreterPath: candidate.interpreterPath,
         venvPath: candidate.venvPath,
+        pytestAvailable: detectPytestAvailable(candidate.interpreterPath, execFileSyncImpl),
       };
     }
   }
@@ -172,17 +194,17 @@ export function detectProjectPythonEnvironment(
   const fsImpl = options.fsImpl ?? fs;
   const execFileSyncImpl = options.execFileSyncImpl ?? execFileSync;
 
-  const worktreeVenv = detectVirtualEnvPython(worktreePath, 'worktree-venv', fsImpl);
+  const worktreeVenv = detectVirtualEnvPython(worktreePath, 'worktree-venv', fsImpl, execFileSyncImpl);
   if (worktreeVenv) return worktreeVenv;
 
-  const repoVenv = detectVirtualEnvPython(options.repoPath, 'repo-venv', fsImpl);
+  const repoVenv = detectVirtualEnvPython(options.repoPath, 'repo-venv', fsImpl, execFileSyncImpl);
   if (repoVenv) return repoVenv;
 
   const configured = env.AGENTBOARD_PYTHON_INTERPRETER?.trim() || env.PYTHON?.trim();
   if (configured) {
     const executable = resolveUsablePython(configured, [], execFileSyncImpl);
     if (executable) {
-      return { source: 'configured', interpreterPath: executable };
+      return { source: 'configured', interpreterPath: executable, pytestAvailable: detectPytestAvailable(executable, execFileSyncImpl) };
     }
   }
 
@@ -200,7 +222,7 @@ export function detectProjectPythonEnvironment(
   for (const candidate of systemCandidates) {
     const executable = resolveUsablePython(candidate.command, candidate.prefixArgs, execFileSyncImpl);
     if (executable) {
-      return { source: 'system', interpreterPath: executable };
+      return { source: 'system', interpreterPath: executable, pytestAvailable: detectPytestAvailable(executable, execFileSyncImpl) };
     }
   }
 
