@@ -619,6 +619,11 @@ export async function autoProgressCompletedTask(
     return moveToReview();
   }
 
+  const progressionGate = await evaluateCardProgressionGate(repo, task);
+  if (!progressionGate.passed) {
+    return moveToReview(progressionGate.reason);
+  }
+
   if (!task.repoPath || !task.branchName || !task.worktreePath) {
     return moveToReview(
       'Auto-merge skipped: task is missing repo, branch, or managed worktree state. Review the task and merge manually when ready.',
@@ -714,6 +719,58 @@ export async function triggerAutomaticDependentProgression(
   }
 
   return undefined;
+}
+
+function passedGateIndex(evidence: string, gateName: string): number {
+  const escaped = gateName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const beforeColon = new RegExp(`${escaped}\\s*(?:passed|pass|ok|succeeded|success|green|approved)\\s*:`, 'i').exec(evidence);
+  const afterColon = new RegExp(`${escaped}\\s*:\\s*(?:passed|pass|ok|succeeded|success|green|approved)`, 'i').exec(evidence);
+  if (!beforeColon) return afterColon?.index ?? -1;
+  if (!afterColon) return beforeColon.index;
+  return Math.min(beforeColon.index, afterColon.index);
+}
+
+function extractEnvironmentProgressionError(evidence: string): string | undefined {
+  const explicit = evidence.match(/environment error\s*:?\s*([^\n\r]+)/i)?.[1]?.trim();
+  if (explicit) return `Automatic progression paused: environment error: ${explicit}`;
+  const noInterpreter = evidence.match(/no suitable [^\n\r]*(?:interpreter|runtime)[^\n\r]*/i)?.[0]?.trim();
+  if (noInterpreter) return `Automatic progression paused: environment error: ${noInterpreter}`;
+  return undefined;
+}
+
+async function evaluateCardProgressionGate(
+  repo: TaskRepository,
+  task: Task,
+): Promise<{ passed: true } | { passed: false; reason: string }> {
+  const events = await repo.getEventsByTaskId(task.id);
+  const finalOutput = [...events].reverse().find((event) => event.type === 'complete' && event.metadata?.finalOutput === true)?.content ?? '';
+  const evidence = [task.summary, finalOutput]
+    .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+    .join('\n');
+
+  const environmentError = extractEnvironmentProgressionError(evidence);
+  if (environmentError) return { passed: false, reason: environmentError };
+
+  const focusedTestsIndex = passedGateIndex(evidence, 'Focused tests');
+  const hostileReviewIndex = passedGateIndex(evidence, 'Hostile review');
+  const focusedTestsPassed = focusedTestsIndex >= 0;
+  const hostileReviewPassed = hostileReviewIndex >= 0;
+  if (focusedTestsPassed && hostileReviewPassed && focusedTestsIndex < hostileReviewIndex) return { passed: true };
+  if (focusedTestsPassed && hostileReviewPassed) {
+    return {
+      passed: false,
+      reason: 'Automatic progression paused: hostile review evidence must follow passing focused test evidence. Keep the card in Review until validation and hostile review pass in order.',
+    };
+  }
+
+  const missing = [
+    focusedTestsPassed ? undefined : 'focused tests',
+    hostileReviewPassed ? undefined : 'hostile review',
+  ].filter((item): item is string => !!item);
+  return {
+    passed: false,
+    reason: `Automatic progression paused: missing passing ${missing.join(' and ')} evidence. Keep the card in Review until validation and hostile review pass.`,
+  };
 }
 
 export function makeWorktreeCallback(repo: TaskRepository, taskId: string): (worktreePath: string) => void {

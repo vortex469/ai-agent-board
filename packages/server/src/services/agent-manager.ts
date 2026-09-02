@@ -106,6 +106,7 @@ ${!args.hasGit ? `\nIMPORTANT: This directory is not a git repository. Run \`git
 ${pythonInstructions}
 Complete the task described in the user prompt. Be thorough — read relevant files,
 make precise edits, and verify your changes compile/pass tests when applicable.
+Before reporting completion, run the most focused relevant test or build check that proves the change. After tests pass, perform a hostile review of your own diff for regressions, edge cases, security issues, and missing tests. Only claim completion when both gates pass. In your final summary, include clear evidence using the phrases "Focused tests passed:" and "Hostile review passed:". If a required test cannot run because no suitable interpreter or runtime exists, report "Environment error:" with the missing interpreter/runtime and do not claim the validation gates passed.
 
 When you have finished, end your VERY LAST message with a task summary in EXACTLY this format (keep the tags on their own lines):
 <task-summary>

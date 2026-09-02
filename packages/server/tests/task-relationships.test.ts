@@ -8,7 +8,7 @@ import { PostgresTaskRepository } from '../src/repositories/postgres.js';
 import { migrateSqliteDatabase } from '../src/db.js';
 import { createTaskRouter } from '../src/routes/tasks.js';
 import { createOrchestrationsRouter, extractOrchestrationOutput } from '../src/routes/orchestrations.js';
-import { startAgentForTask, triggerAutomaticDependentProgression } from '../src/routes/helpers.js';
+import { autoProgressCompletedTask, startAgentForTask, triggerAutomaticDependentProgression } from '../src/routes/helpers.js';
 import type { Task, Project, ExecutionAttempt } from '../src/types.js';
 import type { ProjectRepository } from '../src/repositories/project-types.js';
 import type { AgentManager } from '../src/services/agent-manager.js';
@@ -526,6 +526,94 @@ test('requested runs wait for prerequisite cards to reach Done', async () => {
     await triggerAutomaticDependentProgression(repo, firstDone, manager);
     assert.deepEqual(started, ['second']);
     assert.equal((await repo.getById('second'))?.agentStatus, 'planning');
+  } finally { db.close(); }
+});
+
+test('auto progression requires focused test and hostile review evidence before Done and dependent start', async () => {
+  const db = makeDb();
+  const repo = new SqliteTaskRepository(db);
+  const started: string[] = [];
+  let merges = 0;
+  const manager = {
+    ...agents,
+    getMergeReadiness: () => ({ ready: true }),
+    mergeLocal: async () => { merges += 1; return { baseBranch: 'main' }; },
+    removeWorktree: () => ({ status: 'removed' }),
+    startAgent: (startedTask: Task) => { started.push(startedTask.id); },
+  } as unknown as AgentManager;
+  try {
+    await repo.create({ ...task('first'), columnId: 'in-progress', agentStatus: 'executing', worktreePath: '/worktree/first' });
+    await repo.create(task('second'));
+    await repo.createDependency('first', 'second', 10);
+    await repo.requestRun('second', 20);
+    await repo.update('first', { summary: '## Completed\nImplemented the change.' });
+
+    await autoProgressCompletedTask(repo, 'first', manager);
+
+    assert.equal(merges, 0);
+    assert.deepEqual(started, []);
+    assert.equal((await repo.getById('first'))?.columnId, 'review');
+    assert.equal((await repo.getById('second'))?.columnId, 'backlog');
+    assert.match(
+      [...(await repo.getEventsByTaskId('first'))].reverse().find((event) => event.type === 'error')?.content ?? '',
+      /missing passing focused tests and hostile review evidence/i,
+    );
+
+    await repo.update('first', {
+      columnId: 'in-progress',
+      agentStatus: 'executing',
+      completedAt: undefined,
+      summary: '## Completed\nHostile review passed: no regressions found.\nFocused tests passed: node --test focused.spec.ts',
+    });
+    await autoProgressCompletedTask(repo, 'first', manager);
+
+    assert.equal(merges, 0);
+    assert.deepEqual(started, []);
+    assert.equal((await repo.getById('first'))?.columnId, 'review');
+    assert.match(
+      [...(await repo.getEventsByTaskId('first'))].reverse().find((event) => event.type === 'error')?.content ?? '',
+      /hostile review evidence must follow passing focused test evidence/i,
+    );
+
+    await repo.update('first', {
+      columnId: 'in-progress',
+      agentStatus: 'executing',
+      completedAt: undefined,
+      summary: '## Completed\nFocused tests passed: node --test focused.spec.ts\nHostile review passed: no regressions found.',
+    });
+    await autoProgressCompletedTask(repo, 'first', manager);
+
+    assert.equal(merges, 1);
+    assert.deepEqual(started, ['second']);
+    assert.equal((await repo.getById('first'))?.columnId, 'done');
+    assert.equal((await repo.getById('second'))?.columnId, 'in-progress');
+  } finally { db.close(); }
+});
+
+test('auto progression reports interpreter environment errors clearly', async () => {
+  const db = makeDb();
+  const repo = new SqliteTaskRepository(db);
+  let merges = 0;
+  const manager = {
+    ...agents,
+    getMergeReadiness: () => ({ ready: true }),
+    mergeLocal: async () => { merges += 1; return { baseBranch: 'main' }; },
+    removeWorktree: () => ({ status: 'removed' }),
+  } as unknown as AgentManager;
+  try {
+    await repo.create({ ...task('python-card'), columnId: 'in-progress', agentStatus: 'executing', worktreePath: '/worktree/python-card' });
+    await repo.update('python-card', {
+      summary: '## Remaining\nEnvironment error: no suitable Python interpreter exists for pytest.',
+    });
+
+    await autoProgressCompletedTask(repo, 'python-card', manager);
+
+    assert.equal(merges, 0);
+    assert.equal((await repo.getById('python-card'))?.columnId, 'review');
+    assert.match(
+      [...(await repo.getEventsByTaskId('python-card'))].reverse().find((event) => event.type === 'error')?.content ?? '',
+      /environment error: no suitable Python interpreter exists for pytest/i,
+    );
   } finally { db.close(); }
 });
 

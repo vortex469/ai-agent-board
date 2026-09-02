@@ -170,13 +170,19 @@ class MemoryTaskRepo implements TaskRepository {
   }
 }
 
-function registerFakeProvider(manager: AgentManager, execute: (workingDirectory: string) => Promise<{ status: 'complete' | 'failed'; error?: string }>): void {
+function registerFakeProvider(manager: AgentManager, execute: (workingDirectory: string) => Promise<{ status: 'complete' | 'failed'; error?: string; output?: string }>): void {
   const provider = {
     displayName: 'Fake Codex',
     start: async () => {},
     stop: async () => {},
-    createSession: async ({ workingDirectory }: { workingDirectory: string }) => ({
-      execute: async () => execute(workingDirectory),
+    createSession: async ({ workingDirectory, onEvent }: { workingDirectory: string; onEvent?: (event: { id: string; type: string; content: string; timestamp: number; metadata?: Record<string, unknown> }) => void }) => ({
+      execute: async () => {
+        const result = await execute(workingDirectory);
+        if (result.output) {
+          onEvent?.({ id: randomUUID(), type: 'output', content: result.output, timestamp: Date.now() });
+        }
+        return result;
+      },
       destroy: async () => {},
       abort: async () => {},
     }),
@@ -476,7 +482,10 @@ test('successful startAgentForTask run auto-merges clean committed worktree and 
   const manager = new AgentManager();
   registerFakeProvider(manager, async (workingDirectory) => {
     writeFileSync(path.join(workingDirectory, 'auto-merged.txt'), 'auto merged\n');
-    return { status: 'complete' };
+    return {
+      status: 'complete',
+      output: '<task-summary>\n## Completed\nFocused tests passed: verified auto-merged.txt was written.\nHostile review passed: no regression risks found.\n</task-summary>',
+    };
   });
 
   const repo = new MemoryTaskRepo(task(f.repoPath, 'smoke/auto-merge-done'));
@@ -503,7 +512,10 @@ test('startAgentForTask leaves completed task in review when auto-merge readines
   const manager = new AgentManager();
   registerFakeProvider(manager, async (workingDirectory) => {
     writeFileSync(path.join(workingDirectory, 'blocked.txt'), 'blocked\n');
-    return { status: 'complete' };
+    return {
+      status: 'complete',
+      output: '<task-summary>\n## Completed\nFocused tests passed: verified blocked.txt was written.\nHostile review passed: merge readiness failure path remains covered.\n</task-summary>',
+    };
   });
   manager.getMergeReadiness = () => ({ ready: false, reason: 'simulated safety uncertainty' });
 
