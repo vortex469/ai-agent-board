@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -48,6 +48,42 @@ function task(repoPath: string, branchName: string): Task {
     useWorktree: true,
     agentType: 'codex',
   };
+}
+
+function writeWorkspaceSmokeProject(repoPath: string, buildScript: string): void {
+  mkdirSync(path.join(repoPath, 'shared'), { recursive: true });
+  writeFileSync(path.join(repoPath, '.gitignore'), 'node_modules/\nshared/dist/\n');
+  writeFileSync(path.join(repoPath, 'package.json'), JSON.stringify({
+    private: true,
+    workspaces: ['shared'],
+    scripts: {
+      'build:shared': buildScript,
+    },
+  }, null, 2));
+  writeFileSync(path.join(repoPath, 'shared', 'package.json'), JSON.stringify({
+    name: '@agentboard-smoke/shared',
+    version: '1.0.0',
+  }, null, 2));
+  writeFileSync(path.join(repoPath, 'package-lock.json'), JSON.stringify({
+    name: 'agentboard-smoke',
+    lockfileVersion: 3,
+    requires: true,
+    packages: {
+      '': {
+        workspaces: ['shared'],
+      },
+      'node_modules/@agentboard-smoke/shared': {
+        resolved: 'shared',
+        link: true,
+      },
+      shared: {
+        name: '@agentboard-smoke/shared',
+        version: '1.0.0',
+      },
+    },
+  }, null, 2));
+  git(['add', '.gitignore', 'package.json', 'package-lock.json', 'shared/package.json'], repoPath);
+  git(['commit', '-m', 'add npm workspace smoke project'], repoPath);
 }
 
 function cleanupTaskWorktree(repoPath: string, worktreePath?: string): void {
@@ -290,6 +326,140 @@ test('dependency provisioning failure prevents agent execution and preserves the
     assert.ok(t.worktreePath);
     assert.equal(existsSync(t.worktreePath), true);
     assert.equal(existsSync(path.join(t.worktreePath, 'package.json')), true);
+  } finally {
+    if (previousThreshold === undefined) delete process.env.AGENTBOARD_WORKTREE_MIN_FREE_SPACE_BYTES;
+    else process.env.AGENTBOARD_WORKTREE_MIN_FREE_SPACE_BYTES = previousThreshold;
+    cleanupTaskWorktree(f.repoPath, t.worktreePath);
+    f.dispose();
+  }
+});
+
+test('isolated npm workspace bootstrap runs after provisioning and before agent start', async () => {
+  const f = fixture();
+  const previousThreshold = process.env.AGENTBOARD_WORKTREE_MIN_FREE_SPACE_BYTES;
+  process.env.AGENTBOARD_WORKTREE_MIN_FREE_SPACE_BYTES = '1';
+  writeWorkspaceSmokeProject(
+    f.repoPath,
+    'node -e "require(\'fs\').mkdirSync(\'shared/dist\',{recursive:true}); require(\'fs\').writeFileSync(\'shared/dist/index.js\',\'built\\\\n\')"',
+  );
+
+  const manager = new AgentManager();
+  const order: string[] = [];
+  const provider = {
+    displayName: 'Fake Codex',
+    start: async () => {},
+    stop: async () => {},
+    createSession: async ({ workingDirectory }: { workingDirectory: string }) => {
+      order.push('agent-start');
+      assert.equal(existsSync(path.join(workingDirectory, 'node_modules', '.package-lock.json')), true);
+      assert.equal(existsSync(path.join(workingDirectory, 'shared', 'dist', 'index.js')), true);
+      return {
+        execute: async () => ({ status: 'complete' as const }),
+        destroy: async () => {},
+        abort: async () => {},
+      };
+    },
+  } as unknown as AgentProvider;
+  (manager as unknown as { providers: Map<string, AgentProvider> }).providers.set('codex', provider);
+  (manager as unknown as { availableAgents: Array<{ name: string; displayName: string; available: boolean }> }).availableAgents = [
+    { name: 'codex', displayName: 'Fake Codex', available: true },
+  ];
+
+  const t = task(f.repoPath, 'smoke/npm-workspace-bootstrap');
+  try {
+    const finalStatus = await new Promise<Task['agentStatus']>((resolve) => {
+      manager.startAgent(
+        t,
+        (status) => {
+          t.agentStatus = status;
+          if (status === 'complete' || status === 'failed') resolve(status);
+        },
+        (worktreePath) => { t.worktreePath = worktreePath; },
+      );
+    });
+    const events = await manager.getEvents(t.id);
+    const contents = events.map((event) => event.content);
+
+    assert.equal(finalStatus, 'complete');
+    assert.deepEqual(order, ['agent-start']);
+    assert.ok(t.worktreePath);
+    assert.equal(existsSync(path.join(t.worktreePath, 'shared', 'dist', 'index.js')), true);
+    assert.equal(existsSync(path.join(f.repoPath, 'shared', 'dist', 'index.js')), false);
+    assert.equal(git(['status', '--porcelain'], f.repoPath), '');
+    assert.ok(contents.some((content) => content.includes('Provisioned npm dependencies inside worktree')));
+    assert.ok(contents.some((content) => content.includes('Bootstrapping npm workspace: npm run build:shared.')));
+    assert.ok(contents.some((content) => content.includes('npm workspace bootstrap succeeded: npm run build:shared.')));
+    assert.ok(
+      contents.findIndex((content) => content.includes('Provisioned npm dependencies inside worktree')) <
+      contents.findIndex((content) => content.includes('Bootstrapping npm workspace: npm run build:shared.')),
+    );
+    assert.ok(
+      contents.findIndex((content) => content.includes('Bootstrapping npm workspace: npm run build:shared.')) <
+      contents.findIndex((content) => content.includes('npm workspace bootstrap succeeded: npm run build:shared.')),
+    );
+  } finally {
+    if (previousThreshold === undefined) delete process.env.AGENTBOARD_WORKTREE_MIN_FREE_SPACE_BYTES;
+    else process.env.AGENTBOARD_WORKTREE_MIN_FREE_SPACE_BYTES = previousThreshold;
+    cleanupTaskWorktree(f.repoPath, t.worktreePath);
+    f.dispose();
+  }
+});
+
+test('workspace bootstrap failure prevents agent execution and preserves the worktree', async () => {
+  const f = fixture();
+  const previousThreshold = process.env.AGENTBOARD_WORKTREE_MIN_FREE_SPACE_BYTES;
+  process.env.AGENTBOARD_WORKTREE_MIN_FREE_SPACE_BYTES = '1';
+  writeWorkspaceSmokeProject(
+    f.repoPath,
+    'node -e "process.stdout.write(\'build stdout\'); process.stderr.write(\'build stderr\'); process.exit(1)"',
+  );
+
+  const manager = new AgentManager();
+  let createSessionCalled = false;
+  const provider = {
+    displayName: 'Fake Codex',
+    start: async () => {},
+    stop: async () => {},
+    createSession: async () => {
+      createSessionCalled = true;
+      return {
+        execute: async () => ({ status: 'complete' as const }),
+        destroy: async () => {},
+        abort: async () => {},
+      };
+    },
+  } as unknown as AgentProvider;
+  (manager as unknown as { providers: Map<string, AgentProvider> }).providers.set('codex', provider);
+  (manager as unknown as { availableAgents: Array<{ name: string; displayName: string; available: boolean }> }).availableAgents = [
+    { name: 'codex', displayName: 'Fake Codex', available: true },
+  ];
+
+  const t = task(f.repoPath, 'smoke/npm-workspace-bootstrap-fails');
+  try {
+    const finalStatus = await new Promise<Task['agentStatus']>((resolve) => {
+      manager.startAgent(
+        t,
+        (status) => {
+          t.agentStatus = status;
+          if (status === 'complete' || status === 'failed') resolve(status);
+        },
+        (worktreePath) => { t.worktreePath = worktreePath; },
+      );
+    });
+    const events = await manager.getEvents(t.id);
+
+    assert.equal(finalStatus, 'failed');
+    assert.equal(createSessionCalled, false);
+    assert.ok(t.worktreePath);
+    assert.equal(existsSync(t.worktreePath), true);
+    assert.equal(existsSync(path.join(f.repoPath, 'shared', 'dist', 'index.js')), false);
+    assert.equal(git(['status', '--porcelain'], f.repoPath), '');
+    assert.ok(events.some((event) => event.content.includes('Bootstrapping npm workspace: npm run build:shared.')));
+    assert.ok(events.some((event) =>
+      event.type === 'error' &&
+      event.content.includes('npm workspace bootstrap failed') &&
+      event.content.includes('Command failed: npm run build:shared'),
+    ));
   } finally {
     if (previousThreshold === undefined) delete process.env.AGENTBOARD_WORKTREE_MIN_FREE_SPACE_BYTES;
     else process.env.AGENTBOARD_WORKTREE_MIN_FREE_SPACE_BYTES = previousThreshold;

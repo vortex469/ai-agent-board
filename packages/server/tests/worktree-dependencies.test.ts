@@ -9,9 +9,12 @@ import {
   DEFAULT_WORKTREE_MIN_FREE_SPACE_BYTES,
   assertMinimumFreeSpace,
   buildNpmCiArgs,
+  buildNpmRunBuildSharedArgs,
+  bootstrapNpmWorkspaceIfNeeded,
   detectNodeNpmProject,
   getWorktreeDependencyConfig,
   provisionWorktreeDependencies,
+  shouldBootstrapNpmWorkspace,
   worktreeNodeModulesUsable,
 } from '../src/services/worktree-dependencies.js';
 
@@ -21,6 +24,16 @@ function makeDir(prefix: string): string {
 
 function writeNpmProject(root: string): void {
   fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ scripts: {}, dependencies: {} }));
+  fs.writeFileSync(path.join(root, 'package-lock.json'), JSON.stringify({ lockfileVersion: 3, packages: {} }));
+}
+
+function writeNpmWorkspaceProject(root: string, scripts: Record<string, unknown> = { 'build:shared': 'echo build' }): void {
+  fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({
+    private: true,
+    workspaces: ['shared'],
+    scripts,
+    dependencies: {},
+  }));
   fs.writeFileSync(path.join(root, 'package-lock.json'), JSON.stringify({ lockfileVersion: 3, packages: {} }));
 }
 
@@ -44,6 +57,13 @@ function fakeSuccessfulNpm(calls: Array<{ file: string; args: readonly string[];
     calls.push({ file, args, cwd: options.cwd, env: options.env });
     if (options.cwd) markNodeModulesUsable(options.cwd);
     callback(null, '', '');
+  }) as typeof execFile;
+}
+
+function fakeSuccessfulNpmScript(calls: Array<{ file: string; args: readonly string[]; cwd?: string; env?: NodeJS.ProcessEnv }>): typeof execFile {
+  return ((file: string, args: readonly string[], options: { cwd?: string; env?: NodeJS.ProcessEnv }, callback: (error: Error | null, stdout: string, stderr: string) => void) => {
+    calls.push({ file, args, cwd: options.cwd, env: options.env });
+    callback(null, 'built\n', '');
   }) as typeof execFile;
 }
 
@@ -135,6 +155,165 @@ test('successful provisioning runs npm ci with fixed arguments inside the worktr
     assert.equal(calls[0]!.env?.npm_config_fund, 'false');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('workspace bootstrap detection requires npm workspaces and exact build:shared script', () => {
+  const root = makeDir('agentboard-workspace-detect-');
+  try {
+    writeNpmWorkspaceProject(root);
+    const project = detectNodeNpmProject(root);
+    assert.ok(project);
+    assert.deepEqual(shouldBootstrapNpmWorkspace(project), { shouldBootstrap: true });
+
+    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({
+      private: true,
+      workspaces: { packages: ['packages/*'] },
+      scripts: { 'build:shared': 'echo build' },
+    }));
+    assert.deepEqual(shouldBootstrapNpmWorkspace(project), { shouldBootstrap: true });
+
+    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({
+      private: true,
+      scripts: { 'build:shared': 'echo build' },
+    }));
+    assert.deepEqual(shouldBootstrapNpmWorkspace(project), {
+      shouldBootstrap: false,
+      reason: 'Root package.json is not an npm workspace project.',
+    });
+
+    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({
+      private: true,
+      workspaces: ['shared'],
+      scripts: { 'build-shared': 'echo build' },
+    }));
+    assert.deepEqual(shouldBootstrapNpmWorkspace(project), {
+      shouldBootstrap: false,
+      reason: 'Root package.json has no exact build:shared script.',
+    });
+
+    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({
+      private: true,
+      workspaces: ['shared'],
+      scripts: { 'build:shared': true },
+    }));
+    assert.deepEqual(shouldBootstrapNpmWorkspace(project), {
+      shouldBootstrap: false,
+      reason: 'Root package.json has no exact build:shared script.',
+    });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('workspace bootstrap is a no-op when build:shared is absent', async () => {
+  const root = makeDir('agentboard-workspace-noop-');
+  const calls: Array<{ file: string; args: readonly string[] }> = [];
+  try {
+    writeNpmWorkspaceProject(root, { build: 'echo build' });
+    const project = detectNodeNpmProject(root);
+    assert.ok(project);
+    const result = await bootstrapNpmWorkspaceIfNeeded(project, {
+      execFileImpl: fakeSuccessfulNpmScript(calls),
+    });
+    assert.deepEqual(result, { status: 'skipped', reason: 'Root package.json has no exact build:shared script.' });
+    assert.equal(calls.length, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('workspace bootstrap runs npm run build:shared with fixed arguments inside the worktree', async () => {
+  const root = makeDir('agentboard-workspace-bootstrap-');
+  const calls: Array<{ file: string; args: readonly string[]; cwd?: string; env?: NodeJS.ProcessEnv }> = [];
+  try {
+    writeNpmWorkspaceProject(root);
+    const project = detectNodeNpmProject(root);
+    assert.ok(project);
+    const result = await bootstrapNpmWorkspaceIfNeeded(project, {
+      env: {
+        PATH: `/tmp/repo/node_modules/.bin${path.delimiter}/usr/local/bin${path.delimiter}node_modules/.bin`,
+        HOME: '/home/tester',
+        SECRET_TOKEN: 'do-not-pass',
+      },
+      execFileImpl: fakeSuccessfulNpmScript(calls),
+    });
+
+    assert.equal(result.status, 'ran');
+    assert.equal(calls.length, 1);
+    assert.match(calls[0]!.file, /^npm(\.cmd)?$/);
+    assert.deepEqual(calls[0]!.args, buildNpmRunBuildSharedArgs());
+    assert.equal(calls[0]!.cwd, root);
+    assert.equal(calls[0]!.env?.PATH, '/usr/local/bin');
+    assert.equal(calls[0]!.env?.HOME, '/home/tester');
+    assert.equal(calls[0]!.env?.SECRET_TOKEN, undefined);
+    assert.equal(calls[0]!.env?.npm_config_prefer_offline, 'true');
+    assert.equal(calls[0]!.env?.npm_config_audit, 'false');
+    assert.equal(calls[0]!.env?.npm_config_fund, 'false');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('workspace bootstrap failure reports bounded stdout and stderr', async () => {
+  const root = makeDir('agentboard-workspace-failure-');
+  const failingNpm = ((file: string, args: readonly string[], options: { cwd?: string }, callback: (error: Error & { stdout?: string; stderr?: string }, stdout: string, stderr: string) => void) => {
+    void file;
+    void args;
+    void options;
+    const error = new Error('npm exited') as Error & { stdout?: string; stderr?: string };
+    error.stdout = 'out '.repeat(4_000);
+    error.stderr = 'bootstrap boom';
+    callback(error, error.stdout, error.stderr);
+  }) as typeof execFile;
+  try {
+    writeNpmWorkspaceProject(root);
+    const project = detectNodeNpmProject(root);
+    assert.ok(project);
+    await assert.rejects(
+      () => bootstrapNpmWorkspaceIfNeeded(project, { execFileImpl: failingNpm }),
+      (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.match(err.message, /npm workspace bootstrap failed/);
+        assert.match(err.message, /stderr:\nbootstrap boom/);
+        assert.match(err.message, /stdout:\nout out/);
+        assert.match(err.message, /\[output truncated to 8000 characters\]/);
+        assert.ok(err.message.length < 9_000);
+        return true;
+      },
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('workspace bootstrap never modifies the source repository', async () => {
+  const source = makeDir('agentboard-source-bootstrap-');
+  const worktree = makeDir('agentboard-worktree-bootstrap-');
+  const calls: Array<{ file: string; args: readonly string[]; cwd?: string }> = [];
+  try {
+    writeNpmWorkspaceProject(source, { 'build:shared': 'echo source' });
+    fs.writeFileSync(path.join(source, 'source-sentinel.txt'), 'keep\n');
+    writeNpmWorkspaceProject(worktree, { 'build:shared': 'echo worktree' });
+
+    const fakeNpm = ((file: string, args: readonly string[], options: { cwd?: string }, callback: (error: Error | null, stdout: string, stderr: string) => void) => {
+      calls.push({ file, args, cwd: options.cwd });
+      if (options.cwd) fs.writeFileSync(path.join(options.cwd, 'bootstrap-output.txt'), 'worktree only\n');
+      callback(null, '', '');
+    }) as typeof execFile;
+
+    const project = detectNodeNpmProject(worktree);
+    assert.ok(project);
+    const result = await bootstrapNpmWorkspaceIfNeeded(project, { execFileImpl: fakeNpm });
+
+    assert.equal(result.status, 'ran');
+    assert.equal(calls[0]!.cwd, worktree);
+    assert.equal(fs.existsSync(path.join(worktree, 'bootstrap-output.txt')), true);
+    assert.equal(fs.existsSync(path.join(source, 'bootstrap-output.txt')), false);
+    assert.equal(fs.readFileSync(path.join(source, 'source-sentinel.txt'), 'utf8'), 'keep\n');
+  } finally {
+    fs.rmSync(source, { recursive: true, force: true });
+    fs.rmSync(worktree, { recursive: true, force: true });
   }
 });
 

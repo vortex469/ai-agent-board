@@ -20,7 +20,11 @@ import type { AttachmentStore } from '../repositories/attachment-types.js';
 import { errorMessage } from '../utils.js';
 import { detectAvailableAgents } from './agent-detection.js';
 import { resolveTaskTimeoutMs } from './agent-timeout.js';
-import { provisionWorktreeDependencies } from './worktree-dependencies.js';
+import {
+  bootstrapNpmWorkspaceIfNeeded,
+  provisionWorktreeDependencies,
+  shouldBootstrapNpmWorkspace,
+} from './worktree-dependencies.js';
 
 function loadAttachmentAsBase64(filePath: string, displayName: string, mimeType: string): AgentAttachment | null {
   try {
@@ -763,8 +767,28 @@ export class AgentManager {
                 timestamp: Date.now(),
               });
             }
+            if (dependencyResult.status !== 'skipped') {
+              const bootstrapDecision = shouldBootstrapNpmWorkspace(dependencyResult.project);
+              if (bootstrapDecision.shouldBootstrap) {
+                this.emitEvent(task.id, {
+                  id: uuid(), taskId: task.id, type: 'output',
+                  content: 'Bootstrapping npm workspace: npm run build:shared.',
+                  timestamp: Date.now(),
+                  metadata: { command: 'npm run build:shared' },
+                });
+              }
+              const bootstrapResult = await bootstrapNpmWorkspaceIfNeeded(dependencyResult.project);
+              if (bootstrapResult.status === 'ran') {
+                this.emitEvent(task.id, {
+                  id: uuid(), taskId: task.id, type: 'output',
+                  content: 'npm workspace bootstrap succeeded: npm run build:shared.',
+                  timestamp: Date.now(),
+                  metadata: { command: 'npm run build:shared' },
+                });
+              }
+            }
           } catch (err: unknown) {
-            const dependencyError = `Dependency provisioning failed: ${errorMessage(err)}`;
+            const dependencyError = `Pre-agent setup failed: ${errorMessage(err)}`;
             this.emitEvent(task.id, {
               id: uuid(), taskId: task.id, type: 'error',
               content: dependencyError,

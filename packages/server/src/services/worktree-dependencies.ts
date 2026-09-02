@@ -28,9 +28,19 @@ export type WorktreeDependencyProvisionResult =
   | { status: 'already-present'; project: NodeProjectInfo }
   | { status: 'installed'; project: NodeProjectInfo };
 
+export type WorktreeWorkspaceBootstrapResult =
+  | { status: 'skipped'; reason: string }
+  | { status: 'ran'; project: NodeProjectInfo };
+
 export interface WorktreeDependencyProvisionOptions {
   env?: NodeJS.ProcessEnv;
   fsImpl?: Pick<typeof fs, 'existsSync' | 'lstatSync' | 'statSync' | 'statfsSync'>;
+  execFileImpl?: typeof execFile;
+}
+
+export interface WorktreeWorkspaceBootstrapOptions {
+  env?: NodeJS.ProcessEnv;
+  fsImpl?: Pick<typeof fs, 'existsSync' | 'readFileSync'>;
   execFileImpl?: typeof execFile;
 }
 
@@ -150,7 +160,7 @@ function stripNodeModulesBinFromPath(value: string | undefined): string | undefi
   return safeEntries.length > 0 ? safeEntries.join(delimiter) : undefined;
 }
 
-function buildProvisionEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+export function buildProvisionEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const next: NodeJS.ProcessEnv = {};
   const allowedKeys = [
     'PATH',
@@ -180,6 +190,35 @@ function buildProvisionEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 
 export function buildNpmCiArgs(): string[] {
   return ['ci', '--prefer-offline', '--no-audit', '--no-fund'];
+}
+
+export function buildNpmRunBuildSharedArgs(): string[] {
+  return ['run', 'build:shared'];
+}
+
+function boundedOutput(value: unknown, maxLength = 8_000): string {
+  const text = String(value ?? '').trim();
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength)}\n[output truncated to ${maxLength} characters]`;
+}
+
+function hasNpmWorkspaces(packageJson: unknown): boolean {
+  if (!packageJson || typeof packageJson !== 'object') return false;
+  const workspaces = (packageJson as { workspaces?: unknown }).workspaces;
+  if (Array.isArray(workspaces)) return workspaces.length > 0 && workspaces.every((item) => typeof item === 'string');
+  if (workspaces && typeof workspaces === 'object') {
+    const packages = (workspaces as { packages?: unknown }).packages;
+    return Array.isArray(packages) && packages.length > 0 && packages.every((item) => typeof item === 'string');
+  }
+  return false;
+}
+
+function hasExactBuildSharedScript(packageJson: unknown): boolean {
+  if (!packageJson || typeof packageJson !== 'object') return false;
+  const scripts = (packageJson as { scripts?: unknown }).scripts;
+  if (!scripts || typeof scripts !== 'object' || Array.isArray(scripts)) return false;
+  return Object.prototype.hasOwnProperty.call(scripts, 'build:shared') &&
+    typeof (scripts as Record<string, unknown>)['build:shared'] === 'string';
 }
 
 type QueueTask<T> = {
@@ -250,6 +289,69 @@ async function runNpmCi(
     const detail = stderr || errorMessage(err);
     throw new Error(`npm dependency provisioning failed: ${detail}`);
   }
+}
+
+async function runNpmBuildShared(
+  projectRoot: string,
+  env: NodeJS.ProcessEnv,
+  execFileImpl: typeof execFile = execFile,
+): Promise<void> {
+  const execAsync = execFileImpl === execFile ? execFileAsync : promisify(execFileImpl);
+  try {
+    await execAsync(npmExecutable(), buildNpmRunBuildSharedArgs(), {
+      cwd: projectRoot,
+      env: buildProvisionEnv(env),
+      shell: false,
+      windowsHide: true,
+      maxBuffer: 10 * 1024 * 1024,
+    });
+  } catch (err: unknown) {
+    const stdout = err && typeof err === 'object' && 'stdout' in err
+      ? boundedOutput((err as { stdout?: unknown }).stdout)
+      : '';
+    const stderr = err && typeof err === 'object' && 'stderr' in err
+      ? boundedOutput((err as { stderr?: unknown }).stderr)
+      : '';
+    const parts = [
+      stderr ? `stderr:\n${stderr}` : '',
+      stdout ? `stdout:\n${stdout}` : '',
+    ].filter(Boolean);
+    const detail = parts.length > 0 ? parts.join('\n\n') : errorMessage(err);
+    throw new Error(`npm workspace bootstrap failed: ${detail}`);
+  }
+}
+
+export function shouldBootstrapNpmWorkspace(
+  project: NodeProjectInfo,
+  fsImpl: Pick<typeof fs, 'readFileSync'> = fs,
+): { shouldBootstrap: true } | { shouldBootstrap: false; reason: string } {
+  let packageJson: unknown;
+  try {
+    packageJson = JSON.parse(fsImpl.readFileSync(project.packageJsonPath, 'utf8'));
+  } catch (err: unknown) {
+    throw new Error(`Failed to read workspace package.json: ${errorMessage(err)}`);
+  }
+
+  if (!hasNpmWorkspaces(packageJson)) {
+    return { shouldBootstrap: false, reason: 'Root package.json is not an npm workspace project.' };
+  }
+  if (!hasExactBuildSharedScript(packageJson)) {
+    return { shouldBootstrap: false, reason: 'Root package.json has no exact build:shared script.' };
+  }
+  return { shouldBootstrap: true };
+}
+
+export async function bootstrapNpmWorkspaceIfNeeded(
+  project: NodeProjectInfo,
+  options: WorktreeWorkspaceBootstrapOptions = {},
+): Promise<WorktreeWorkspaceBootstrapResult> {
+  const env = options.env ?? process.env;
+  const fsImpl = options.fsImpl ?? fs;
+  const decision = shouldBootstrapNpmWorkspace(project, fsImpl);
+  if (!decision.shouldBootstrap) return { status: 'skipped', reason: decision.reason };
+
+  await runNpmBuildShared(project.projectRoot, env, options.execFileImpl);
+  return { status: 'ran', project };
 }
 
 export async function provisionWorktreeDependencies(
