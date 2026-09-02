@@ -15,8 +15,8 @@ Create accepted cards through the task APIs.
   assert.notEqual(typeof result, 'string');
   if (typeof result === 'string') return;
   assert.deepEqual(result.tasks.map((task) => task.order), [1, 2]);
-  assert.equal(result.tasks[0].title, '01. v0.40: Build roadmap parser');
-  assert.equal(result.tasks[1].title, '02. v0.41: Kanban creation flow');
+  assert.equal(result.tasks[0].title, 'v0.40: Build roadmap parser');
+  assert.equal(result.tasks[1].title, 'v0.41: Kanban creation flow');
   assert.equal(result.tasks[0].dependsOnTaskIndexes, undefined);
   assert.deepEqual(result.tasks[1].dependsOnTaskIndexes, [0]);
   assert.match(result.tasks[0].description, /Source roadmap item:\n\n## v0\.40/);
@@ -113,11 +113,23 @@ test('summarizes long versioned roadmap items while keeping the source authorita
 
   assert.notEqual(typeof result, 'string');
   if (typeof result === 'string') return;
-  assert.equal(result.tasks[0].title, '01. v0.1: Improve Roadmap Intake card titles');
+  assert.equal(result.tasks[0].title, 'v0.1: Improve Roadmap Intake card titles');
   assert.equal(
     result.tasks[0].description,
     'Source roadmap item:\n\nv0.1 - Improve Roadmap Intake card titles so generated titles are concise and readable while preserving exact identifiers in the source description.',
   );
+});
+
+test('uses the version identifier as the display ordering label for separately imported versioned cards', () => {
+  const result = parseRoadmapText('v0.8 - Ship grouped task execution controls');
+
+  assert.notEqual(typeof result, 'string');
+  if (typeof result === 'string') return;
+  assert.equal(result.tasks.length, 1);
+  assert.equal(result.tasks[0].order, 1);
+  assert.equal(result.tasks[0].title, 'v0.8: Ship grouped task execution controls');
+  assert.equal(result.tasks[0].sourceText, 'v0.8 - Ship grouped task execution controls');
+  assert.equal(result.tasks[0].dependsOnTaskIndexes, undefined);
 });
 
 test('keeps multiline continuation text with its roadmap item', () => {

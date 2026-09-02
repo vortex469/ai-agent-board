@@ -53,7 +53,7 @@ export function parseRoadmapText(input: unknown): RoadmapParseResult | string {
         ? `${normalizeWhitespace(block.version)}: ${block.titleSeed}`
         : normalizeWhitespace(block.version)
       : block.titleSeed;
-    const title = makeTitle(rawTitle, index + 1);
+    const title = makeTitle(rawTitle, index + 1, !block.version);
     const sourceText = clamp(block.sourceText.trim(), MAX_DESCRIPTION_LENGTH - 24);
     return {
       order: index + 1,
@@ -140,13 +140,17 @@ function parseItemLine(line: string): string | null {
   return normalizeWhitespace(match[1]);
 }
 
-function makeTitle(raw: string, order: number): string {
+function makeTitle(raw: string, order: number, useNumericPrefix: boolean): string {
   const cleaned = normalizeWhitespace(raw)
     .replace(/^#+\s*/, '')
     .replace(/\s+#\d+$/g, '')
     .trim();
   const displayText = makeDisplayTitleText(stripDisplayMarkdown(cleaned));
   const titleText = trimColonDetail(displayText);
+  if (!useNumericPrefix) {
+    return clamp(titleText, MAX_TITLE_LENGTH);
+  }
+
   const numbered = `${String(order).padStart(2, '0')}. ${clamp(titleText, MAX_TITLE_LENGTH - 4)}`;
   return clamp(numbered, MAX_TITLE_LENGTH);
 }

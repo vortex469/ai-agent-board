@@ -55,8 +55,8 @@ v0.41 - Kanban creation
     expect(previewRes.status()).toBe(200);
     const preview = await previewRes.json();
     expect(preview.tasks.map((task: any) => task.title)).toEqual([
-      '01. v0.40: Parser and preview',
-      '02. v0.41: Kanban creation',
+      'v0.40: Parser and preview',
+      'v0.41: Kanban creation',
     ]);
 
     const ambiguousRes = await request.post(`${API}/api/roadmap-intake/preview`, {
@@ -164,7 +164,7 @@ v0.41 - Kanban creation
     });
     expect(previewRes.status()).toBe(200);
     const preview = await previewRes.json();
-    expect(preview.tasks[0].title).toBe('01. v0.1: Improve Roadmap Intake card titles');
+    expect(preview.tasks[0].title).toBe('v0.1: Improve Roadmap Intake card titles');
     expect(preview.tasks[0].description).toBe(`Source roadmap item:\n\n${source}`);
   });
 });
