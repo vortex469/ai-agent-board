@@ -19,6 +19,7 @@ import { columns as baseColumns } from '@/lib/columns';
 import { Column } from './Column';
 import { TaskCard } from './TaskCard';
 import { TaskGroupCard } from './TaskGroupCard';
+import { RoadmapProgress } from './RoadmapProgress';
 import type { TaskGroupWithChildren } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
@@ -26,6 +27,8 @@ import { cn } from '@/lib/utils';
 interface BoardProps {
   tasks: Task[];
   groups?: TaskGroupWithChildren[];
+  progressTasks?: Task[];
+  progressGroups?: TaskGroupWithChildren[];
   getTasksByColumn: (columnId: ColumnId) => Task[];
   onMoveTask: (taskId: string, targetColumn: ColumnId) => void;
   onTaskClick: (task: Task) => void;
@@ -55,6 +58,8 @@ const kanbanCollision: CollisionDetection = (args) => {
 export function Board({
   tasks,
   groups = [],
+  progressTasks,
+  progressGroups,
   getTasksByColumn,
   onMoveTask,
   onTaskClick,
@@ -226,6 +231,8 @@ export function Board({
       onDragCancel={handleDragCancel}
     >
       <div className="flex h-full min-h-0 flex-col">
+        <RoadmapProgress tasks={progressTasks ?? tasks} groups={progressGroups ?? groups} />
+
         {/*
           Touch-first horizontal rail: columns stay side-by-side on every
           viewport. On phones/tablets (<lg) the rail is swipeable with CSS

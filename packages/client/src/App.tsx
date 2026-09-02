@@ -410,6 +410,8 @@ function BoardPage({
         <Board
           tasks={filteredTasks}
           groups={groups}
+          progressTasks={tasks}
+          progressGroups={groups}
           getTasksByColumn={getFilteredTasksByColumn}
           onMoveTask={moveTask}
           onTaskClick={handleTaskClick}

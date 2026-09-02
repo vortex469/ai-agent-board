@@ -216,6 +216,53 @@ test.describe('Roadmap intake UI', () => {
     ]);
   });
 
+  test('shows roadmap-level progress across project cards', async ({ page, request }) => {
+    const stamp = Date.now();
+    const project = await createProject(request, `Roadmap Progress Project ${stamp}`);
+    createdProjectIds.push(project.id);
+
+    const createTask = async (title: string) => {
+      const res = await request.post(`${API}/api/tasks`, {
+        data: {
+          title,
+          description: 'Roadmap progress fixture',
+          columnId: 'backlog',
+          projectId: project.id,
+        },
+      });
+      expect(res.status()).toBe(201);
+      const task = await res.json();
+      createdTaskIds.push(task.id);
+      return task;
+    };
+
+    const done = await createTask(`01. Completed progress ${stamp}`);
+    await request.patch(`${API}/api/tasks/${done.id}`, { data: { columnId: 'in-progress' } });
+    await request.patch(`${API}/api/tasks/${done.id}`, { data: { columnId: 'review', agentStatus: 'complete' } });
+    await request.patch(`${API}/api/tasks/${done.id}`, { data: { columnId: 'done', agentStatus: 'complete' } });
+
+    const running = await createTask(`02. Running progress ${stamp}`);
+    await request.patch(`${API}/api/tasks/${running.id}`, { data: { columnId: 'in-progress' } });
+    await request.patch(`${API}/api/tasks/${running.id}`, { data: { agentStatus: 'executing' } });
+
+    const review = await createTask(`03. Review progress ${stamp}`);
+    await request.patch(`${API}/api/tasks/${review.id}`, { data: { columnId: 'in-progress' } });
+    await request.patch(`${API}/api/tasks/${review.id}`, { data: { columnId: 'review', agentStatus: 'complete' } });
+
+    await createTask(`04. Next progress ${stamp}`);
+
+    await page.goto(`/projects/${encodeURIComponent(project.id)}`);
+    await waitForBoard(page);
+
+    const progress = page.getByRole('region', { name: 'Roadmap progress' });
+    await expect(progress).toBeVisible();
+    await expect(progress.getByLabel('Total cards')).toHaveText('4');
+    await expect(progress.getByLabel('Completed cards')).toHaveText('1');
+    await expect(progress.getByLabel('Current running card')).toHaveText(`02. Running progress ${stamp}`);
+    await expect(progress.getByLabel('Blocked or review card')).toHaveText(`03. Review progress ${stamp}`);
+    await expect(progress.getByLabel('Next eligible card')).toHaveText(`04. Next progress ${stamp}`);
+  });
+
   test('start now submits normal in-progress autoRun task definitions for the selected project', async ({ page, request }) => {
     const project = await createProject(request, `Roadmap UI Project ${Date.now()}`);
     createdProjectIds.push(project.id);
