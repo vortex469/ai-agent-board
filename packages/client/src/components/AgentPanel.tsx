@@ -212,6 +212,59 @@ function compactToolSummary(content: string | undefined): string | null {
   return oneLine.length > 80 ? oneLine.slice(0, 80) + '...' : oneLine;
 }
 
+function getMarkdownSection(markdown: string, heading: string): string {
+  const escapedHeading = heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = markdown.match(new RegExp(`^##\\s*${escapedHeading}\\s*\\r?\\n([\\s\\S]*?)(?=\\r?\\n##\\s|$)`, 'im'));
+  return match?.[1].trim() ?? '';
+}
+
+function cleanSummarySection(section: string): string {
+  return section
+    .replace(/\r\n/g, '\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function formatTaskStatus(task: Task): string {
+  const columnLabel = {
+    backlog: 'Backlog',
+    'in-progress': 'In Progress',
+    review: 'Review',
+    done: 'Done',
+  }[task.columnId];
+
+  const agentStatusLabel = {
+    idle: 'Idle',
+    planning: 'Planning',
+    executing: 'Executing',
+    complete: 'Complete',
+    failed: 'Failed',
+  }[task.agentStatus];
+
+  return `${columnLabel} / ${agentStatusLabel}`;
+}
+
+function formatTaskResultForCopy(task: Task, summary: string): string {
+  const completed = cleanSummarySection(getMarkdownSection(summary, 'Completed'));
+  const comments = cleanSummarySection(getMarkdownSection(summary, 'Comments'));
+  const remaining = cleanSummarySection(getMarkdownSection(summary, 'Remaining'));
+
+  return [
+    `Title: ${task.title}`,
+    `Status: ${formatTaskStatus(task)}`,
+    '',
+    'Completed:',
+    completed,
+    '',
+    'Comments:',
+    comments,
+    '',
+    'Remaining:',
+    remaining,
+  ].join('\n').replace(/\n{3,}/g, '\n\n').trimEnd();
+}
+
 
 interface AgentPanelProps {
   task: Task | null;
@@ -442,6 +495,8 @@ export function AgentPanel({ task, onClose, onRun, onStop, onCreatePR, onMergeLo
   const imageInputRef = useRef<HTMLInputElement>(null);
   const [descExpanded, setDescExpanded] = useState(false);
   const [activeTab, setActiveTab] = useState<'summary' | 'events' | 'terminal' | 'changes'>('events');
+  const [resultCopied, setResultCopied] = useState(false);
+  const resultCopiedTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   // Tracks whether the user manually picked a tab for the current task, so the
   // auto-default (Summary for review/done) doesn't clobber an explicit choice.
   const userSelectedTabRef = useRef(false);
@@ -456,6 +511,8 @@ export function AgentPanel({ task, onClose, onRun, onStop, onCreatePR, onMergeLo
   const agentStatus = task?.agentStatus;
   const errorEvents = useMemo(() => events.filter((event) => event.type === 'error'), [events]);
   const latestError = errorEvents[errorEvents.length - 1];
+
+  useEffect(() => () => { clearTimeout(resultCopiedTimerRef.current); }, []);
 
   useEffect(() => {
     if (!taskId) {
@@ -479,6 +536,8 @@ export function AgentPanel({ task, onClose, onRun, onStop, onCreatePR, onMergeLo
     setFollowUpMessage('');
     setSending(false);
     setFollowUpImages([]);
+    setResultCopied(false);
+    clearTimeout(resultCopiedTimerRef.current);
     // Allow the auto-default tab to apply for the newly selected task
     userSelectedTabRef.current = false;
 
@@ -573,6 +632,7 @@ export function AgentPanel({ task, onClose, onRun, onStop, onCreatePR, onMergeLo
   };
   const showSummaryTab = columnId === 'review' || columnId === 'done';
   const summaryText = task?.summary ?? null;
+  const copyResultText = task && summaryText ? formatTaskResultForCopy(task, summaryText) : '';
   // The "Completed" section is required; flag when it's missing or empty.
   const completedSectionFilled = useMemo(() => {
     if (!summaryText) return false;
@@ -611,6 +671,17 @@ export function AgentPanel({ task, onClose, onRun, onStop, onCreatePR, onMergeLo
   }, [events]);
 
   const failedWithoutDetails = task?.agentStatus === 'failed' && !latestError;
+
+  const handleCopyResult = () => {
+    if (!copyResultText) return;
+    navigator.clipboard.writeText(copyResultText).then(() => {
+      setResultCopied(true);
+      clearTimeout(resultCopiedTimerRef.current);
+      resultCopiedTimerRef.current = setTimeout(() => setResultCopied(false), 2000);
+    }).catch((err) => {
+      console.warn('[clipboard] copy result failed:', err);
+    });
+  };
 
   const handleSendFollowUp = async () => {
     if (!task || (!followUpMessage.trim() && followUpImages.length === 0) || sending) return;
@@ -991,27 +1062,39 @@ export function AgentPanel({ task, onClose, onRun, onStop, onCreatePR, onMergeLo
               Actions{fileChanges.length > 0 ? ` (${fileChanges.length})` : ''}
             </button>
             </div>
-            {events.length > 0 && (
-              <button
-                onClick={() => {
-                  const md = events.map((e) => {
-                    const label = eventLabelMap[e.type] || e.type;
-                    const meta = e.metadata?.file ? ` (${e.metadata.file})` : '';
-                    return `### ${label}${meta}\n${e.content}`;
-                  }).join('\n\n');
-                  const blob = new Blob([`# Agent Log — ${task.title}\n\n${md}`], { type: 'text/markdown' });
-                  const url = URL.createObjectURL(blob);
-                  const a = document.createElement('a');
-                  a.href = url; a.download = `agent-log-${task.id}.md`; a.click();
-                  URL.revokeObjectURL(url);
-                }}
-                className="flex shrink-0 items-center gap-1 px-2 py-1 text-[10px] text-muted-foreground hover:text-foreground transition-colors max-lg:min-h-11"
-                title="Download event log as markdown"
-              >
-                <Download className="h-3 w-3" />
-                Export
-              </button>
-            )}
+            <div className="flex shrink-0 items-center gap-1">
+              {showSummaryTab && summaryText && (
+                <button
+                  onClick={handleCopyResult}
+                  className="flex shrink-0 items-center gap-1 px-2 py-1 text-[10px] text-muted-foreground hover:text-foreground transition-colors max-lg:min-h-11"
+                  title="Copy clean task result"
+                >
+                  {resultCopied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+                  {resultCopied ? 'Copied' : 'Copy Result'}
+                </button>
+              )}
+              {events.length > 0 && (
+                <button
+                  onClick={() => {
+                    const md = events.map((e) => {
+                      const label = eventLabelMap[e.type] || e.type;
+                      const meta = e.metadata?.file ? ` (${e.metadata.file})` : '';
+                      return `### ${label}${meta}\n${e.content}`;
+                    }).join('\n\n');
+                    const blob = new Blob([`# Agent Log — ${task.title}\n\n${md}`], { type: 'text/markdown' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url; a.download = `agent-log-${task.id}.md`; a.click();
+                    URL.revokeObjectURL(url);
+                  }}
+                  className="flex shrink-0 items-center gap-1 px-2 py-1 text-[10px] text-muted-foreground hover:text-foreground transition-colors max-lg:min-h-11"
+                  title="Download event log as markdown"
+                >
+                  <Download className="h-3 w-3" />
+                  Export
+                </button>
+              )}
+            </div>
           </div>
 
           {/* Summary view */}

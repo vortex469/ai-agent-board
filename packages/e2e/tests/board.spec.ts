@@ -138,6 +138,95 @@ test.describe('Task CRUD', () => {
     await expect(page.getByText('No summary was provided for this task.')).toBeVisible();
   });
 
+  test('Copy Result copies clean task summary without event noise', async ({ page, context }) => {
+    await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+
+    const taskTitle = `Copy Result Task ${Date.now()}`;
+    const taskId = `copy-result-${Date.now()}`;
+    const task = {
+      id: taskId,
+      projectId: 'default',
+      title: taskTitle,
+      description: 'Task with persisted result summary',
+      priority: 'medium',
+      columnId: 'review',
+      agentStatus: 'complete',
+      agentType: 'codex',
+      createdAt: Date.now(),
+      completedAt: Date.now(),
+      summary: [
+        '## Completed',
+        '- Added the copy action.',
+        '- Verified the copied text stays clean.',
+        '',
+        '## Comments',
+        'Ready for review.',
+        '',
+        '## Remaining',
+        'None.',
+      ].join('\n'),
+    };
+    const eventNoise = 'terminal/event noise should not be copied';
+
+    await page.route('**/api/projects', (route) => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify([{ id: 'default', name: 'Default', isDefault: true, createdAt: 1, updatedAt: 1 }]),
+    }));
+    await page.route('**/api/projects/config', (route) => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ cloneRoot: '/tmp' }),
+    }));
+    await page.route('**/api/tasks?*', (route) => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify([task]),
+    }));
+    await page.route(`**/api/tasks/${taskId}/events`, (route) => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify([{
+        id: 'event-noise',
+        taskId,
+        type: 'command_output',
+        content: eventNoise,
+        timestamp: Date.now(),
+      }]),
+    }));
+    await page.route(`**/api/tasks/${taskId}/git-info`, (route) => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ hasRemote: false, mergeReady: true }),
+    }));
+
+    await page.goto('/');
+    await waitForBoard(page);
+    await page.getByRole('heading', { name: taskTitle }).click();
+
+    const copyButton = page.getByRole('button', { name: 'Copy Result' });
+    await expect(copyButton).toBeVisible({ timeout: 3_000 });
+    await copyButton.click();
+    await expect(page.getByRole('button', { name: 'Copied' })).toBeVisible();
+
+    const copiedText = await page.evaluate(() => navigator.clipboard.readText());
+    expect(copiedText).toBe([
+      `Title: ${taskTitle}`,
+      'Status: Review / Complete',
+      '',
+      'Completed:',
+      '- Added the copy action.',
+      '- Verified the copied text stays clean.',
+      '',
+      'Comments:',
+      'Ready for review.',
+      '',
+      'Remaining:',
+      'None.',
+    ].join('\n'));
+    expect(copiedText).not.toContain(eventNoise);
+  });
+
   test('Summary tab is hidden for in-progress tasks', async ({ page }) => {
     const taskTitle = `Progress Panel ${Date.now()}`;
     const taskId = await createTask(page, taskTitle);
