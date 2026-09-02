@@ -23,6 +23,13 @@ import {
 
 const MAX_ORCHESTRATION_OUTPUT = 512 * 1024;
 
+function isSetupOutput(content: string): boolean {
+  return content.startsWith('Git worktree created at ') ||
+    content.startsWith('Reusing existing git worktree at ') ||
+    content.startsWith('Selected Python interpreter: ') ||
+    content.startsWith('No Python interpreter detected during pre-agent setup.');
+}
+
 export function extractOrchestrationOutput(events: AgentEvent[]): string | undefined {
   const finalOutput = [...events].reverse().find((event) => event.type === 'complete' && event.metadata?.finalOutput === true)?.content.trim();
   if (finalOutput) return finalOutput.length <= MAX_ORCHESTRATION_OUTPUT
@@ -30,7 +37,7 @@ export function extractOrchestrationOutput(events: AgentEvent[]): string | undef
     : `[Earlier agent output omitted because it exceeded ${MAX_ORCHESTRATION_OUTPUT} characters.]\n\n${finalOutput.slice(-MAX_ORCHESTRATION_OUTPUT)}`;
 
   let output = events
-    .filter((event) => event.type === 'output' && !event.content.startsWith('Git worktree created at '))
+    .filter((event) => event.type === 'output' && !isSetupOutput(event.content))
     .map((event) => event.content)
     .join('');
   const summaryStart = output.lastIndexOf('<task-summary>');

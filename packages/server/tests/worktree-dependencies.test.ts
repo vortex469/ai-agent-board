@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import type { execFile } from 'node:child_process';
+import type { execFile, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -12,6 +12,7 @@ import {
   buildNpmRunBuildSharedArgs,
   bootstrapNpmWorkspaceIfNeeded,
   detectNodeNpmProject,
+  detectProjectPythonEnvironment,
   getWorktreeDependencyConfig,
   provisionWorktreeDependencies,
   shouldBootstrapNpmWorkspace,
@@ -25,6 +26,15 @@ function makeDir(prefix: string): string {
 function writeNpmProject(root: string): void {
   fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ scripts: {}, dependencies: {} }));
   fs.writeFileSync(path.join(root, 'package-lock.json'), JSON.stringify({ lockfileVersion: 3, packages: {} }));
+}
+
+function writeVenvPython(root: string, name = '.venv'): string {
+  const binDir = process.platform === 'win32' ? 'Scripts' : 'bin';
+  const executableName = process.platform === 'win32' ? 'python.exe' : 'python';
+  const interpreterPath = path.join(root, name, binDir, executableName);
+  fs.mkdirSync(path.dirname(interpreterPath), { recursive: true });
+  fs.writeFileSync(interpreterPath, '');
+  return interpreterPath;
 }
 
 function writeNpmWorkspaceProject(root: string, scripts: Record<string, unknown> = { 'build:shared': 'echo build' }): void {
@@ -67,6 +77,18 @@ function fakeSuccessfulNpmScript(calls: Array<{ file: string; args: readonly str
   }) as typeof execFile;
 }
 
+function fakePythonProbe(
+  calls: Array<{ file: string; args: readonly string[] }>,
+  results: Record<string, string | null>,
+): typeof execFileSync {
+  return ((file: string, args: readonly string[]) => {
+    calls.push({ file, args });
+    const result = results[file];
+    if (!result) throw new Error(`${file} unavailable`);
+    return `${result}\n`;
+  }) as typeof execFileSync;
+}
+
 test('detectNodeNpmProject requires package.json and a supported npm lockfile', () => {
   const root = makeDir('agentboard-node-detect-');
   try {
@@ -82,6 +104,75 @@ test('detectNodeNpmProject requires package.json and a supported npm lockfile', 
     assert.equal(project?.lockfileName, 'package-lock.json');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('python environment detection prefers worktree venv before repository venv', () => {
+  const repo = makeDir('agentboard-python-repo-');
+  const worktree = makeDir('agentboard-python-worktree-');
+  const calls: Array<{ file: string; args: readonly string[] }> = [];
+  try {
+    const repoPython = writeVenvPython(repo);
+    const worktreePython = writeVenvPython(worktree);
+
+    assert.deepEqual(detectProjectPythonEnvironment(worktree, {
+      repoPath: repo,
+      env: { AGENTBOARD_PYTHON_INTERPRETER: '/configured/python' },
+      execFileSyncImpl: fakePythonProbe(calls, { '/configured/python': '/configured/python' }),
+    }), {
+      source: 'worktree-venv',
+      interpreterPath: worktreePython,
+      venvPath: path.join(worktree, '.venv'),
+    });
+    assert.equal(calls.length, 0);
+
+    fs.rmSync(path.join(worktree, '.venv'), { recursive: true, force: true });
+    assert.deepEqual(detectProjectPythonEnvironment(worktree, {
+      repoPath: repo,
+      env: { AGENTBOARD_PYTHON_INTERPRETER: '/configured/python' },
+      execFileSyncImpl: fakePythonProbe(calls, { '/configured/python': '/configured/python' }),
+    }), {
+      source: 'repo-venv',
+      interpreterPath: repoPython,
+      venvPath: path.join(repo, '.venv'),
+    });
+    assert.equal(calls.length, 0);
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+    fs.rmSync(worktree, { recursive: true, force: true });
+  }
+});
+
+test('python environment detection falls back to configured then system interpreter', () => {
+  const worktree = makeDir('agentboard-python-fallback-');
+  try {
+    const configuredCalls: Array<{ file: string; args: readonly string[] }> = [];
+    assert.deepEqual(detectProjectPythonEnvironment(worktree, {
+      env: { AGENTBOARD_PYTHON_INTERPRETER: '/opt/project-python' },
+      execFileSyncImpl: fakePythonProbe(configuredCalls, { '/opt/project-python': '/opt/project-python' }),
+    }), {
+      source: 'configured',
+      interpreterPath: '/opt/project-python',
+    });
+    assert.equal(configuredCalls[0]!.file, '/opt/project-python');
+    assert.deepEqual(configuredCalls[0]!.args, ['-c', 'import sys; print(sys.executable)']);
+
+    const systemCalls: Array<{ file: string; args: readonly string[] }> = [];
+    const firstSystemCandidate = process.platform === 'win32' ? 'py' : 'python3';
+    const firstSystemArgs = process.platform === 'win32'
+      ? ['-3', '-c', 'import sys; print(sys.executable)']
+      : ['-c', 'import sys; print(sys.executable)'];
+    assert.deepEqual(detectProjectPythonEnvironment(worktree, {
+      env: {},
+      execFileSyncImpl: fakePythonProbe(systemCalls, { [firstSystemCandidate]: '/usr/bin/python3' }),
+    }), {
+      source: 'system',
+      interpreterPath: '/usr/bin/python3',
+    });
+    assert.equal(systemCalls[0]!.file, firstSystemCandidate);
+    assert.deepEqual(systemCalls[0]!.args, firstSystemArgs);
+  } finally {
+    fs.rmSync(worktree, { recursive: true, force: true });
   }
 });
 

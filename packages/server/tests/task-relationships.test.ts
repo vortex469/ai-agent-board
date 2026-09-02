@@ -69,9 +69,10 @@ const agents = {
 test('orchestration output reconstructs full agent prose and removes transport summaries', () => {
   const output = extractOrchestrationOutput([
     { id: '1', taskId: 'task-1', type: 'output', content: 'Git worktree created at /tmp/worktree\nBranch: agent/test\nBase: main', timestamp: 1 },
-    { id: '2', taskId: 'task-1', type: 'output', content: 'Phoenix is **90°F**', timestamp: 2 },
-    { id: '3', taskId: 'task-1', type: 'output', content: ' with blowing dust.\n\n', timestamp: 3 },
-    { id: '4', taskId: 'task-1', type: 'output', content: '<task-summary>## Completed\nRetrieved weather.\n## Remaining</task-summary>', timestamp: 4 },
+    { id: '2', taskId: 'task-1', type: 'output', content: 'Selected Python interpreter: /tmp/worktree/.venv/bin/python (worktree-venv).', timestamp: 2 },
+    { id: '3', taskId: 'task-1', type: 'output', content: 'Phoenix is **90°F**', timestamp: 3 },
+    { id: '4', taskId: 'task-1', type: 'output', content: ' with blowing dust.\n\n', timestamp: 4 },
+    { id: '5', taskId: 'task-1', type: 'output', content: '<task-summary>## Completed\nRetrieved weather.\n## Remaining</task-summary>', timestamp: 5 },
   ]);
   assert.equal(output, 'Phoenix is **90°F** with blowing dust.');
 });

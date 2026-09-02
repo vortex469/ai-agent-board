@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -23,6 +23,14 @@ export interface NodeProjectInfo {
   lockfileName: string;
 }
 
+export type PythonEnvironmentSource = 'worktree-venv' | 'repo-venv' | 'configured' | 'system';
+
+export interface PythonEnvironmentSelection {
+  interpreterPath: string;
+  source: PythonEnvironmentSource;
+  venvPath?: string;
+}
+
 export type WorktreeDependencyProvisionResult =
   | { status: 'skipped'; reason: string }
   | { status: 'already-present'; project: NodeProjectInfo }
@@ -42,6 +50,13 @@ export interface WorktreeWorkspaceBootstrapOptions {
   env?: NodeJS.ProcessEnv;
   fsImpl?: Pick<typeof fs, 'existsSync' | 'readFileSync'>;
   execFileImpl?: typeof execFile;
+}
+
+export interface PythonEnvironmentDetectionOptions {
+  repoPath?: string;
+  env?: NodeJS.ProcessEnv;
+  fsImpl?: Pick<typeof fs, 'existsSync'>;
+  execFileSyncImpl?: typeof execFileSync;
 }
 
 function parsePositiveInteger(value: string | undefined, defaultValue: number, name: string): number {
@@ -86,6 +101,109 @@ export function detectNodeNpmProject(
       return { projectRoot, packageJsonPath, lockfilePath, lockfileName };
     }
   }
+  return null;
+}
+
+function pythonExecutableNames(): string[] {
+  return process.platform === 'win32' ? ['python.exe', 'python'] : ['python'];
+}
+
+function virtualEnvPythonCandidates(rootPath: string): Array<{ venvPath: string; interpreterPath: string }> {
+  const resolvedRoot = path.resolve(rootPath);
+  const venvNames = ['.venv', 'venv'];
+  const binDir = process.platform === 'win32' ? 'Scripts' : 'bin';
+  const candidates: Array<{ venvPath: string; interpreterPath: string }> = [];
+  for (const venvName of venvNames) {
+    const venvPath = path.join(resolvedRoot, venvName);
+    for (const executableName of pythonExecutableNames()) {
+      candidates.push({
+        venvPath,
+        interpreterPath: path.join(venvPath, binDir, executableName),
+      });
+    }
+  }
+  return candidates;
+}
+
+function detectVirtualEnvPython(
+  rootPath: string | undefined,
+  source: Extract<PythonEnvironmentSource, 'worktree-venv' | 'repo-venv'>,
+  fsImpl: Pick<typeof fs, 'existsSync'>,
+): PythonEnvironmentSelection | null {
+  if (!rootPath) return null;
+  for (const candidate of virtualEnvPythonCandidates(rootPath)) {
+    if (fsImpl.existsSync(candidate.interpreterPath)) {
+      return {
+        source,
+        interpreterPath: candidate.interpreterPath,
+        venvPath: candidate.venvPath,
+      };
+    }
+  }
+  return null;
+}
+
+function pythonProbeArgs(prefixArgs: string[] = []): string[] {
+  return [...prefixArgs, '-c', 'import sys; print(sys.executable)'];
+}
+
+function resolveUsablePython(
+  command: string,
+  prefixArgs: string[],
+  execFileSyncImpl: typeof execFileSync,
+): string | null {
+  try {
+    const output = execFileSyncImpl(command, pythonProbeArgs(prefixArgs), {
+      stdio: ['ignore', 'pipe', 'ignore'],
+      encoding: 'utf8',
+    });
+    const executable = String(output).trim();
+    return executable || command;
+  } catch {
+    return null;
+  }
+}
+
+export function detectProjectPythonEnvironment(
+  worktreePath: string | undefined,
+  options: PythonEnvironmentDetectionOptions = {},
+): PythonEnvironmentSelection | null {
+  const env = options.env ?? process.env;
+  const fsImpl = options.fsImpl ?? fs;
+  const execFileSyncImpl = options.execFileSyncImpl ?? execFileSync;
+
+  const worktreeVenv = detectVirtualEnvPython(worktreePath, 'worktree-venv', fsImpl);
+  if (worktreeVenv) return worktreeVenv;
+
+  const repoVenv = detectVirtualEnvPython(options.repoPath, 'repo-venv', fsImpl);
+  if (repoVenv) return repoVenv;
+
+  const configured = env.AGENTBOARD_PYTHON_INTERPRETER?.trim() || env.PYTHON?.trim();
+  if (configured) {
+    const executable = resolveUsablePython(configured, [], execFileSyncImpl);
+    if (executable) {
+      return { source: 'configured', interpreterPath: executable };
+    }
+  }
+
+  const systemCandidates: Array<{ command: string; prefixArgs: string[] }> = process.platform === 'win32'
+    ? [
+        { command: 'py', prefixArgs: ['-3'] },
+        { command: 'python', prefixArgs: [] },
+        { command: 'python3', prefixArgs: [] },
+      ]
+    : [
+        { command: 'python3', prefixArgs: [] },
+        { command: 'python', prefixArgs: [] },
+      ];
+
+  for (const candidate of systemCandidates) {
+    const executable = resolveUsablePython(candidate.command, candidate.prefixArgs, execFileSyncImpl);
+    if (executable) {
+      return { source: 'system', interpreterPath: executable };
+    }
+  }
+
   return null;
 }
 

@@ -22,7 +22,9 @@ import { detectAvailableAgents } from './agent-detection.js';
 import { resolveTaskTimeoutMs } from './agent-timeout.js';
 import {
   bootstrapNpmWorkspaceIfNeeded,
+  detectProjectPythonEnvironment,
   provisionWorktreeDependencies,
+  type PythonEnvironmentSelection,
   shouldBootstrapNpmWorkspace,
 } from './worktree-dependencies.js';
 
@@ -72,8 +74,24 @@ export function buildAgentSystemPrompt(args: {
   repoPath?: string;
   worktreePath?: string;
   hasGit: boolean;
+  pythonEnvironment?: PythonEnvironmentSelection | null;
 }): string {
   const safeTitle = sanitizeAgentPromptText(args.taskTitle);
+  const pythonInstructions = args.pythonEnvironment
+    ? `
+Python environment:
+- Selected interpreter: ${args.pythonEnvironment.interpreterPath}
+- Selection source: ${args.pythonEnvironment.source}
+- Use this interpreter for Python commands, for example: \`${args.pythonEnvironment.interpreterPath} -m pytest\`.
+- If Python packages are needed, never install them globally. ${args.pythonEnvironment.venvPath
+  ? `Use \`${args.pythonEnvironment.interpreterPath} -m pip\` so packages install into ${args.pythonEnvironment.venvPath}.`
+  : `Create or use a project-local virtual environment under ${args.workingDirectory} before installing packages.`}
+`
+    : `
+Python environment:
+- No Python interpreter was detected during setup.
+- If Python is needed, create or use a project-local virtual environment under ${args.workingDirectory}; never install packages globally.
+`;
   return `
 <context>
 You are a coding agent working on a task in the project directory: ${args.workingDirectory}
@@ -81,6 +99,7 @@ Task: ${safeTitle}
 The detailed task description/source item in the user prompt is authoritative. If it conflicts with this generated display title, follow the detailed description/source item.
 ${args.worktreePath ? `\nIMPORTANT: All file paths MUST be under ${args.worktreePath}. Do NOT reference or edit files at ${args.repoPath} directly.` : ''}
 ${!args.hasGit ? `\nIMPORTANT: This directory is not a git repository. Run \`git init\` first before making any changes, so all work is tracked.` : ''}
+${pythonInstructions}
 Complete the task described in the user prompt. Be thorough — read relevant files,
 make precise edits, and verify your changes compile/pass tests when applicable.
 
@@ -742,13 +761,31 @@ export class AgentManager {
       try {
         const workingDirectory = worktreePath || task.repoPath || process.cwd();
         const hasGit = fs.existsSync(path.join(workingDirectory, '.git'));
+        const pythonEnvironment = detectProjectPythonEnvironment(worktreePath, {
+          repoPath: task.repoPath || workingDirectory,
+        });
         const systemPrompt = buildAgentSystemPrompt({
           workingDirectory,
           taskTitle: task.title,
           repoPath: task.repoPath,
           worktreePath,
           hasGit,
+          pythonEnvironment,
         });
+
+        if (pythonEnvironment) {
+          this.emitEvent(task.id, {
+            id: uuid(), taskId: task.id, type: 'output',
+            content: `Selected Python interpreter: ${pythonEnvironment.interpreterPath} (${pythonEnvironment.source}).`,
+            timestamp: Date.now(),
+          });
+        } else {
+          this.emitEvent(task.id, {
+            id: uuid(), taskId: task.id, type: 'output',
+            content: 'No Python interpreter detected during pre-agent setup. Python package installs must still use a project-local virtual environment.',
+            timestamp: Date.now(),
+          });
+        }
 
         if (worktreePath) {
           try {
