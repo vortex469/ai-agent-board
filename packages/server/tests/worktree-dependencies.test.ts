@@ -176,6 +176,48 @@ test('python environment detection falls back to configured then system interpre
   }
 });
 
+test('python environment detection accepts the configured Atlas interpreter for worktree tests', () => {
+  const worktree = makeDir('agentboard-python-atlas-');
+  const calls: Array<{ file: string; args: readonly string[] }> = [];
+  try {
+    assert.deepEqual(detectProjectPythonEnvironment(worktree, {
+      env: { AGENTBOARD_PYTHON_INTERPRETER: '/opt/atlas/.venv/bin/python' },
+      execFileSyncImpl: fakePythonProbe(calls, {
+        '/opt/atlas/.venv/bin/python': '/opt/atlas/.venv/bin/python',
+      }),
+    }), {
+      source: 'configured',
+      interpreterPath: '/opt/atlas/.venv/bin/python',
+    });
+    assert.deepEqual(calls, [{
+      file: '/opt/atlas/.venv/bin/python',
+      args: ['-c', 'import sys; print(sys.executable)'],
+    }]);
+  } finally {
+    fs.rmSync(worktree, { recursive: true, force: true });
+  }
+});
+
+test('python environment detection may select the source repository venv for a worktree', () => {
+  const repo = makeDir('agentboard-python-atlas-repo-');
+  const worktree = makeDir('agentboard-python-atlas-worktree-');
+  try {
+    const repoPython = writeVenvPython(repo);
+
+    assert.deepEqual(detectProjectPythonEnvironment(worktree, {
+      repoPath: repo,
+      env: {},
+    }), {
+      source: 'repo-venv',
+      interpreterPath: repoPython,
+      venvPath: path.join(repo, '.venv'),
+    });
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+    fs.rmSync(worktree, { recursive: true, force: true });
+  }
+});
+
 test('dependency config uses safe defaults and validates overrides', () => {
   assert.deepEqual(getWorktreeDependencyConfig({}), {
     maxConcurrentInstalls: DEFAULT_WORKTREE_DEPENDENCY_CONCURRENCY,

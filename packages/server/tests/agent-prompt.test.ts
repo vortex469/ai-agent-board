@@ -40,6 +40,29 @@ test('agent system prompt records selected Python interpreter and forbids global
 
   assert.match(systemPrompt, /Selected interpreter: \/tmp\/worktree\/\.venv\/bin\/python/);
   assert.match(systemPrompt, /Selection source: worktree-venv/);
+  assert.match(systemPrompt, /cd \/tmp\/worktree && \/tmp\/worktree\/\.venv\/bin\/python -m pytest/);
+  assert.match(systemPrompt, /Do not run bare `pytest`, a different Python executable, or tests from another checkout/);
   assert.match(systemPrompt, /never install them globally/i);
   assert.match(systemPrompt, /\/tmp\/worktree\/\.venv\/bin\/python -m pip/);
+});
+
+test('agent system prompt permits an external selected interpreter only for worktree-scoped test commands', () => {
+  const systemPrompt = buildAgentSystemPrompt({
+    workingDirectory: '/tmp/agentboard-task-worktree',
+    taskTitle: 'Run Atlas tests',
+    repoPath: '/opt/atlas',
+    worktreePath: '/tmp/agentboard-task-worktree',
+    hasGit: true,
+    pythonEnvironment: {
+      source: 'repo-venv',
+      interpreterPath: '/opt/atlas/.venv/bin/python',
+      venvPath: '/opt/atlas/.venv',
+    },
+  });
+
+  assert.match(systemPrompt, /Selected interpreter: \/opt\/atlas\/\.venv\/bin\/python/);
+  assert.match(systemPrompt, /cd \/tmp\/agentboard-task-worktree && \/opt\/atlas\/\.venv\/bin\/python -m pytest/);
+  assert.match(systemPrompt, /interpreter may live outside the task worktree/);
+  assert.match(systemPrompt, /allowed only as the Python executable for commands run in \/tmp\/agentboard-task-worktree/);
+  assert.match(systemPrompt, /keep all file reads, writes, and test working directories inside \/tmp\/agentboard-task-worktree/);
 });
