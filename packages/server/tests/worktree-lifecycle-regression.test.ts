@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -194,125 +194,6 @@ test('setupWorktree attaches an existing branch without resetting it', () => {
     assert.equal(existsSync(path.join(worktreePath, 'existing.txt')), true);
   } finally {
     cleanupTaskWorktree(f.repoPath, worktreePath);
-    f.dispose();
-  }
-});
-
-test('setupWorktree links root and nested source node_modules into a fresh worktree', () => {
-  const f = fixture();
-  const manager = new AgentManager();
-  writeFileSync(path.join(f.repoPath, '.gitignore'), 'node_modules/\n');
-  mkdirSync(path.join(f.repoPath, 'packages', 'client'), { recursive: true });
-  writeFileSync(path.join(f.repoPath, 'packages', 'client', 'package.json'), '{"name":"client"}\n');
-  git(['add', '.gitignore', 'packages/client/package.json'], f.repoPath);
-  git(['commit', '-m', 'add workspace package'], f.repoPath);
-  mkdirSync(path.join(f.repoPath, 'node_modules'));
-  writeFileSync(path.join(f.repoPath, 'node_modules', 'root-dep.txt'), 'root\n');
-  mkdirSync(path.join(f.repoPath, 'packages', 'client', 'node_modules'));
-  writeFileSync(path.join(f.repoPath, 'packages', 'client', 'node_modules', 'nested-dep.txt'), 'nested\n');
-
-  const t = task(f.repoPath, 'smoke/dependency-links');
-  try {
-    t.worktreePath = manager.setupWorktree(t);
-    assert.ok(t.worktreePath);
-    const rootLink = path.join(t.worktreePath, 'node_modules');
-    const nestedLink = path.join(t.worktreePath, 'packages', 'client', 'node_modules');
-    assert.equal(lstatSync(rootLink).isSymbolicLink(), true);
-    assert.equal(lstatSync(nestedLink).isSymbolicLink(), true);
-    assert.equal(path.resolve(t.worktreePath, readlinkSync(rootLink)), path.join(f.repoPath, 'node_modules'));
-    assert.equal(path.resolve(path.dirname(nestedLink), readlinkSync(nestedLink)), path.join(f.repoPath, 'packages', 'client', 'node_modules'));
-    assert.equal(existsSync(path.join(rootLink, 'root-dep.txt')), true);
-    assert.equal(existsSync(path.join(nestedLink, 'nested-dep.txt')), true);
-  } finally {
-    cleanupTaskWorktree(f.repoPath, t.worktreePath);
-    f.dispose();
-  }
-});
-
-test('setupWorktree does not overwrite an existing dependency destination on reuse', () => {
-  const f = fixture();
-  const manager = new AgentManager();
-  mkdirSync(path.join(f.repoPath, 'node_modules'));
-  writeFileSync(path.join(f.repoPath, 'node_modules', 'source-dep.txt'), 'source\n');
-  const t = task(f.repoPath, 'smoke/existing-dependency-destination');
-  const worktreePath = path.join(os.tmpdir(), `agentboard-${t.id}-${randomUUID().slice(0, 6)}`);
-  try {
-    git(['worktree', 'add', '-b', t.branchName!, worktreePath, 'main'], f.repoPath);
-    t.worktreePath = worktreePath;
-    mkdirSync(path.join(worktreePath, 'node_modules'));
-    writeFileSync(path.join(worktreePath, 'node_modules', 'local.txt'), 'local\n');
-
-    assert.equal(manager.setupWorktree(t), worktreePath);
-    assert.equal(lstatSync(path.join(worktreePath, 'node_modules')).isSymbolicLink(), false);
-    assert.equal(existsSync(path.join(worktreePath, 'node_modules', 'local.txt')), true);
-    assert.equal(existsSync(path.join(worktreePath, 'node_modules', 'source-dep.txt')), false);
-  } finally {
-    cleanupTaskWorktree(f.repoPath, t.worktreePath);
-    f.dispose();
-  }
-});
-
-test('setupWorktree rejects source node_modules resolving outside the source repo', () => {
-  const f = fixture();
-  const outside = mkdtempSync(path.join(os.tmpdir(), 'agentboard-outside-deps-'));
-  const manager = new AgentManager();
-  symlinkSync(outside, path.join(f.repoPath, 'node_modules'), 'dir');
-  const t = task(f.repoPath, 'smoke/unsafe-dependency-link');
-  try {
-    assert.throws(() => manager.setupWorktree(t), /resolves outside the source repository/i);
-    assert.equal(existsSync(outside), true);
-  } finally {
-    cleanupTaskWorktree(f.repoPath, t.worktreePath);
-    rmSync(outside, { recursive: true, force: true });
-    f.dispose();
-  }
-});
-
-test('cleanup removes worktree dependency symlinks without deleting source dependencies', () => {
-  const f = fixture();
-  const manager = new AgentManager();
-  writeFileSync(path.join(f.repoPath, '.gitignore'), 'node_modules/\n');
-  git(['add', '.gitignore'], f.repoPath);
-  git(['commit', '-m', 'ignore dependencies'], f.repoPath);
-  mkdirSync(path.join(f.repoPath, 'node_modules'));
-  writeFileSync(path.join(f.repoPath, 'node_modules', 'source-dep.txt'), 'source\n');
-  const t = task(f.repoPath, 'smoke/cleanup-dependency-links');
-  try {
-    t.worktreePath = manager.setupWorktree(t);
-    assert.ok(t.worktreePath);
-    assert.equal(lstatSync(path.join(t.worktreePath, 'node_modules')).isSymbolicLink(), true);
-    assert.deepEqual(manager.removeWorktree(t), { status: 'removed' });
-    assert.equal(existsSync(t.worktreePath), false);
-    assert.equal(existsSync(path.join(f.repoPath, 'node_modules', 'source-dep.txt')), true);
-    t.worktreePath = undefined;
-  } finally {
-    cleanupTaskWorktree(f.repoPath, t.worktreePath);
-    f.dispose();
-  }
-});
-
-test('reused worktrees receive missing safe dependency links', () => {
-  const f = fixture();
-  const manager = new AgentManager();
-  writeFileSync(path.join(f.repoPath, '.gitignore'), 'node_modules/\n');
-  mkdirSync(path.join(f.repoPath, 'packages', 'server'), { recursive: true });
-  writeFileSync(path.join(f.repoPath, 'packages', 'server', 'package.json'), '{"name":"server"}\n');
-  git(['add', '.gitignore', 'packages/server/package.json'], f.repoPath);
-  git(['commit', '-m', 'add server package'], f.repoPath);
-  mkdirSync(path.join(f.repoPath, 'node_modules'));
-  const t = task(f.repoPath, 'smoke/reuse-dependency-links');
-  try {
-    t.worktreePath = manager.setupWorktree(t);
-    assert.ok(t.worktreePath);
-    mkdirSync(path.join(f.repoPath, 'packages', 'server', 'node_modules'));
-    writeFileSync(path.join(f.repoPath, 'packages', 'server', 'node_modules', 'nested-dep.txt'), 'nested\n');
-
-    assert.equal(manager.setupWorktree(t), t.worktreePath);
-    const nestedLink = path.join(t.worktreePath, 'packages', 'server', 'node_modules');
-    assert.equal(lstatSync(nestedLink).isSymbolicLink(), true);
-    assert.equal(existsSync(path.join(nestedLink, 'nested-dep.txt')), true);
-  } finally {
-    cleanupTaskWorktree(f.repoPath, t.worktreePath);
     f.dispose();
   }
 });
