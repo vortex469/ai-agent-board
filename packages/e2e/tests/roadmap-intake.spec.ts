@@ -171,16 +171,21 @@ v0.41 - Kanban creation
 
 test.describe('Roadmap intake UI', () => {
   const createdTaskIds: string[] = [];
+  const createdGroupIds: string[] = [];
   const createdProjectIds: string[] = [];
 
   test.afterEach(async ({ request }) => {
     for (const id of createdTaskIds) {
       await request.delete(`${API}/api/tasks/${id}`).catch(() => {});
     }
+    for (const id of createdGroupIds) {
+      await request.delete(`${API}/api/groups/${id}`).catch(() => {});
+    }
     for (const id of createdProjectIds) {
       await request.delete(`${API}/api/projects/${id}`).catch(() => {});
     }
     createdTaskIds.length = 0;
+    createdGroupIds.length = 0;
     createdProjectIds.length = 0;
   });
 
@@ -241,9 +246,22 @@ test.describe('Roadmap intake UI', () => {
     await request.patch(`${API}/api/tasks/${done.id}`, { data: { columnId: 'review', agentStatus: 'complete' } });
     await request.patch(`${API}/api/tasks/${done.id}`, { data: { columnId: 'done', agentStatus: 'complete' } });
 
-    const running = await createTask(`02. Running progress ${stamp}`);
-    await request.patch(`${API}/api/tasks/${running.id}`, { data: { columnId: 'in-progress' } });
-    await request.patch(`${API}/api/tasks/${running.id}`, { data: { agentStatus: 'executing' } });
+    const groupRes = await request.post(`${API}/api/groups`, {
+      data: {
+        title: `02. Running group progress ${stamp}`,
+        description: 'Roadmap progress group fixture',
+        maxConcurrency: 1,
+        projectId: project.id,
+        children: [
+          { title: `Grouped child A ${stamp}`, description: 'First child' },
+          { title: `Grouped child B ${stamp}`, description: 'Second child' },
+        ],
+      },
+    });
+    expect(groupRes.status()).toBe(201);
+    const group = await groupRes.json();
+    createdGroupIds.push(group.id);
+    await request.patch(`${API}/api/tasks/${group.children[0].id}`, { data: { agentStatus: 'executing' } });
 
     const review = await createTask(`03. Review progress ${stamp}`);
     await request.patch(`${API}/api/tasks/${review.id}`, { data: { columnId: 'in-progress' } });
@@ -258,7 +276,7 @@ test.describe('Roadmap intake UI', () => {
     await expect(progress).toBeVisible();
     await expect(progress.getByLabel('Total cards')).toHaveText('4');
     await expect(progress.getByLabel('Completed cards')).toHaveText('1');
-    await expect(progress.getByLabel('Current running card')).toHaveText(`02. Running progress ${stamp}`);
+    await expect(progress.getByLabel('Current running card')).toHaveText(`02. Running group progress ${stamp}`);
     await expect(progress.getByLabel('Blocked or review card')).toHaveText(`03. Review progress ${stamp}`);
     await expect(progress.getByLabel('Next eligible card')).toHaveText(`04. Next progress ${stamp}`);
   });

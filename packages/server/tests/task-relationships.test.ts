@@ -322,6 +322,135 @@ test('completed prerequisite progression starts the next queued dependent card',
   } finally { db.close(); }
 });
 
+test('completed prerequisite progression starts queued dependents in roadmap order', async () => {
+  const db = makeDb();
+  const repo = new SqliteTaskRepository(db);
+  const started: string[] = [];
+  const manager = {
+    ...agents,
+    startAgent: (startedTask: Task) => { started.push(startedTask.id); },
+  } as unknown as AgentManager;
+  try {
+    await repo.create({ ...task('first'), columnId: 'done', agentStatus: 'complete' });
+    await repo.create(task('second'));
+    await repo.create(task('third'));
+    await repo.createDependency('first', 'third', 30);
+    await repo.createDependency('first', 'second', 20);
+    await repo.requestRun('second', 40);
+    await repo.requestRun('third', 41);
+
+    const first = await repo.getById('first');
+    assert(first);
+    await triggerAutomaticDependentProgression(repo, first, manager);
+
+    assert.deepEqual(started, ['second']);
+    assert.equal((await repo.getById('second'))?.columnId, 'in-progress');
+    assert.equal((await repo.getById('third'))?.columnId, 'backlog');
+  } finally { db.close(); }
+});
+
+test('automatic dependent progression fail-stops instead of skipping a manual Review interruption', async () => {
+  const db = makeDb();
+  const repo = new SqliteTaskRepository(db);
+  const started: string[] = [];
+  const manager = {
+    ...agents,
+    startAgent: (startedTask: Task) => { started.push(startedTask.id); },
+  } as unknown as AgentManager;
+  try {
+    await repo.create({ ...task('first'), columnId: 'done', agentStatus: 'complete' });
+    await repo.create({ ...task('second'), columnId: 'review', agentStatus: 'complete' });
+    await repo.create(task('third'));
+    await repo.createDependency('first', 'second', 20);
+    await repo.createDependency('first', 'third', 30);
+    await repo.requestRun('second', 40);
+    await repo.requestRun('third', 41);
+
+    const first = await repo.getById('first');
+    assert(first);
+    await triggerAutomaticDependentProgression(repo, first, manager);
+
+    assert.deepEqual(started, []);
+    assert.equal((await repo.getById('second'))?.columnId, 'review');
+    assert.equal((await repo.getById('third'))?.columnId, 'backlog');
+    assert.equal((await repo.getById('third'))?.runClaimedAt, undefined);
+  } finally { db.close(); }
+});
+
+test('automatic dependent progression stops when any prerequisite failed', async () => {
+  const db = makeDb();
+  const repo = new SqliteTaskRepository(db);
+  const started: string[] = [];
+  const manager = {
+    ...agents,
+    startAgent: (startedTask: Task) => { started.push(startedTask.id); },
+  } as unknown as AgentManager;
+  try {
+    await repo.create({ ...task('first'), columnId: 'done', agentStatus: 'complete' });
+    await repo.create({ ...task('blocked'), columnId: 'done', agentStatus: 'failed' });
+    await repo.create(task('dependent'));
+    await repo.createDependency('first', 'dependent', 20);
+    await repo.createDependency('blocked', 'dependent', 21);
+    await repo.requestRun('dependent', 40);
+
+    const first = await repo.getById('first');
+    assert(first);
+    await triggerAutomaticDependentProgression(repo, first, manager);
+
+    assert.deepEqual(started, []);
+    assert.equal((await repo.getById('dependent'))?.columnId, 'backlog');
+    assert.equal((await repo.getById('dependent'))?.agentStatus, 'idle');
+  } finally { db.close(); }
+});
+
+test('automatic dependent progression leaves claimed cards for safe resume recovery', async () => {
+  const db = makeDb();
+  const repo = new SqliteTaskRepository(db);
+  const started: string[] = [];
+  const manager = {
+    ...agents,
+    startAgent: (startedTask: Task) => { started.push(startedTask.id); },
+  } as unknown as AgentManager;
+  try {
+    await repo.create({ ...task('first'), columnId: 'done', agentStatus: 'complete' });
+    await repo.create({ ...task('second'), runRequestedAt: 20, runClaimedAt: 21 });
+    await repo.createDependency('first', 'second', 30);
+
+    const first = await repo.getById('first');
+    assert(first);
+    await triggerAutomaticDependentProgression(repo, first, manager);
+
+    assert.deepEqual(started, []);
+    assert.equal((await repo.getById('second'))?.runClaimedAt, 21);
+    assert.equal((await repo.getById('second'))?.columnId, 'backlog');
+  } finally { db.close(); }
+});
+
+test('safe resume reclaims a stale queued dependent after prerequisites are done', async () => {
+  const db = makeDb();
+  const repo = new SqliteTaskRepository(db);
+  const started: string[] = [];
+  const manager = {
+    ...agents,
+    startAgent: (startedTask: Task) => { started.push(startedTask.id); },
+  } as unknown as AgentManager;
+  try {
+    await repo.create({ ...task('first'), columnId: 'done', agentStatus: 'complete' });
+    await repo.create({ ...task('second'), runRequestedAt: 20, runClaimedAt: 21 });
+    await repo.createDependency('first', 'second', 30);
+
+    const stale = await repo.getPendingRuns(30_022);
+    assert.deepEqual(stale.map((item) => item.id), ['second']);
+    await startAgentForTask(stale[0], repo, manager);
+
+    assert.deepEqual(started, ['second']);
+    const second = await repo.getById('second');
+    assert.equal(second?.columnId, 'in-progress');
+    assert.equal(second?.agentStatus, 'planning');
+    assert.ok(second?.runClaimedAt && second.runClaimedAt > 21);
+  } finally { db.close(); }
+});
+
 test('completed prerequisite progression leaves unqueued dependent cards in backlog', async () => {
   const db = makeDb();
   const repo = new SqliteTaskRepository(db);
