@@ -23,6 +23,9 @@ type ParsedBlock = {
 const VERSION_HEADING_RE = /^\s{0,3}(?:#{1,6}\s*)?(?:\*\*)?((?:v|version)\s*\d+(?:\.\d+){0,3}(?:[-._]?[a-z0-9]+)?)(?:\*\*)?(?:\s*(?:[-:]|\u2013|\u2014)\s*(.+))?\s*$/i;
 const ITEM_RE = /^\s*(?:[-*+]\s+|\d{1,3}[.)]\s+|\[[ xX]\]\s+)(.+?)\s*$/;
 const CHECKBOX_ITEM_RE = /^\s*[-*+]\s+\[[ xX]\]\s+(.+?)\s*$/;
+const VERSION_TITLE_RE = /^((?:v|version)\s*\d+(?:\.\d+){0,3}(?:[-._]?[a-z0-9]+)?):\s*(.+)$/i;
+const DETAIL_CLAUSE_RE = /\s+(?:so|while|because|in order to)\s+/i;
+const CODE_IDENTIFIER_RE = /(?<![\w-])(?:--[a-z0-9][a-z0-9-]*|[A-Z][A-Z0-9]*_[A-Z0-9_]+(?:\.[A-Za-z0-9]+)?|[A-Z][A-Z0-9]{2,}\.[A-Za-z0-9]+|(?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.@-]+|[A-Za-z0-9_.-]+@[0-9][A-Za-z0-9._-]*|[A-Za-z0-9_-]+\.(?:[cm]?[jt]sx?|md|json|ya?ml|toml|env|sh|ps1|css|html|sql|py|rb|go|rs|java|cs|php|txt))(?![\w-])/g;
 
 export function parseRoadmapText(input: unknown): RoadmapParseResult | string {
   if (typeof input !== 'string') return 'Roadmap text is required';
@@ -140,11 +143,53 @@ function makeTitle(raw: string, order: number): string {
     .replace(/^#+\s*/, '')
     .replace(/\s+#\d+$/g, '')
     .trim();
-  const displayText = stripDisplayMarkdown(cleaned);
-  const beforeColon = displayText.match(/^(.{8,80}?):\s+\S/);
-  const titleText = beforeColon ? beforeColon[1] : displayText;
+  const displayText = makeDisplayTitleText(stripDisplayMarkdown(cleaned));
+  const titleText = trimColonDetail(displayText);
   const numbered = `${String(order).padStart(2, '0')}. ${clamp(titleText, MAX_TITLE_LENGTH - 4)}`;
   return clamp(numbered, MAX_TITLE_LENGTH);
+}
+
+function makeDisplayTitleText(value: string): string {
+  const versionTitle = value.match(VERSION_TITLE_RE);
+  if (versionTitle) {
+    return `${normalizeWhitespace(versionTitle[1])}: ${summarizeTitleText(versionTitle[2])}`;
+  }
+  return summarizeTitleText(value);
+}
+
+function summarizeTitleText(value: string): string {
+  const firstSentence = value.match(/^(.+?[.!?])\s+\S/);
+  const sentenceText = firstSentence ? firstSentence[1] : value;
+  const detailClause = sentenceText.match(DETAIL_CLAUSE_RE);
+  const conciseText = detailClause && detailClause.index !== undefined && detailClause.index >= 18
+    ? sentenceText.slice(0, detailClause.index)
+    : sentenceText;
+  return humanizeDisplayIdentifiers(normalizeWhitespace(conciseText).replace(/[.!?]+$/, ''));
+}
+
+function trimColonDetail(value: string): string {
+  const versionTitle = value.match(VERSION_TITLE_RE);
+  if (versionTitle) {
+    const body = trimColonDetail(versionTitle[2]);
+    return `${normalizeWhitespace(versionTitle[1])}: ${body}`;
+  }
+
+  const beforeColon = value.match(/^(.{8,80}?):\s+\S/);
+  return beforeColon ? beforeColon[1] : value;
+}
+
+function humanizeDisplayIdentifiers(value: string): string {
+  return normalizeWhitespace(value.replace(CODE_IDENTIFIER_RE, (identifier) => {
+    const withoutVersion = identifier.replace(/@[0-9][A-Za-z0-9._-]*$/, '');
+    const withoutExtension = withoutVersion.replace(/\.[A-Za-z0-9]+$/, '');
+    const pathParts = withoutExtension.split('/').filter(Boolean);
+    const basename = identifier.includes('@') && pathParts.length > 1
+      ? pathParts.join(' ')
+      : pathParts.pop() ?? withoutExtension;
+    const words = basename.replace(/^--/, '').split(/[-_.]+/).filter(Boolean);
+    if (words.length === 0) return identifier;
+    return words.map((word) => word.toLowerCase()).join(' ');
+  }));
 }
 
 function stripDisplayMarkdown(value: string): string {

@@ -27,7 +27,7 @@ test('parses a single plain-text instruction into one ordered card', () => {
   if (typeof result === 'string') return;
   assert.equal(result.tasks.length, 1);
   assert.equal(result.tasks[0].order, 1);
-  assert.equal(result.tasks[0].title, '01. Build the roadmap intake parser regression coverage.');
+  assert.equal(result.tasks[0].title, '01. Build the roadmap intake parser regression coverage');
   assert.equal(result.tasks[0].sourceText, 'Build the roadmap intake parser regression coverage.');
 });
 
@@ -82,7 +82,7 @@ test('parses numbered roadmap items without an LLM', () => {
   assert.match(result.tasks[0].sourceText, /Add webhook retry controls/);
 });
 
-test('preserves exact code-like identifiers when deriving roadmap card titles', () => {
+test('humanizes code-like identifiers in titles while preserving exact source descriptions', () => {
   const result = parseRoadmapText(`
 - Create ROADMAP_PIPELINE_SMOKE.md
 - Validate --dry-run behavior
@@ -95,15 +95,27 @@ test('preserves exact code-like identifiers when deriving roadmap card titles', 
   assert.notEqual(typeof result, 'string');
   if (typeof result === 'string') return;
   assert.deepEqual(result.tasks.map((task) => task.title), [
-    '01. Create ROADMAP_PIPELINE_SMOKE.md',
-    '02. Validate --dry-run behavior',
-    '03. Read SOME_ENV_VAR before launch',
-    '04. Update src/foo_bar.ts',
-    '05. Pin package/name@1.2.3',
+    '01. Create roadmap pipeline smoke',
+    '02. Validate dry run behavior',
+    '03. Read some env var before launch',
+    '04. Update foo bar',
+    '05. Pin package name',
     '06. Write normal prose title',
   ]);
   assert.equal(result.tasks[0].sourceText, '- Create ROADMAP_PIPELINE_SMOKE.md');
   assert.equal(result.tasks[3].description, 'Source roadmap item:\n\n- Update src/foo_bar.ts');
+});
+
+test('summarizes long versioned roadmap items while keeping the source authoritative', () => {
+  const result = parseRoadmapText('v0.1 - Improve Roadmap Intake card titles so generated titles are concise and readable while preserving exact identifiers in the source description.');
+
+  assert.notEqual(typeof result, 'string');
+  if (typeof result === 'string') return;
+  assert.equal(result.tasks[0].title, '01. v0.1: Improve Roadmap Intake card titles');
+  assert.equal(
+    result.tasks[0].description,
+    'Source roadmap item:\n\nv0.1 - Improve Roadmap Intake card titles so generated titles are concise and readable while preserving exact identifiers in the source description.',
+  );
 });
 
 test('keeps multiline continuation text with its roadmap item', () => {
