@@ -2,7 +2,6 @@ import type { Page } from '@playwright/test';
 import { expect } from '@playwright/test';
 import { execFileSync } from 'child_process';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'fs';
-import os from 'os';
 import path from 'path';
 
 const TEST_SERVER_PORT = process.env.E2E_SERVER_PORT ?? '3002';

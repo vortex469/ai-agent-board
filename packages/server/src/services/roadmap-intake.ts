@@ -26,11 +26,12 @@ const CHECKBOX_ITEM_RE = /^\s*[-*+]\s+\[[ xX]\]\s+(.+?)\s*$/;
 
 export function parseRoadmapText(input: unknown): RoadmapParseResult | string {
   if (typeof input !== 'string') return 'Roadmap text is required';
-  const text = input.replace(/\r\n?/g, '\n').trim();
-  if (!text) return 'Paste roadmap text before previewing';
-  if (text.length > ROADMAP_TEXT_LIMIT) return `Roadmap text must be at most ${ROADMAP_TEXT_LIMIT.toLocaleString()} characters`;
+  const text = input.replace(/\r\n?/g, '\n');
+  const trimmedText = text.trim();
+  if (!trimmedText) return 'Paste roadmap text before previewing';
+  if (trimmedText.length > ROADMAP_TEXT_LIMIT) return `Roadmap text must be at most ${ROADMAP_TEXT_LIMIT.toLocaleString()} characters`;
 
-  const lines = text.split('\n');
+  const lines = trimmedText.split('\n');
   const versionBlocks = parseVersionBlocks(lines);
   const listBlocks = versionBlocks.length > 0 ? [] : parseListBlocks(lines);
   const blocks = versionBlocks.length > 0 ? versionBlocks : listBlocks.length > 0 ? listBlocks : parsePlainTextBlock(lines);
@@ -71,7 +72,7 @@ function parseVersionBlocks(lines: string[]): ParsedBlock[] {
       if (current) blocks.push(finishVersionBlock(current));
       const version = normalizeWhitespace(match[1]);
       const inline = normalizeWhitespace(match[2] ?? '');
-      current = { version, titleSeed: inline || version, lines: [rawLine.trim()] };
+      current = { version, titleSeed: inline || version, lines: [rawLine] };
       continue;
     }
     if (current) current.lines.push(rawLine);
@@ -101,7 +102,7 @@ function parseListBlocks(lines: string[]): ParsedBlock[] {
     const item = parseItemLine(rawLine);
     if (item) {
       if (current) blocks.push({ titleSeed: current.titleSeed, sourceText: trimBlankEdges(current.lines).join('\n') });
-      current = { titleSeed: item, lines: [rawLine.trim()] };
+      current = { titleSeed: item, lines: [rawLine] };
       continue;
     }
 
@@ -137,13 +138,22 @@ function parseItemLine(line: string): string | null {
 function makeTitle(raw: string, order: number): string {
   const cleaned = normalizeWhitespace(raw)
     .replace(/^#+\s*/, '')
-    .replace(/\*\*/g, '')
-    .replace(/[`*_~]/g, '')
-    .replace(/\s+#\d+$/g, '');
-  const beforeColon = cleaned.match(/^(.{8,80}?):\s+\S/);
-  const titleText = beforeColon ? beforeColon[1] : cleaned;
+    .replace(/\s+#\d+$/g, '')
+    .trim();
+  const displayText = stripDisplayMarkdown(cleaned);
+  const beforeColon = displayText.match(/^(.{8,80}?):\s+\S/);
+  const titleText = beforeColon ? beforeColon[1] : displayText;
   const numbered = `${String(order).padStart(2, '0')}. ${clamp(titleText, MAX_TITLE_LENGTH - 4)}`;
   return clamp(numbered, MAX_TITLE_LENGTH);
+}
+
+function stripDisplayMarkdown(value: string): string {
+  let result = value;
+  const pairedDelimiter = result.match(/^(\*\*|`)(.+)\1$/);
+  if (pairedDelimiter) {
+    result = pairedDelimiter[2].trim();
+  }
+  return result;
 }
 
 function normalizeWhitespace(value: string): string {

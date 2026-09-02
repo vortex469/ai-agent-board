@@ -82,6 +82,30 @@ test('parses numbered roadmap items without an LLM', () => {
   assert.match(result.tasks[0].sourceText, /Add webhook retry controls/);
 });
 
+test('preserves exact code-like identifiers when deriving roadmap card titles', () => {
+  const result = parseRoadmapText(`
+- Create ROADMAP_PIPELINE_SMOKE.md
+- Validate --dry-run behavior
+- Read SOME_ENV_VAR before launch
+- Update src/foo_bar.ts
+- Pin package/name@1.2.3
+- Write normal prose title
+  `);
+
+  assert.notEqual(typeof result, 'string');
+  if (typeof result === 'string') return;
+  assert.deepEqual(result.tasks.map((task) => task.title), [
+    '01. Create ROADMAP_PIPELINE_SMOKE.md',
+    '02. Validate --dry-run behavior',
+    '03. Read SOME_ENV_VAR before launch',
+    '04. Update src/foo_bar.ts',
+    '05. Pin package/name@1.2.3',
+    '06. Write normal prose title',
+  ]);
+  assert.equal(result.tasks[0].sourceText, '- Create ROADMAP_PIPELINE_SMOKE.md');
+  assert.equal(result.tasks[3].description, 'Source roadmap item:\n\n- Update src/foo_bar.ts');
+});
+
 test('keeps multiline continuation text with its roadmap item', () => {
   const result = parseRoadmapText(`
 - Build roadmap intake parser

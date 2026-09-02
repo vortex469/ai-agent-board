@@ -45,6 +45,54 @@ interface ManagedSession {
   agentType: AgentType;
 }
 
+function sanitizeAgentPromptText(value: string): string {
+  return value.replace(/[<>]/g, '');
+}
+
+export function buildAgentExecutionPrompt(task: Pick<Task, 'title' | 'description'>): string {
+  const safeTitle = sanitizeAgentPromptText(task.title);
+  const safeDescription = sanitizeAgentPromptText(task.description || '');
+  if (!safeDescription.trim()) return safeTitle;
+  return [
+    'Task details (authoritative; follow this when it conflicts with the display title):',
+    safeDescription,
+    '',
+    'Display title (for board identification only):',
+    safeTitle,
+  ].join('\n');
+}
+
+export function buildAgentSystemPrompt(args: {
+  workingDirectory: string;
+  taskTitle: string;
+  repoPath?: string;
+  worktreePath?: string;
+  hasGit: boolean;
+}): string {
+  const safeTitle = sanitizeAgentPromptText(args.taskTitle);
+  return `
+<context>
+You are a coding agent working on a task in the project directory: ${args.workingDirectory}
+Task: ${safeTitle}
+The detailed task description/source item in the user prompt is authoritative. If it conflicts with this generated display title, follow the detailed description/source item.
+${args.worktreePath ? `\nIMPORTANT: All file paths MUST be under ${args.worktreePath}. Do NOT reference or edit files at ${args.repoPath} directly.` : ''}
+${!args.hasGit ? `\nIMPORTANT: This directory is not a git repository. Run \`git init\` first before making any changes, so all work is tracked.` : ''}
+Complete the task described in the user prompt. Be thorough — read relevant files,
+make precise edits, and verify your changes compile/pass tests when applicable.
+
+When you have finished, end your VERY LAST message with a task summary in EXACTLY this format (keep the tags on their own lines):
+<task-summary>
+## Completed
+A clear description of what you accomplished. This section is required and must not be empty.
+## Comments
+Optional notes, caveats, decisions, or context. Omit the body if there is nothing to add.
+## Remaining
+Optional list of any work you did not complete or that should be followed up. Omit the body if everything is done.
+</task-summary>
+</context>
+`;
+}
+
 // Event log per task (capped to prevent unbounded growth)
 const MAX_EVENTS_PER_TASK = 2000;
 const MAX_EVENT_LOG_TASKS = 200;
@@ -693,28 +741,13 @@ export class AgentManager {
       try {
         const workingDirectory = worktreePath || task.repoPath || process.cwd();
         const hasGit = fs.existsSync(path.join(workingDirectory, '.git'));
-        // Sanitize task content to prevent prompt injection via </context> breakout
-        const safeTitle = task.title.replace(/[<>]/g, '');
-        const systemPrompt = `
-<context>
-You are a coding agent working on a task in the project directory: ${workingDirectory}
-Task: ${safeTitle}
-${worktreePath ? `\nIMPORTANT: All file paths MUST be under ${worktreePath}. Do NOT reference or edit files at ${task.repoPath} directly.` : ''}
-${!hasGit ? `\nIMPORTANT: This directory is not a git repository. Run \`git init\` first before making any changes, so all work is tracked.` : ''}
-Complete the task described in the user prompt. Be thorough — read relevant files,
-make precise edits, and verify your changes compile/pass tests when applicable.
-
-When you have finished, end your VERY LAST message with a task summary in EXACTLY this format (keep the tags on their own lines):
-<task-summary>
-## Completed
-A clear description of what you accomplished. This section is required and must not be empty.
-## Comments
-Optional notes, caveats, decisions, or context. Omit the body if there is nothing to add.
-## Remaining
-Optional list of any work you did not complete or that should be followed up. Omit the body if everything is done.
-</task-summary>
-</context>
-`;
+        const systemPrompt = buildAgentSystemPrompt({
+          workingDirectory,
+          taskTitle: task.title,
+          repoPath: task.repoPath,
+          worktreePath,
+          hasGit,
+        });
 
         // Track file context across tool_execution_start → command_output pairs
         let lastFileEventFile: string | null = null;
@@ -836,8 +869,7 @@ Optional list of any work you did not complete or that should be followed up. Om
         if (entry) entry.timeoutId = timeoutId;
 
         // Build prompt and execute — each provider returns a typed AgentResult
-        const safeDescription = (task.description || '').replace(/[<>]/g, '');
-        const prompt = `${safeTitle}\n\n${safeDescription}`;
+        const prompt = buildAgentExecutionPrompt(task);
 
         // Load image attachments if available
         let agentAttachments: AgentAttachment[] | undefined;

@@ -117,6 +117,33 @@ v0.41 - Kanban creation
     const tasks = await tasksRes.json();
     expect(tasks.filter((task: any) => createdTaskIds.includes(task.id)).map((task: any) => task.id)).toEqual(createdTaskIds);
   });
+
+  test('preserves exact identifiers in generated preview titles and source descriptions', async ({ request }) => {
+    const previewRes = await request.post(`${API}/api/roadmap-intake/preview`, {
+      data: {
+        text: `
+- Create ROADMAP_PIPELINE_SMOKE.md
+- Validate --dry-run behavior
+- Read SOME_ENV_VAR before launch
+- Update src/foo_bar.ts
+- Pin package/name@1.2.3
+- Write normal prose title
+        `,
+      },
+    });
+    expect(previewRes.status()).toBe(200);
+    const preview = await previewRes.json();
+    expect(preview.tasks.map((task: any) => task.title)).toEqual([
+      '01. Create ROADMAP_PIPELINE_SMOKE.md',
+      '02. Validate --dry-run behavior',
+      '03. Read SOME_ENV_VAR before launch',
+      '04. Update src/foo_bar.ts',
+      '05. Pin package/name@1.2.3',
+      '06. Write normal prose title',
+    ]);
+    expect(preview.tasks[0].description).toBe('Source roadmap item:\n\n- Create ROADMAP_PIPELINE_SMOKE.md');
+    expect(preview.tasks[3].sourceText).toBe('- Update src/foo_bar.ts');
+  });
 });
 
 test.describe('Roadmap intake UI', () => {
