@@ -26,6 +26,7 @@
     "test:e2e": "npm run test:e2e:required",
     "test:e2e:required": "npm run test:required -w @ai-agent-board/e2e",
     "gate:required": "node scripts/run-contract-tests.cjs && node scripts/run-required-gate.cjs",
+    "smoke:live-roadmap": "npm run build:server && node scripts/live-roadmap-smoke.mjs",
     "hooks:install": "node scripts/install-hooks.cjs"
   }
 }
