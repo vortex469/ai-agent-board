@@ -39,6 +39,7 @@ test('SQLite migration backfills legacy external tasks idempotently with safe de
     assert.equal(pending?.auto_start, 0);
     assert.equal(dispatched?.status, 'dispatched');
     assert.equal(dispatched?.auto_start, 1);
+    assert.ok((db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'task_dependencies'").get()));
   } finally {
     db.close();
   }
@@ -53,6 +54,8 @@ test('PostgreSQL migration uses an idempotent deterministic execution-attempt ba
     },
   };
   await initPostgresDatabase(pool as never);
+  assert.ok(calls.some((sql) => sql.includes('CREATE TABLE IF NOT EXISTS task_dependencies')));
+  assert.ok(calls.some((sql) => sql.includes('idx_task_dependencies_dependent')));
   const backfill = calls.find((sql) => sql.includes("'legacy-task-' || encode(convert_to(t.id"));
   assert.ok(backfill);
   assert.match(backfill, /WHERE t\.external_source IS NOT NULL AND t\.external_key IS NOT NULL/);

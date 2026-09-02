@@ -143,6 +143,9 @@ class MemoryTaskRepo implements TaskRepository {
   async createRelationship(taskId: string, relatedTaskId: string, createdAt: number): Promise<{ relationship: TaskRelationship; created: boolean }> {
     return { relationship: { taskId, relatedTaskId, type: 'related', createdAt }, created: true };
   }
+  async createDependency(prerequisiteTaskId: string, dependentTaskId: string, createdAt: number): Promise<{ relationship: TaskRelationship; created: boolean }> {
+    return { relationship: { taskId: dependentTaskId, relatedTaskId: prerequisiteTaskId, type: 'blocks', direction: 'blocked-by', createdAt }, created: true };
+  }
   async deleteRelationship(): Promise<boolean> { return true; }
   async getAttemptById(): Promise<ExecutionAttempt | undefined> { return undefined; }
   async getAttemptByExternalIdentity(): Promise<ExecutionAttempt | undefined> { return undefined; }

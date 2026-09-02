@@ -101,7 +101,7 @@ export const api = {
   createTask: (data: { title: string; description?: string; priority?: Priority; columnId?: ColumnId; agentType?: AgentType; repoPath?: string; branchName?: string; baseBranch?: string; useWorktree?: boolean; autoRun?: boolean; projectId?: string; timeoutMinutes?: number | null }) =>
     request<Task>('/tasks', { method: 'POST', body: JSON.stringify(data) }),
 
-  createTasksBatch: (tasks: { title: string; description?: string; priority?: Priority; columnId?: ColumnId; agentType?: AgentType; repoPath?: string; branchName?: string; baseBranch?: string; useWorktree?: boolean; autoRun?: boolean; projectId?: string; timeoutMinutes?: number | null }[]) =>
+  createTasksBatch: (tasks: { title: string; description?: string; priority?: Priority; columnId?: ColumnId; agentType?: AgentType; repoPath?: string; branchName?: string; baseBranch?: string; useWorktree?: boolean; autoRun?: boolean; projectId?: string; timeoutMinutes?: number | null; dependsOnTaskIndexes?: number[] }[]) =>
     request<{ tasks: Task[] }>('/tasks/batch', { method: 'POST', body: JSON.stringify({ tasks }) }),
 
   previewRoadmapIntake: (data: { text: string; projectId?: string }) =>

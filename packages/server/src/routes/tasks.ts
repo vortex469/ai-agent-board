@@ -104,6 +104,25 @@ export function createTaskRouter(repo: TaskRepository, agentManager: AgentManage
         res.status(400).json({ error: `task[${i}]: ${err}` });
         return;
       }
+      if (typeof body === 'string') {
+        res.status(400).json({ error: `task[${i}]: ${body}` });
+        return;
+      }
+      if (body.dependsOnTaskIndexes !== undefined) {
+        if (!Array.isArray(body.dependsOnTaskIndexes)
+            || body.dependsOnTaskIndexes.some((index: unknown) => !Number.isInteger(index) || Number(index) < 0 || Number(index) >= taskDefs.length || Number(index) === i)) {
+          res.status(400).json({ error: `task[${i}]: dependsOnTaskIndexes must contain other zero-based task indexes from this batch` });
+          return;
+        }
+        if (body.dependsOnTaskIndexes.some((index: number) => index > i)) {
+          res.status(400).json({ error: `task[${i}]: roadmap dependencies can only point to earlier batch tasks` });
+          return;
+        }
+        if (body.dependsOnTaskIndexes.some((index: number) => taskDefs[index]?.projectId !== body.projectId)) {
+          res.status(400).json({ error: `task[${i}]: dependencies must stay within one project` });
+          return;
+        }
+      }
       taskDefs[i] = body;
     }
 
@@ -117,6 +136,14 @@ export function createTaskRouter(repo: TaskRepository, agentManager: AgentManage
       await repo.create(task);
       broadcastTaskUpdate(task);
       created.push(task);
+    }
+
+    for (let i = 0; i < created.length; i++) {
+      const dependsOn = taskDefs[i].dependsOnTaskIndexes;
+      if (!Array.isArray(dependsOn)) continue;
+      for (const prerequisiteIndex of [...new Set(dependsOn)]) {
+        await repo.createDependency(created[prerequisiteIndex].id, created[i].id, createdAtBase + i);
+      }
     }
 
     // Auto-run tasks that requested it
@@ -170,7 +197,15 @@ export function createTaskRouter(repo: TaskRepository, agentManager: AgentManage
       res.status(409).json({ error: 'related task reference is ambiguous', matches: matches.map(({ id, title }) => ({ id, title })) }); return;
     }
     if (matches[0].id === task.id) { res.status(400).json({ error: 'a task cannot be related to itself' }); return; }
-    const result = await repo.createRelationship(task.id, matches[0].id, Date.now());
+    const type = req.body.type ?? req.body.relationshipType ?? 'related';
+    if (type !== 'related' && type !== 'blocks') {
+      res.status(400).json({ error: 'relationship type must be related or blocks' }); return;
+    }
+    const result = type === 'blocks'
+      ? req.body.direction === 'blocks'
+        ? await repo.createDependency(task.id, matches[0].id, Date.now())
+        : await repo.createDependency(matches[0].id, task.id, Date.now())
+      : await repo.createRelationship(task.id, matches[0].id, Date.now());
     res.status(result.created ? 201 : 200).set(result.created ? {} : { 'Idempotent-Replay': 'true' }).json(result.relationship);
   }));
 

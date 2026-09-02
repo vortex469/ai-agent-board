@@ -5,6 +5,7 @@ export interface RoadmapProposedTask {
   title: string;
   description: string;
   sourceText: string;
+  dependsOnTaskIndexes?: number[];
 }
 
 export interface RoadmapParseResult {
@@ -59,6 +60,7 @@ export function parseRoadmapText(input: unknown): RoadmapParseResult | string {
       title,
       description: `Source roadmap item:\n\n${sourceText}`,
       sourceText,
+      ...(index > 0 ? { dependsOnTaskIndexes: [index - 1] } : {}),
     };
   });
 

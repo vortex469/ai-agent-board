@@ -26,6 +26,9 @@ function makeDb() {
     CREATE TABLE task_relationships(task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
       related_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, type TEXT NOT NULL DEFAULT 'related',
       created_at INTEGER NOT NULL, PRIMARY KEY(task_id,related_task_id), CHECK(task_id < related_task_id));
+    CREATE TABLE task_dependencies(prerequisite_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+      dependent_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, created_at INTEGER NOT NULL,
+      PRIMARY KEY(prerequisite_task_id,dependent_task_id), CHECK(prerequisite_task_id <> dependent_task_id));
     CREATE TABLE execution_attempts(id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
       external_source TEXT NOT NULL, external_key TEXT NOT NULL, title_snapshot TEXT NOT NULL, description_snapshot TEXT NOT NULL,
       agent_type TEXT NOT NULL, related_task_id TEXT, auto_start INTEGER NOT NULL, timeout_minutes INTEGER,
@@ -145,6 +148,28 @@ test('SQLite relationships are symmetric, idempotent, same-project, and cascade'
   } finally { db.close(); }
 });
 
+test('SQLite dependencies are directional, idempotent, same-project, and cascade', async () => {
+  const db = makeDb();
+  const repo = new SqliteTaskRepository(db);
+  try {
+    await repo.create(task('first'));
+    await repo.create(task('second'));
+    await repo.create(task('other-project', 'project-b'));
+    const first = await repo.createDependency('first', 'second', 321);
+    assert.equal(first.created, true);
+    assert.deepEqual(await repo.getRelationships('first'), [
+      { taskId: 'first', relatedTaskId: 'second', type: 'blocks', direction: 'blocks', createdAt: 321 },
+    ]);
+    assert.deepEqual(await repo.getRelationships('second'), [
+      { taskId: 'second', relatedTaskId: 'first', type: 'blocks', direction: 'blocked-by', createdAt: 321 },
+    ]);
+    assert.equal((await repo.createDependency('first', 'second', 999)).created, false);
+    await assert.rejects(repo.createDependency('other-project', 'second', 1), /same project/);
+    await repo.delete('first');
+    assert.deepEqual(await repo.getRelationships('second'), []);
+  } finally { db.close(); }
+});
+
 test('exact task resolution gives ids precedence and exposes title ambiguity', async () => {
   const db = makeDb();
   const repo = new SqliteTaskRepository(db);
@@ -173,6 +198,60 @@ test('relationship API fails closed on ambiguity and replays idempotently', asyn
       response = await fetch(`${base}/api/tasks/root/relationships`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ relatedTask: 'one' }) });
       assert.equal(response.status, 200);
       assert.equal(response.headers.get('idempotent-replay'), 'true');
+    });
+  } finally { db.close(); }
+});
+
+test('relationship API creates prerequisite dependencies with direction', async () => {
+  const db = makeDb();
+  const repo = new SqliteTaskRepository(db);
+  try {
+    await repo.create(task('first'));
+    await repo.create(task('second'));
+    await withApi(repo, async (base) => {
+      let response = await fetch(`${base}/api/tasks/second/relationships`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ relatedTask: 'first', type: 'blocks' }),
+      });
+      assert.equal(response.status, 201);
+      assert.deepEqual(await response.json(), {
+        taskId: 'second',
+        relatedTaskId: 'first',
+        type: 'blocks',
+        direction: 'blocked-by',
+        createdAt: (await repo.getRelationships('second'))[0].createdAt,
+      });
+
+      response = await fetch(`${base}/api/tasks/second/relationships`);
+      assert.equal(response.status, 200);
+      const body = await response.json() as Array<{ direction: string; relatedTask: Task }>;
+      assert.equal(body[0].direction, 'blocked-by');
+      assert.equal(body[0].relatedTask.id, 'first');
+    });
+  } finally { db.close(); }
+});
+
+test('batch task creation persists roadmap dependencies between earlier and later cards', async () => {
+  const db = makeDb();
+  const repo = new SqliteTaskRepository(db);
+  try {
+    await withApi(repo, async (base) => {
+      const response = await fetch(`${base}/api/tasks/batch`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ tasks: [
+          { title: '01. First', description: '', projectId: 'project-a' },
+          { title: '02. Second', description: '', projectId: 'project-a', dependsOnTaskIndexes: [0] },
+          { title: '03. Third', description: '', projectId: 'project-a', dependsOnTaskIndexes: [1] },
+        ] }),
+      });
+      assert.equal(response.status, 201);
+      const created = await response.json() as { tasks: Task[] };
+      assert.deepEqual(await repo.getRelationships(created.tasks[1].id), [
+        { taskId: created.tasks[1].id, relatedTaskId: created.tasks[0].id, type: 'blocks', direction: 'blocked-by', createdAt: created.tasks[1].createdAt },
+        { taskId: created.tasks[1].id, relatedTaskId: created.tasks[2].id, type: 'blocks', direction: 'blocks', createdAt: created.tasks[2].createdAt },
+      ]);
     });
   } finally { db.close(); }
 });
@@ -715,6 +794,28 @@ test('Postgres repository canonicalizes relationship writes and replays conflict
   const inserts = calls.filter(({ sql }) => sql.startsWith('INSERT INTO task_relationships'));
   assert.deepEqual(inserts[0].params, ['a-task', 'z-task', 44]);
   assert.match(inserts[0].sql, /a\.project_id=b\.project_id/);
+});
+
+test('Postgres repository persists directional dependency writes and replays conflicts', async () => {
+  const calls: Array<{ sql: string; params?: unknown[] }> = [];
+  let inserted = false;
+  const pool = {
+    query: async (sql: string, params?: unknown[]) => {
+      calls.push({ sql, params });
+      if (sql.startsWith('INSERT INTO task_dependencies')) {
+        if (!inserted) { inserted = true; return { rows: [{ created_at: '55' }], rowCount: 1 }; }
+        return { rows: [], rowCount: 0 };
+      }
+      if (sql.startsWith('SELECT created_at FROM task_dependencies')) return { rows: [{ created_at: '55' }], rowCount: 1 };
+      return { rows: [], rowCount: 0 };
+    },
+  };
+  const repo = new PostgresTaskRepository(pool as never);
+  assert.equal((await repo.createDependency('z-task', 'a-task', 55)).created, true);
+  assert.equal((await repo.createDependency('z-task', 'a-task', 99)).created, false);
+  const inserts = calls.filter(({ sql }) => sql.startsWith('INSERT INTO task_dependencies'));
+  assert.deepEqual(inserts[0].params, ['z-task', 'a-task', 55]);
+  assert.match(inserts[0].sql, /prerequisite\.project_id=dependent\.project_id/);
 });
 
 test('Postgres orchestration aggregate commits successful work and rolls back relation failures', async () => {

@@ -188,6 +188,18 @@ export function migrateSqliteDatabase(db: Database.Database): void {
   `);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_task_relationships_related ON task_relationships(related_task_id)`);
   db.exec(`
+    CREATE TABLE IF NOT EXISTS task_dependencies (
+      prerequisite_task_id TEXT NOT NULL,
+      dependent_task_id    TEXT NOT NULL,
+      created_at           INTEGER NOT NULL,
+      PRIMARY KEY (prerequisite_task_id, dependent_task_id),
+      CHECK (prerequisite_task_id <> dependent_task_id),
+      FOREIGN KEY (prerequisite_task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      FOREIGN KEY (dependent_task_id) REFERENCES tasks(id) ON DELETE CASCADE
+    )
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_task_dependencies_dependent ON task_dependencies(dependent_task_id)`);
+  db.exec(`
     CREATE TABLE IF NOT EXISTS execution_attempts (
       id TEXT PRIMARY KEY,
       task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -620,6 +632,16 @@ export async function initPostgresDatabase(pool: Pool): Promise<void> {
     )
   `);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_task_relationships_related ON task_relationships(related_task_id)`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS task_dependencies (
+      prerequisite_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+      dependent_task_id    TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+      created_at           BIGINT NOT NULL,
+      PRIMARY KEY (prerequisite_task_id, dependent_task_id),
+      CHECK (prerequisite_task_id <> dependent_task_id)
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_task_dependencies_dependent ON task_dependencies(dependent_task_id)`);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS execution_attempts (
       id TEXT PRIMARY KEY,

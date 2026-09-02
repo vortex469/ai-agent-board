@@ -95,6 +95,7 @@ v0.41 - Kanban creation
           description: task.description,
           columnId: 'backlog',
           projectId: project.id,
+          dependsOnTaskIndexes: task.dependsOnTaskIndexes,
         })),
       },
     });
@@ -112,6 +113,17 @@ v0.41 - Kanban creation
     });
     expect(created[0].createdAt).toBeLessThan(created[1].createdAt);
     expect(created[1].createdAt).toBeLessThan(created[2].createdAt);
+
+    const secondRelationshipsRes = await request.get(`${API}/api/tasks/${created[1].id}/relationships`);
+    expect(secondRelationshipsRes.status()).toBe(200);
+    const secondRelationships = await secondRelationshipsRes.json();
+    expect(secondRelationships.filter((relationship: any) => relationship.type === 'blocks').map((relationship: any) => ({
+      relatedTaskId: relationship.relatedTaskId,
+      direction: relationship.direction,
+    }))).toEqual([
+      { relatedTaskId: created[0].id, direction: 'blocked-by' },
+      { relatedTaskId: created[2].id, direction: 'blocks' },
+    ]);
 
     const tasksRes = await request.get(`${API}/api/tasks?projectId=${encodeURIComponent(project.id)}`);
     const tasks = await tasksRes.json();
@@ -237,5 +249,6 @@ test.describe('Roadmap intake UI', () => {
     expect(batchPayload.tasks.map((task: any) => task.agentType)).toEqual(['codex', 'codex']);
     expect(batchPayload.tasks.map((task: any) => task.projectId)).toEqual([project.id, project.id]);
     expect(batchPayload.tasks.map((task: any) => task.repoPath)).toEqual([project.repoPath, project.repoPath]);
+    expect(batchPayload.tasks.map((task: any) => task.dependsOnTaskIndexes)).toEqual([undefined, [0]]);
   });
 });

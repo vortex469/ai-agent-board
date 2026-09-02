@@ -34,6 +34,7 @@ export interface TaskRepository {
   getArchivedTasks(projectId?: string): Promise<Task[]>;
   getRelationships(taskId: string): Promise<TaskRelationship[]>;
   createRelationship(taskId: string, relatedTaskId: string, createdAt: number): Promise<{ relationship: TaskRelationship; created: boolean }>;
+  createDependency(prerequisiteTaskId: string, dependentTaskId: string, createdAt: number): Promise<{ relationship: TaskRelationship; created: boolean }>;
   deleteRelationship(taskId: string, relatedTaskId: string): Promise<boolean>;
   getAttemptById(id: string): Promise<ExecutionAttempt | undefined>;
   getAttemptByExternalIdentity(source: string, key: string): Promise<ExecutionAttempt | undefined>;

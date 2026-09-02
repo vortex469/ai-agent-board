@@ -24,6 +24,7 @@ interface RoadmapIntakeDialogProps {
     branchName?: string;
     baseBranch?: string;
     useWorktree?: boolean;
+    dependsOnTaskIndexes?: number[];
   }[]) => Promise<unknown>;
 }
 
@@ -98,7 +99,7 @@ export function RoadmapIntakeDialog({ open, onClose, project, onCreateTasks }: R
     setSubmitting(true);
     setError('');
     try {
-      const result = await onCreateTasks(accepted.map((task) => ({
+      const result = await onCreateTasks(accepted.map((task, index) => ({
         title: task.title.trim(),
         description: task.description.trim(),
         priority,
@@ -109,6 +110,7 @@ export function RoadmapIntakeDialog({ open, onClose, project, onCreateTasks }: R
         baseBranch,
         useWorktree,
         branchName: useWorktree ? `task/${slugify(task.title)}` : undefined,
+        dependsOnTaskIndexes: index > 0 ? [index - 1] : undefined,
       })));
       if (result === undefined) return;
       onClose();

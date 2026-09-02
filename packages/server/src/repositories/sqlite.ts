@@ -293,9 +293,16 @@ export class SqliteTaskRepository implements TaskRepository {
   }
 
   async getRelationships(taskId: string): Promise<TaskRelationship[]> {
-    const rows = this.db.prepare(`SELECT task_id, related_task_id, type, created_at FROM task_relationships
+    const relatedRows = this.db.prepare(`SELECT task_id, related_task_id, type, created_at FROM task_relationships
       WHERE task_id = ? OR related_task_id = ? ORDER BY created_at, task_id, related_task_id`).all(taskId, taskId) as Array<{ task_id: string; related_task_id: string; type: 'related'; created_at: number }>;
-    return rows.map((row) => ({ taskId, relatedTaskId: row.task_id === taskId ? row.related_task_id : row.task_id, type: row.type, createdAt: row.created_at }));
+    const dependencyRows = this.db.prepare(`SELECT prerequisite_task_id, dependent_task_id, created_at FROM task_dependencies
+      WHERE prerequisite_task_id = ? OR dependent_task_id = ? ORDER BY created_at, prerequisite_task_id, dependent_task_id`).all(taskId, taskId) as Array<{ prerequisite_task_id: string; dependent_task_id: string; created_at: number }>;
+    return [
+      ...relatedRows.map((row) => ({ taskId, relatedTaskId: row.task_id === taskId ? row.related_task_id : row.task_id, type: row.type, createdAt: row.created_at })),
+      ...dependencyRows.map((row) => row.prerequisite_task_id === taskId
+        ? { taskId, relatedTaskId: row.dependent_task_id, type: 'blocks' as const, direction: 'blocks' as const, createdAt: row.created_at }
+        : { taskId, relatedTaskId: row.prerequisite_task_id, type: 'blocks' as const, direction: 'blocked-by' as const, createdAt: row.created_at }),
+    ].sort((a, b) => a.createdAt - b.createdAt || a.relatedTaskId.localeCompare(b.relatedTaskId));
   }
 
   async createRelationship(taskId: string, relatedTaskId: string, createdAt: number): Promise<{ relationship: TaskRelationship; created: boolean }> {
@@ -310,7 +317,25 @@ export class SqliteTaskRepository implements TaskRepository {
 
   async deleteRelationship(taskId: string, relatedTaskId: string): Promise<boolean> {
     const [left, right] = taskId < relatedTaskId ? [taskId, relatedTaskId] : [relatedTaskId, taskId];
-    return this.db.prepare('DELETE FROM task_relationships WHERE task_id = ? AND related_task_id = ?').run(left, right).changes > 0;
+    const related = this.db.prepare('DELETE FROM task_relationships WHERE task_id = ? AND related_task_id = ?').run(left, right).changes;
+    const dependencies = this.db.prepare(`DELETE FROM task_dependencies
+      WHERE (prerequisite_task_id = ? AND dependent_task_id = ?) OR (prerequisite_task_id = ? AND dependent_task_id = ?)`)
+      .run(taskId, relatedTaskId, relatedTaskId, taskId).changes;
+    return related + dependencies > 0;
+  }
+
+  async createDependency(prerequisiteTaskId: string, dependentTaskId: string, createdAt: number): Promise<{ relationship: TaskRelationship; created: boolean }> {
+    if (prerequisiteTaskId === dependentTaskId) throw new Error('a task cannot depend on itself');
+    const result = this.db.prepare(`INSERT OR IGNORE INTO task_dependencies (prerequisite_task_id, dependent_task_id, created_at)
+      SELECT ?, ?, ? FROM tasks prerequisite JOIN tasks dependent ON dependent.id = ? WHERE prerequisite.id = ? AND prerequisite.project_id = dependent.project_id`)
+      .run(prerequisiteTaskId, dependentTaskId, createdAt, dependentTaskId, prerequisiteTaskId);
+    const row = this.db.prepare('SELECT created_at FROM task_dependencies WHERE prerequisite_task_id = ? AND dependent_task_id = ?')
+      .get(prerequisiteTaskId, dependentTaskId) as { created_at: number } | undefined;
+    if (!row) throw new Error('tasks must exist in the same project');
+    return {
+      relationship: { taskId: dependentTaskId, relatedTaskId: prerequisiteTaskId, type: 'blocks', direction: 'blocked-by', createdAt: row.created_at },
+      created: result.changes > 0,
+    };
   }
 
   async getAttemptById(id: string): Promise<ExecutionAttempt | undefined> {

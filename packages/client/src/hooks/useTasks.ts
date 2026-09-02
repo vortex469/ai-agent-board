@@ -55,7 +55,7 @@ export function useTasks(projectId = 'default') {
     }
   }, [projectId]);
 
-  const addTasksBatch = useCallback(async (taskDefs: (Omit<Task, 'id' | 'createdAt' | 'agentStatus'> & { autoRun?: boolean })[]) => {
+  const addTasksBatch = useCallback(async (taskDefs: (Omit<Task, 'id' | 'createdAt' | 'agentStatus'> & { autoRun?: boolean; dependsOnTaskIndexes?: number[] })[]) => {
     try {
       const result = await api.createTasksBatch(taskDefs.map((task) => ({ ...task, projectId: task.projectId ?? projectId })));
       setTasks((prev) => {

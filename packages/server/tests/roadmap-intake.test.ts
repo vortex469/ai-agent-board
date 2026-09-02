@@ -17,6 +17,8 @@ Create accepted cards through the task APIs.
   assert.deepEqual(result.tasks.map((task) => task.order), [1, 2]);
   assert.equal(result.tasks[0].title, '01. v0.40: Build roadmap parser');
   assert.equal(result.tasks[1].title, '02. v0.41: Kanban creation flow');
+  assert.equal(result.tasks[0].dependsOnTaskIndexes, undefined);
+  assert.deepEqual(result.tasks[1].dependsOnTaskIndexes, [0]);
   assert.match(result.tasks[0].description, /Source roadmap item:\n\n## v0\.40/);
 });
 

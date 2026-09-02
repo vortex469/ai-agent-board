@@ -46,7 +46,8 @@ export interface Task {
 export interface TaskRelationship {
   taskId: string;
   relatedTaskId: string;
-  type: 'related';
+  type: 'related' | 'blocks';
+  direction?: 'blocks' | 'blocked-by';
   createdAt: number;
 }
 
@@ -164,6 +165,7 @@ export interface RoadmapProposedTask {
   title: string;
   description: string;
   sourceText: string;
+  dependsOnTaskIndexes?: number[];
 }
 
 export interface RoadmapPreview {
