@@ -8,6 +8,7 @@ import { PostgresTaskRepository } from '../src/repositories/postgres.js';
 import { migrateSqliteDatabase } from '../src/db.js';
 import { createTaskRouter } from '../src/routes/tasks.js';
 import { createOrchestrationsRouter, extractOrchestrationOutput } from '../src/routes/orchestrations.js';
+import { startAgentForTask, triggerAutomaticDependentProgression } from '../src/routes/helpers.js';
 import type { Task, Project, ExecutionAttempt } from '../src/types.js';
 import type { ProjectRepository } from '../src/repositories/project-types.js';
 import type { AgentManager } from '../src/services/agent-manager.js';
@@ -253,6 +254,86 @@ test('batch task creation persists roadmap dependencies between earlier and late
         { taskId: created.tasks[1].id, relatedTaskId: created.tasks[2].id, type: 'blocks', direction: 'blocks', createdAt: created.tasks[2].createdAt },
       ]);
     });
+  } finally { db.close(); }
+});
+
+test('completed prerequisite progression starts the next eligible dependent card', async () => {
+  const db = makeDb();
+  const repo = new SqliteTaskRepository(db);
+  const started: string[] = [];
+  const manager = {
+    ...agents,
+    startAgent: (startedTask: Task) => { started.push(startedTask.id); },
+  } as unknown as AgentManager;
+  try {
+    await repo.create({ ...task('first'), columnId: 'done', agentStatus: 'complete' });
+    await repo.create(task('second'));
+    await repo.create(task('third'));
+    await repo.createDependency('first', 'second', 10);
+    await repo.createDependency('second', 'third', 11);
+
+    const first = await repo.getById('first');
+    assert(first);
+    await triggerAutomaticDependentProgression(repo, first, manager);
+
+    assert.deepEqual(started, ['second']);
+    assert.equal((await repo.getById('first'))?.columnId, 'done');
+    assert.equal((await repo.getById('second'))?.columnId, 'in-progress');
+    assert.equal((await repo.getById('second'))?.agentStatus, 'planning');
+    assert.equal((await repo.getById('third'))?.agentStatus, 'idle');
+  } finally { db.close(); }
+});
+
+test('automatic dependent progression stops when the next card is already in Review', async () => {
+  const db = makeDb();
+  const repo = new SqliteTaskRepository(db);
+  const started: string[] = [];
+  const manager = {
+    ...agents,
+    startAgent: (startedTask: Task) => { started.push(startedTask.id); },
+  } as unknown as AgentManager;
+  try {
+    await repo.create({ ...task('first'), columnId: 'done', agentStatus: 'complete' });
+    await repo.create({ ...task('second'), columnId: 'review', agentStatus: 'complete' });
+    await repo.create(task('third'));
+    await repo.createDependency('first', 'second', 10);
+    await repo.createDependency('second', 'third', 11);
+
+    const first = await repo.getById('first');
+    assert(first);
+    await triggerAutomaticDependentProgression(repo, first, manager);
+
+    assert.deepEqual(started, []);
+    assert.equal((await repo.getById('second'))?.columnId, 'review');
+    assert.equal((await repo.getById('third'))?.agentStatus, 'idle');
+  } finally { db.close(); }
+});
+
+test('requested runs wait for prerequisite cards to reach Done', async () => {
+  const db = makeDb();
+  const repo = new SqliteTaskRepository(db);
+  const started: string[] = [];
+  const manager = {
+    ...agents,
+    startAgent: (startedTask: Task) => { started.push(startedTask.id); },
+  } as unknown as AgentManager;
+  try {
+    await repo.create({ ...task('first'), columnId: 'review', agentStatus: 'complete' });
+    await repo.create(task('second'));
+    await repo.createDependency('first', 'second', 10);
+    const pending = await repo.requestRun('second', 20);
+    assert(pending);
+
+    await startAgentForTask(pending, repo, manager);
+    assert.deepEqual(started, []);
+    assert.equal((await repo.getById('second'))?.agentStatus, 'idle');
+    assert.equal((await repo.getById('second'))?.runRequestedAt, 20);
+
+    const firstDone = await repo.update('first', { columnId: 'done' });
+    assert(firstDone);
+    await triggerAutomaticDependentProgression(repo, firstDone, manager);
+    assert.deepEqual(started, ['second']);
+    assert.equal((await repo.getById('second'))?.agentStatus, 'planning');
   } finally { db.close(); }
 });
 

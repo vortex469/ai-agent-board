@@ -10,6 +10,7 @@ import {
   asyncHandler, paramId, isAllowedRepoPath, expandTilde,
   validateTaskFields, buildTask, broadcastTaskUpdate,
   failTaskWithEvent, startAgentForTask, normalizeRepoPathForCompare,
+  triggerAutomaticDependentProgression,
 } from './helpers.js';
 
 export function createTaskRouter(repo: TaskRepository, agentManager: AgentManager, projectRepo: ProjectRepository): Router {
@@ -146,11 +147,13 @@ export function createTaskRouter(repo: TaskRepository, agentManager: AgentManage
       }
     }
 
-    // Auto-run tasks that requested it
+    // Auto-run root tasks that requested it. Dependent roadmap cards progress
+    // automatically only after their prerequisite reaches Done.
     for (let i = 0; i < created.length; i++) {
       const task = created[i];
       const def = taskDefs[i];
-      if (def.autoRun === true && task.columnId === 'in-progress') {
+      const hasPrerequisites = Array.isArray(def.dependsOnTaskIndexes) && def.dependsOnTaskIndexes.length > 0;
+      if (def.autoRun === true && task.columnId === 'in-progress' && !hasPrerequisites) {
         const agents = agentManager.getAvailableAgents();
         const agentInfo = agents.find(a => a.name === task.agentType);
         if (!agentInfo?.available) {
@@ -364,6 +367,9 @@ export function createTaskRouter(repo: TaskRepository, agentManager: AgentManage
       return;
     }
     broadcastTaskUpdate(updated);
+    if (columnId === 'done' && task.columnId !== 'done') {
+      await triggerAutomaticDependentProgression(repo, updated, agentManager);
+    }
     res.json(updated);
   }));
 

@@ -660,7 +660,60 @@ export async function autoProgressCompletedTask(
     `Auto-merged ${task.branchName} into ${mergeResult.baseBranch}, cleaned the worktree, and moved the task to Done.`,
     { agentType: task.agentType, command: 'git merge' },
   );
+  await triggerAutomaticDependentProgression(repo, done, agentManager);
   return done;
+}
+
+export async function triggerAutomaticDependentProgression(
+  repo: TaskRepository,
+  completedTask: Task,
+  agentManager?: AgentManager,
+): Promise<Task | undefined> {
+  if (!agentManager || completedTask.columnId !== 'done' || completedTask.agentStatus === 'failed') {
+    return undefined;
+  }
+
+  const dependents = (await repo.getRelationships(completedTask.id))
+    .filter((relationship) => relationship.type === 'blocks' && relationship.direction === 'blocks')
+    .sort((a, b) => a.createdAt - b.createdAt || a.relatedTaskId.localeCompare(b.relatedTaskId));
+
+  for (const relationship of dependents) {
+    const dependent = await repo.getById(relationship.relatedTaskId);
+    if (!dependent || dependent.archived) continue;
+    if (dependent.groupId) return undefined;
+    if (dependent.columnId === 'done') continue;
+    if (dependent.columnId !== 'backlog' && dependent.columnId !== 'in-progress') return undefined;
+    if (dependent.agentStatus !== 'idle') return undefined;
+    if (dependent.runClaimedAt !== undefined) return undefined;
+    if (agentManager.isRunning(dependent.id)) return undefined;
+
+    const prerequisites = (await repo.getRelationships(dependent.id))
+      .filter((item) => item.type === 'blocks' && item.direction === 'blocked-by');
+    for (const prerequisite of prerequisites) {
+      const prerequisiteTask = await repo.getById(prerequisite.relatedTaskId);
+      if (!prerequisiteTask || prerequisiteTask.columnId !== 'done' || prerequisiteTask.agentStatus === 'failed') {
+        return undefined;
+      }
+    }
+
+    const agentInfo = agentManager.getAvailableAgents().find((agent) => agent.name === dependent.agentType);
+    if (!agentInfo?.available) {
+      await emitTaskLifecycleEvent(
+        repo,
+        dependent,
+        'error',
+        `Automatic progression paused: agent ${agentInfo?.displayName || dependent.agentType || 'unknown'} is not available: ${agentInfo?.reason || 'unknown reason'}`,
+        { agentType: dependent.agentType, error: 'Automatic progression paused because the selected agent is unavailable.' },
+      );
+      return undefined;
+    }
+
+    await repo.requestRun(dependent.id, Date.now());
+    await startAgentForTask(dependent, repo, agentManager);
+    return repo.getById(dependent.id);
+  }
+
+  return undefined;
 }
 
 export function makeWorktreeCallback(repo: TaskRepository, taskId: string): (worktreePath: string) => void {
@@ -675,6 +728,8 @@ export async function startAgentForTask(
   repo: TaskRepository,
   agentManager: AgentManager,
 ): Promise<void> {
+  if (!await taskPrerequisitesAreDone(repo, task.id)) return;
+
   const claimed = await repo.claimRun(task.id, Date.now());
   if (!claimed) return;
   task = claimed;
@@ -699,4 +754,14 @@ export async function startAgentForTask(
       makeWorktreeCallback(repo, task.id),
     );
   }
+}
+
+async function taskPrerequisitesAreDone(repo: TaskRepository, taskId: string): Promise<boolean> {
+  const prerequisites = (await repo.getRelationships(taskId))
+    .filter((relationship) => relationship.type === 'blocks' && relationship.direction === 'blocked-by');
+  for (const prerequisite of prerequisites) {
+    const task = await repo.getById(prerequisite.relatedTaskId);
+    if (!task || task.columnId !== 'done' || task.agentStatus === 'failed') return false;
+  }
+  return true;
 }

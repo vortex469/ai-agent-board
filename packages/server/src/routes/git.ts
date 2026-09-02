@@ -3,7 +3,7 @@ import { execFileSync } from 'child_process';
 import type { Task } from '../types.js';
 import type { TaskRepository } from '../repositories/types.js';
 import type { AgentManager } from '../services/agent-manager.js';
-import { asyncHandler, paramId, broadcastTaskUpdate } from './helpers.js';
+import { asyncHandler, paramId, broadcastTaskUpdate, triggerAutomaticDependentProgression } from './helpers.js';
 
 export function createGitRouter(repo: TaskRepository, agentManager: AgentManager): Router {
   const router = Router();
@@ -116,6 +116,7 @@ export function createGitRouter(repo: TaskRepository, agentManager: AgentManager
         return;
       }
       broadcastTaskUpdate(updated);
+      await triggerAutomaticDependentProgression(repo, updated, agentManager);
       res.json(result);
     } catch (err: unknown) {
       res.status(500).json({ error: err instanceof Error ? err.message : 'Failed to merge' });
