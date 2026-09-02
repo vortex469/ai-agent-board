@@ -184,6 +184,8 @@ projects. `API_KEY` remains the legacy full-access credential for the UI.
 | `ALLOWED_ORIGINS` | `http://localhost:8081,http://localhost:4175,http://localhost:4176` | CORS origins |
 | `ALLOWED_HOSTS` | `localhost,127.0.0.1` | Server-side Host allowlist for WebSocket upgrades. Add the trusted reverse-proxy hostname in production. |
 | `AGENT_TIMEOUT_MS` | `3600000` | Default max agent execution time (60 minutes). Tasks can override this from 1–240 minutes. |
+| `AGENTBOARD_WORKTREE_DEPENDENCY_CONCURRENCY` | `2` | Maximum concurrent `npm ci` installs for Board-managed task worktrees. |
+| `AGENTBOARD_WORKTREE_MIN_FREE_SPACE_BYTES` | `8589934592` | Minimum free space required on the worktree filesystem before provisioning dependencies (8 GiB). |
 | `API_URL` | `http://localhost:8080` | Vite proxy target |
 | `VITE_ALLOWED_HOSTS` | `localhost,127.0.0.1` | Vite HTTP and proxy-upgrade Host allowlist. Loaded from `.env` or the process environment. Add trusted reverse-proxy hostnames; never use a wildcard. |
 | `PROJECTS_DIR` | `~/projects` | Host projects path |

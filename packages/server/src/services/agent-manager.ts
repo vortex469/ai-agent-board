@@ -20,6 +20,7 @@ import type { AttachmentStore } from '../repositories/attachment-types.js';
 import { errorMessage } from '../utils.js';
 import { detectAvailableAgents } from './agent-detection.js';
 import { resolveTaskTimeoutMs } from './agent-timeout.js';
+import { provisionWorktreeDependencies } from './worktree-dependencies.js';
 
 function loadAttachmentAsBase64(filePath: string, displayName: string, mimeType: string): AgentAttachment | null {
   try {
@@ -744,6 +745,37 @@ export class AgentManager {
           worktreePath,
           hasGit,
         });
+
+        if (worktreePath) {
+          try {
+            const dependencyResult = await provisionWorktreeDependencies(worktreePath);
+            if (dependencyResult.status === 'installed') {
+              this.emitEvent(task.id, {
+                id: uuid(), taskId: task.id, type: 'output',
+                content: `Provisioned npm dependencies inside worktree using ${dependencyResult.project.lockfileName}.`,
+                timestamp: Date.now(),
+                metadata: { command: 'npm ci' },
+              });
+            } else if (dependencyResult.status === 'already-present') {
+              this.emitEvent(task.id, {
+                id: uuid(), taskId: task.id, type: 'output',
+                content: `Reusing existing worktree-local node_modules for ${dependencyResult.project.lockfileName}.`,
+                timestamp: Date.now(),
+              });
+            }
+          } catch (err: unknown) {
+            const dependencyError = `Dependency provisioning failed: ${errorMessage(err)}`;
+            this.emitEvent(task.id, {
+              id: uuid(), taskId: task.id, type: 'error',
+              content: dependencyError,
+              timestamp: Date.now(),
+            });
+            const entry = this.sessions.get(task.id);
+            if (entry) this.sessions.delete(task.id);
+            terminateOnce('failed', dependencyError);
+            return;
+          }
+        }
 
         // Track file context across tool_execution_start → command_output pairs
         let lastFileEventFile: string | null = null;

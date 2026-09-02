@@ -1,0 +1,278 @@
+import { execFile } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import { promisify } from 'node:util';
+import { errorMessage } from '../utils.js';
+
+const execFileAsync = promisify(execFile);
+
+export const DEFAULT_WORKTREE_DEPENDENCY_CONCURRENCY = 2;
+export const DEFAULT_WORKTREE_MIN_FREE_SPACE_BYTES = 8 * 1024 * 1024 * 1024;
+
+const SUPPORTED_NPM_LOCKFILES = ['package-lock.json', 'npm-shrinkwrap.json'] as const;
+
+export interface WorktreeDependencyConfig {
+  maxConcurrentInstalls: number;
+  minFreeSpaceBytes: number;
+}
+
+export interface NodeProjectInfo {
+  projectRoot: string;
+  packageJsonPath: string;
+  lockfilePath: string;
+  lockfileName: string;
+}
+
+export type WorktreeDependencyProvisionResult =
+  | { status: 'skipped'; reason: string }
+  | { status: 'already-present'; project: NodeProjectInfo }
+  | { status: 'installed'; project: NodeProjectInfo };
+
+export interface WorktreeDependencyProvisionOptions {
+  env?: NodeJS.ProcessEnv;
+  fsImpl?: Pick<typeof fs, 'existsSync' | 'lstatSync' | 'statSync' | 'statfsSync'>;
+  execFileImpl?: typeof execFile;
+}
+
+function parsePositiveInteger(value: string | undefined, defaultValue: number, name: string): number {
+  const trimmed = value?.trim();
+  if (!trimmed) return defaultValue;
+  if (!/^\d+$/.test(trimmed)) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  const parsed = Number(trimmed);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return parsed;
+}
+
+export function getWorktreeDependencyConfig(env: NodeJS.ProcessEnv = process.env): WorktreeDependencyConfig {
+  return {
+    maxConcurrentInstalls: parsePositiveInteger(
+      env.AGENTBOARD_WORKTREE_DEPENDENCY_CONCURRENCY,
+      DEFAULT_WORKTREE_DEPENDENCY_CONCURRENCY,
+      'AGENTBOARD_WORKTREE_DEPENDENCY_CONCURRENCY',
+    ),
+    minFreeSpaceBytes: parsePositiveInteger(
+      env.AGENTBOARD_WORKTREE_MIN_FREE_SPACE_BYTES,
+      DEFAULT_WORKTREE_MIN_FREE_SPACE_BYTES,
+      'AGENTBOARD_WORKTREE_MIN_FREE_SPACE_BYTES',
+    ),
+  };
+}
+
+export function detectNodeNpmProject(
+  worktreePath: string,
+  fsImpl: Pick<typeof fs, 'existsSync'> = fs,
+): NodeProjectInfo | null {
+  const projectRoot = path.resolve(worktreePath);
+  const packageJsonPath = path.join(projectRoot, 'package.json');
+  if (!fsImpl.existsSync(packageJsonPath)) return null;
+
+  for (const lockfileName of SUPPORTED_NPM_LOCKFILES) {
+    const lockfilePath = path.join(projectRoot, lockfileName);
+    if (fsImpl.existsSync(lockfilePath)) {
+      return { projectRoot, packageJsonPath, lockfilePath, lockfileName };
+    }
+  }
+  return null;
+}
+
+function formatBytes(bytes: number): string {
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GiB`;
+}
+
+export function getFreeSpaceBytes(
+  targetPath: string,
+  fsImpl: Pick<typeof fs, 'statfsSync'> = fs,
+): number {
+  const stats = fsImpl.statfsSync(targetPath);
+  return Number(stats.bavail) * Number(stats.bsize);
+}
+
+export function assertMinimumFreeSpace(
+  targetPath: string,
+  minFreeSpaceBytes: number,
+  fsImpl: Pick<typeof fs, 'statfsSync'> = fs,
+): void {
+  const freeSpaceBytes = getFreeSpaceBytes(targetPath, fsImpl);
+  if (freeSpaceBytes < minFreeSpaceBytes) {
+    throw new Error(
+      `Not enough free space to provision worktree dependencies at ${path.resolve(targetPath)}: ` +
+      `${formatBytes(freeSpaceBytes)} available, ${formatBytes(minFreeSpaceBytes)} required.`,
+    );
+  }
+}
+
+export function worktreeNodeModulesUsable(
+  project: NodeProjectInfo,
+  fsImpl: Pick<typeof fs, 'existsSync' | 'lstatSync' | 'statSync'> = fs,
+): boolean {
+  const nodeModulesPath = path.join(project.projectRoot, 'node_modules');
+
+  let nodeModulesStat: fs.Stats;
+  try {
+    nodeModulesStat = fsImpl.lstatSync(nodeModulesPath);
+  } catch (err: unknown) {
+    const code = err && typeof err === 'object' && 'code' in err ? (err as NodeJS.ErrnoException).code : undefined;
+    if (code === 'ENOENT') return false;
+    throw err;
+  }
+  if (nodeModulesStat.isSymbolicLink() || !nodeModulesStat.isDirectory()) {
+    throw new Error(`Refusing to use symbolic-link or non-directory node_modules in worktree: ${nodeModulesPath}`);
+  }
+
+  const npmInstallStatePath = path.join(nodeModulesPath, '.package-lock.json');
+  if (!fsImpl.existsSync(npmInstallStatePath)) return false;
+  const installStateStat = fsImpl.lstatSync(npmInstallStatePath);
+  if (installStateStat.isSymbolicLink() || !installStateStat.isFile()) return false;
+
+  const installMtime = installStateStat.mtimeMs;
+  const packageMtime = fsImpl.statSync(project.packageJsonPath).mtimeMs;
+  const lockfileMtime = fsImpl.statSync(project.lockfilePath).mtimeMs;
+  return installMtime >= packageMtime && installMtime >= lockfileMtime;
+}
+
+function npmExecutable(): string {
+  return process.platform === 'win32' ? 'npm.cmd' : 'npm';
+}
+
+function stripNodeModulesBinFromPath(value: string | undefined): string | undefined {
+  if (!value) return value;
+  const delimiter = process.platform === 'win32' ? ';' : ':';
+  const safeEntries = value
+    .split(delimiter)
+    .filter((entry) => {
+      const normalized = entry.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+      return !normalized.endsWith('/node_modules/.bin') && normalized !== 'node_modules/.bin';
+    });
+  return safeEntries.length > 0 ? safeEntries.join(delimiter) : undefined;
+}
+
+function buildProvisionEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const next: NodeJS.ProcessEnv = {};
+  const allowedKeys = [
+    'PATH',
+    'HOME',
+    'USERPROFILE',
+    'APPDATA',
+    'LOCALAPPDATA',
+    'SystemRoot',
+    'WINDIR',
+    'TMPDIR',
+    'TMP',
+    'TEMP',
+    'CI',
+    'NO_COLOR',
+    'FORCE_COLOR',
+  ];
+  for (const key of allowedKeys) {
+    if (env[key] !== undefined) next[key] = env[key];
+  }
+  next.PATH = stripNodeModulesBinFromPath(next.PATH);
+  if (next.PATH === undefined) delete next.PATH;
+  next.npm_config_prefer_offline = 'true';
+  next.npm_config_audit = 'false';
+  next.npm_config_fund = 'false';
+  return next;
+}
+
+export function buildNpmCiArgs(): string[] {
+  return ['ci', '--prefer-offline', '--no-audit', '--no-fund'];
+}
+
+type QueueTask<T> = {
+  run: () => Promise<T>;
+  resolve: (value: T) => void;
+  reject: (error: unknown) => void;
+};
+
+class AsyncInstallQueue {
+  private active = 0;
+  private pending: QueueTask<unknown>[] = [];
+
+  constructor(private readonly limit: number) {}
+
+  enqueue<T>(run: () => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      this.pending.push({
+        run,
+        resolve: (value) => resolve(value as T),
+        reject,
+      });
+      this.drain();
+    });
+  }
+
+  private drain(): void {
+    while (this.active < this.limit && this.pending.length > 0) {
+      const task = this.pending.shift();
+      if (!task) return;
+      this.active += 1;
+      task.run()
+        .then(task.resolve, task.reject)
+        .finally(() => {
+          this.active -= 1;
+          this.drain();
+        });
+    }
+  }
+}
+
+const queuesByLimit = new Map<number, AsyncInstallQueue>();
+
+function installQueue(limit: number): AsyncInstallQueue {
+  let queue = queuesByLimit.get(limit);
+  if (!queue) {
+    queue = new AsyncInstallQueue(limit);
+    queuesByLimit.set(limit, queue);
+  }
+  return queue;
+}
+
+async function runNpmCi(
+  projectRoot: string,
+  env: NodeJS.ProcessEnv,
+  execFileImpl: typeof execFile = execFile,
+): Promise<void> {
+  const execAsync = execFileImpl === execFile ? execFileAsync : promisify(execFileImpl);
+  try {
+    await execAsync(npmExecutable(), buildNpmCiArgs(), {
+      cwd: projectRoot,
+      env: buildProvisionEnv(env),
+      shell: false,
+      windowsHide: true,
+      maxBuffer: 10 * 1024 * 1024,
+    });
+  } catch (err: unknown) {
+    const stderr = err && typeof err === 'object' && 'stderr' in err ? String((err as { stderr?: unknown }).stderr ?? '').trim() : '';
+    const detail = stderr || errorMessage(err);
+    throw new Error(`npm dependency provisioning failed: ${detail}`);
+  }
+}
+
+export async function provisionWorktreeDependencies(
+  worktreePath: string,
+  options: WorktreeDependencyProvisionOptions = {},
+): Promise<WorktreeDependencyProvisionResult> {
+  const env = options.env ?? process.env;
+  const fsImpl = options.fsImpl ?? fs;
+  const config = getWorktreeDependencyConfig(env);
+  const project = detectNodeNpmProject(worktreePath, fsImpl);
+  if (!project) {
+    return { status: 'skipped', reason: 'No package.json with supported npm lockfile was found.' };
+  }
+
+  if (worktreeNodeModulesUsable(project, fsImpl)) {
+    return { status: 'already-present', project };
+  }
+
+  assertMinimumFreeSpace(project.projectRoot, config.minFreeSpaceBytes, fsImpl);
+  await installQueue(config.maxConcurrentInstalls).enqueue(() => runNpmCi(project.projectRoot, env, options.execFileImpl));
+
+  if (!worktreeNodeModulesUsable(project, fsImpl)) {
+    throw new Error('npm dependency provisioning completed but worktree-local node_modules is not usable.');
+  }
+  return { status: 'installed', project };
+}

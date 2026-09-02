@@ -243,6 +243,61 @@ test('successful agent completion commits worktree changes before marking comple
   }
 });
 
+test('dependency provisioning failure prevents agent execution and preserves the worktree', async () => {
+  const f = fixture();
+  const previousThreshold = process.env.AGENTBOARD_WORKTREE_MIN_FREE_SPACE_BYTES;
+  process.env.AGENTBOARD_WORKTREE_MIN_FREE_SPACE_BYTES = '1';
+  writeFileSync(path.join(f.repoPath, 'package.json'), '{"broken":');
+  writeFileSync(path.join(f.repoPath, 'package-lock.json'), '{}');
+  git(['add', 'package.json', 'package-lock.json'], f.repoPath);
+  git(['commit', '-m', 'add broken npm project'], f.repoPath);
+
+  const manager = new AgentManager();
+  let createSessionCalled = false;
+  const provider = {
+    displayName: 'Fake Codex',
+    start: async () => {},
+    stop: async () => {},
+    createSession: async () => {
+      createSessionCalled = true;
+      return {
+        execute: async () => ({ status: 'complete' as const }),
+        destroy: async () => {},
+        abort: async () => {},
+      };
+    },
+  } as unknown as AgentProvider;
+  (manager as unknown as { providers: Map<string, AgentProvider> }).providers.set('codex', provider);
+  (manager as unknown as { availableAgents: Array<{ name: string; displayName: string; available: boolean }> }).availableAgents = [
+    { name: 'codex', displayName: 'Fake Codex', available: true },
+  ];
+
+  const t = task(f.repoPath, 'smoke/npm-provisioning-fails');
+  try {
+    const finalStatus = await new Promise<Task['agentStatus']>((resolve) => {
+      manager.startAgent(
+        t,
+        (status) => {
+          t.agentStatus = status;
+          if (status === 'complete' || status === 'failed') resolve(status);
+        },
+        (worktreePath) => { t.worktreePath = worktreePath; },
+      );
+    });
+
+    assert.equal(finalStatus, 'failed');
+    assert.equal(createSessionCalled, false);
+    assert.ok(t.worktreePath);
+    assert.equal(existsSync(t.worktreePath), true);
+    assert.equal(existsSync(path.join(t.worktreePath, 'package.json')), true);
+  } finally {
+    if (previousThreshold === undefined) delete process.env.AGENTBOARD_WORKTREE_MIN_FREE_SPACE_BYTES;
+    else process.env.AGENTBOARD_WORKTREE_MIN_FREE_SPACE_BYTES = previousThreshold;
+    cleanupTaskWorktree(f.repoPath, t.worktreePath);
+    f.dispose();
+  }
+});
+
 test('successful startAgentForTask run auto-merges clean committed worktree and moves task to done', async () => {
   const f = fixture();
   const manager = new AgentManager();
