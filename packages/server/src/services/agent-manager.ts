@@ -20,6 +20,7 @@ import type { AttachmentStore } from '../repositories/attachment-types.js';
 import { errorMessage } from '../utils.js';
 import { detectAvailableAgents } from './agent-detection.js';
 import { resolveTaskTimeoutMs } from './agent-timeout.js';
+import { discoverNodeDependencyLinks, linkNodeDependenciesIntoWorktree } from './worktree-dependencies.js';
 
 function loadAttachmentAsBase64(filePath: string, displayName: string, mimeType: string): AgentAttachment | null {
   try {
@@ -429,6 +430,7 @@ export class AgentManager {
     if (!task.useWorktree) return undefined;
     if (!task.repoPath) throw new Error('Worktree tasks require repoPath');
     if (!task.branchName) throw new Error('Worktree tasks require branchName');
+    discoverNodeDependencyLinks(task.repoPath);
 
     // Reuse a valid worktree left over from a prior run (e.g. after a failed
     // attempt). Without this, a restart would mint a new temp dir and fail with
@@ -440,6 +442,7 @@ export class AgentManager {
       fs.existsSync(task.worktreePath) &&
       this.worktreeRegisteredForBranch(task.repoPath, task.worktreePath, task.branchName)
     ) {
+      linkNodeDependenciesIntoWorktree(task.repoPath, task.worktreePath);
       console.log(`[worktree] reusing existing ${task.worktreePath}`);
       return task.worktreePath;
     }
@@ -468,6 +471,7 @@ export class AgentManager {
       console.log(branchExists
         ? `[worktree] attached existing branch ${task.branchName} at ${worktreePath}`
         : `[worktree] created at ${worktreePath} from ${baseBranch}`);
+      linkNodeDependenciesIntoWorktree(task.repoPath, worktreePath);
       return worktreePath;
     } catch (err: unknown) {
       console.error(`[worktree] failed:`, errorMessage(err));
