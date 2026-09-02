@@ -684,6 +684,7 @@ export async function triggerAutomaticDependentProgression(
     if (dependent.columnId === 'done') continue;
     if (dependent.columnId !== 'backlog' && dependent.columnId !== 'in-progress') return undefined;
     if (dependent.agentStatus !== 'idle') return undefined;
+    if (dependent.runRequestedAt === undefined) return undefined;
     if (dependent.runClaimedAt !== undefined) return undefined;
     if (agentManager.isRunning(dependent.id)) return undefined;
 
@@ -708,7 +709,6 @@ export async function triggerAutomaticDependentProgression(
       return undefined;
     }
 
-    await repo.requestRun(dependent.id, Date.now());
     await startAgentForTask(dependent, repo, agentManager);
     return repo.getById(dependent.id);
   }

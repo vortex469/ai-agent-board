@@ -147,6 +147,18 @@ export function createTaskRouter(repo: TaskRepository, agentManager: AgentManage
       }
     }
 
+    // Persist run intent for every requested card. Root cards can be claimed
+    // immediately; dependent cards remain queued until prerequisites are Done.
+    const runRequestedAt = Date.now();
+    for (let i = 0; i < created.length; i++) {
+      const task = created[i];
+      const def = taskDefs[i];
+      if (def.autoRun === true) {
+        const requested = await repo.requestRun(task.id, runRequestedAt);
+        if (requested) created[i] = requested;
+      }
+    }
+
     // Auto-run root tasks that requested it. Dependent roadmap cards progress
     // automatically only after their prerequisite reaches Done.
     for (let i = 0; i < created.length; i++) {
@@ -164,7 +176,6 @@ export function createTaskRouter(repo: TaskRepository, agentManager: AgentManage
           );
           if (failed) created[i] = failed;
         } else {
-          await repo.requestRun(task.id, Date.now());
           await startAgentForTask(task, repo, agentManager);
           const latest = await repo.getById(task.id);
           if (latest) created[i] = latest;

@@ -263,13 +263,13 @@ test.describe('Roadmap intake UI', () => {
     await expect(progress.getByLabel('Next eligible card')).toHaveText(`04. Next progress ${stamp}`);
   });
 
-  test('start now submits normal in-progress autoRun task definitions for the selected project', async ({ page, request }) => {
+  test('execution mode submits first-card and full-roadmap payloads for the selected project', async ({ page, request }) => {
     const project = await createProject(request, `Roadmap UI Project ${Date.now()}`);
     createdProjectIds.push(project.id);
 
-    let batchPayload: any;
+    const batchPayloads: any[] = [];
     await page.route('**/api/tasks/batch', async (route) => {
-      batchPayload = route.request().postDataJSON();
+      batchPayloads.push(route.request().postDataJSON());
       await route.fulfill({
         status: 201,
         contentType: 'application/json',
@@ -281,21 +281,41 @@ test.describe('Roadmap intake UI', () => {
     await waitForBoard(page);
     await page.getByRole('button', { name: 'Roadmap Intake' }).click();
     await page.getByLabel('Roadmap text').fill(`
-- Build auto-run payload
+- Build first-card payload
 - Use selected project path
     `);
     await page.getByRole('button', { name: 'Preview Cards' }).click();
-    await expect(page.getByLabel('Title for roadmap item 1')).toHaveValue('01. Build auto-run payload');
-    await page.getByLabel('Destination').selectOption('run');
+    await expect(page.getByLabel('Title for roadmap item 1')).toHaveValue('01. Build first card payload');
+    await page.getByLabel('Execution mode').selectOption('first-card');
     await page.getByLabel('Agent').selectOption('codex');
     await page.getByRole('button', { name: /Create 2 Cards/ }).click();
 
-    expect(batchPayload.tasks).toHaveLength(2);
-    expect(batchPayload.tasks.map((task: any) => task.columnId)).toEqual(['in-progress', 'in-progress']);
-    expect(batchPayload.tasks.map((task: any) => task.autoRun)).toEqual([true, true]);
-    expect(batchPayload.tasks.map((task: any) => task.agentType)).toEqual(['codex', 'codex']);
-    expect(batchPayload.tasks.map((task: any) => task.projectId)).toEqual([project.id, project.id]);
-    expect(batchPayload.tasks.map((task: any) => task.repoPath)).toEqual([project.repoPath, project.repoPath]);
-    expect(batchPayload.tasks.map((task: any) => task.dependsOnTaskIndexes)).toEqual([undefined, [0]]);
+    await page.getByRole('button', { name: 'Roadmap Intake' }).click();
+    await page.getByLabel('Roadmap text').fill(`
+- Build full-roadmap payload
+- Queue dependent card
+    `);
+    await page.getByRole('button', { name: 'Preview Cards' }).click();
+    await expect(page.getByLabel('Title for roadmap item 1')).toHaveValue('01. Build full roadmap payload');
+    await page.getByLabel('Execution mode').selectOption('full-roadmap');
+    await page.getByLabel('Agent').selectOption('codex');
+    await page.getByRole('button', { name: /Create 2 Cards/ }).click();
+
+    expect(batchPayloads).toHaveLength(2);
+    expect(batchPayloads[0].tasks).toHaveLength(2);
+    expect(batchPayloads[0].tasks.map((task: any) => task.columnId)).toEqual(['in-progress', 'backlog']);
+    expect(batchPayloads[0].tasks.map((task: any) => task.autoRun)).toEqual([true, undefined]);
+    expect(batchPayloads[0].tasks.map((task: any) => task.agentType)).toEqual(['codex', 'codex']);
+    expect(batchPayloads[0].tasks.map((task: any) => task.projectId)).toEqual([project.id, project.id]);
+    expect(batchPayloads[0].tasks.map((task: any) => task.repoPath)).toEqual([project.repoPath, project.repoPath]);
+    expect(batchPayloads[0].tasks.map((task: any) => task.dependsOnTaskIndexes)).toEqual([undefined, [0]]);
+
+    expect(batchPayloads[1].tasks).toHaveLength(2);
+    expect(batchPayloads[1].tasks.map((task: any) => task.columnId)).toEqual(['in-progress', 'backlog']);
+    expect(batchPayloads[1].tasks.map((task: any) => task.autoRun)).toEqual([true, true]);
+    expect(batchPayloads[1].tasks.map((task: any) => task.agentType)).toEqual(['codex', 'codex']);
+    expect(batchPayloads[1].tasks.map((task: any) => task.projectId)).toEqual([project.id, project.id]);
+    expect(batchPayloads[1].tasks.map((task: any) => task.repoPath)).toEqual([project.repoPath, project.repoPath]);
+    expect(batchPayloads[1].tasks.map((task: any) => task.dependsOnTaskIndexes)).toEqual([undefined, [0]]);
   });
 });

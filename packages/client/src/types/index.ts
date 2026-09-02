@@ -11,6 +11,7 @@ export type {
   ProjectPathValidation,
   RoadmapPreview,
   RoadmapProposedTask,
+  RoadmapExecutionMode,
   CreateProjectRequest,
   UpdateProjectRequest,
   Task,

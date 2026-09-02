@@ -1,13 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { ClipboardList, Loader2, Play, Trash2, X } from 'lucide-react';
-import type { AgentInfo, AgentType, ColumnId, Priority, Project, RoadmapProposedTask } from '@/types';
+import type { AgentInfo, AgentType, ColumnId, Priority, Project, RoadmapExecutionMode, RoadmapProposedTask } from '@/types';
 import { api } from '@/lib/api';
 import { AGENT_OPTIONS } from '@/lib/agent-config';
 import { PRIORITY_OPTIONS } from '@/lib/priority-config';
 import { slugify } from '@/lib/utils';
-
-type Destination = 'backlog' | 'run';
 
 interface RoadmapIntakeDialogProps {
   open: boolean;
@@ -32,7 +30,7 @@ export function RoadmapIntakeDialog({ open, onClose, project, onCreateTasks }: R
   const [text, setText] = useState('');
   const [preview, setPreview] = useState<RoadmapProposedTask[]>([]);
   const [error, setError] = useState('');
-  const [destination, setDestination] = useState<Destination>('backlog');
+  const [executionMode, setExecutionMode] = useState<RoadmapExecutionMode>('backlog');
   const [agentType, setAgentType] = useState<AgentType>(project.defaultAgentType ?? 'codex');
   const [priority, setPriority] = useState<Priority>(project.defaultPriority ?? 'medium');
   const [submitting, setSubmitting] = useState(false);
@@ -47,7 +45,7 @@ export function RoadmapIntakeDialog({ open, onClose, project, onCreateTasks }: R
       setText('');
       setPreview([]);
       setError('');
-      setDestination('backlog');
+      setExecutionMode('backlog');
       setSubmitting(false);
       setPreviewing(false);
       return;
@@ -91,7 +89,7 @@ export function RoadmapIntakeDialog({ open, onClose, project, onCreateTasks }: R
       setError('Keep at least one proposed task before creating cards');
       return;
     }
-    if (destination === 'run' && !project.repoPath) {
+    if (executionMode !== 'backlog' && !project.repoPath) {
       setError('Immediate execution requires the selected project to have a local path');
       return;
     }
@@ -103,9 +101,9 @@ export function RoadmapIntakeDialog({ open, onClose, project, onCreateTasks }: R
         title: task.title.trim(),
         description: task.description.trim(),
         priority,
-        columnId: destination === 'run' ? 'in-progress' : 'backlog',
+        columnId: executionMode !== 'backlog' && index === 0 ? 'in-progress' : 'backlog',
         agentType,
-        autoRun: destination === 'run' || undefined,
+        autoRun: executionMode === 'full-roadmap' || (executionMode === 'first-card' && index === 0) || undefined,
         repoPath: project.repoPath,
         baseBranch,
         useWorktree,
@@ -185,14 +183,15 @@ export function RoadmapIntakeDialog({ open, onClose, project, onCreateTasks }: R
               <div className="flex min-h-0 flex-col gap-3">
                 <div className="grid gap-2 sm:grid-cols-3">
                   <label className="space-y-1">
-                    <span className="block text-xs font-medium text-muted-foreground">Destination</span>
+                    <span className="block text-xs font-medium text-muted-foreground">Execution mode</span>
                     <select
-                      value={destination}
-                      onChange={(event) => setDestination(event.target.value as Destination)}
+                      value={executionMode}
+                      onChange={(event) => setExecutionMode(event.target.value as RoadmapExecutionMode)}
                       className="h-10 w-full rounded-lg border border-border bg-background px-2 text-sm focus:border-primary focus:outline-none"
                     >
-                      <option value="backlog">Backlog</option>
-                      <option value="run">Start now</option>
+                      <option value="backlog">Backlog only</option>
+                      <option value="first-card">Start first now</option>
+                      <option value="full-roadmap">Auto-progress all</option>
                     </select>
                   </label>
                   <label className="space-y-1">

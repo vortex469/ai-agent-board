@@ -168,6 +168,8 @@ export interface RoadmapProposedTask {
   dependsOnTaskIndexes?: number[];
 }
 
+export type RoadmapExecutionMode = 'backlog' | 'first-card' | 'full-roadmap';
+
 export interface RoadmapPreview {
   project: {
     id: string;
