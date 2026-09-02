@@ -96,6 +96,7 @@ function isDisposableIgnoredPath(value: string): boolean {
   return parts.includes('node_modules')
     || parts.includes('__pycache__')
     || parts.includes('.pytest_cache')
+    || parts.includes('.ruff_cache')
     || parts.some((part) => disposableDirectories.includes(part))
     || name.endsWith('.tsbuildinfo')
     || name.endsWith('.pyc');

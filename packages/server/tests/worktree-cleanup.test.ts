@@ -61,6 +61,10 @@ function fixture(): { repoPath: string; worktreePath: string; branchName: string
     'coverage/',
     'test-results/',
     'playwright-report/',
+    '.pytest_cache/',
+    '.ruff_cache/',
+    '__pycache__/',
+    '*.pyc',
     'ignored-data/',
     'ignored-file.log',
     '',
@@ -204,6 +208,34 @@ test('cleanup permits nested ignored build artifacts but blocks unrelated ignore
     generated.dispose();
     unsafeDirectory.dispose();
     unsafeFile.dispose();
+  }
+});
+
+test('cleanup permits ignored Python test cache artifacts but blocks real source changes', () => {
+  const cacheOnly = fixture();
+  const sourceChange = fixture();
+  try {
+    for (const filePath of [
+      ['.pytest_cache', 'v', 'cache', 'nodeids'],
+      ['.ruff_cache', 'CACHEDIR.TAG'],
+      ['src', '__pycache__', 'module.cpython-312.pyc'],
+      ['tests', '__pycache__', 'test_module.cpython-312-pytest-8.0.0.pyc'],
+      ['top_level.cpython-312.pyc'],
+    ]) {
+      const absolutePath = path.join(cacheOnly.worktreePath, ...filePath);
+      mkdirSync(path.dirname(absolutePath), { recursive: true });
+      writeFileSync(absolutePath, 'generated\n');
+    }
+    assert.deepEqual(cleanupTaskWorktree(cacheOnly.task), { status: 'removed' });
+
+    writeFileSync(path.join(sourceChange.worktreePath, 'src.py'), 'print("keep me")\n');
+    const blocked = cleanupTaskWorktree(sourceChange.task);
+    assert.equal(blocked.status, 'blocked');
+    assert.match(blocked.status === 'blocked' ? blocked.reason : '', /uncommitted, untracked, or non-disposable ignored/i);
+    assert.equal(existsSync(path.join(sourceChange.worktreePath, 'src.py')), true);
+  } finally {
+    cacheOnly.dispose();
+    sourceChange.dispose();
   }
 });
 
