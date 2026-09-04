@@ -12,6 +12,7 @@ import {
   Trash2,
   Archive,
   RotateCw,
+  GripVertical,
 } from 'lucide-react';
 import type { Task, AgentStatus } from '@/types';
 import { getAgentDisplay } from '@/lib/agent-config';
@@ -51,7 +52,7 @@ interface TaskCardProps {
 }
 
 function TaskCardComponent({ task, onClick, onEdit, onDelete, onArchive, onUnarchive, onRetry }: TaskCardProps) {
-  const { attributes, listeners, setNodeRef, transform, isDragging } =
+  const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, isDragging } =
     useDraggable({
       id: task.id,
       disabled: task.archived // Disable dragging for archived tasks
@@ -96,7 +97,6 @@ function TaskCardComponent({ task, onClick, onEdit, onDelete, onArchive, onUnarc
       ref={setNodeRef}
       style={style}
       {...attributes}
-      {...listeners}
       className={cn(
         // touch-manipulation keeps native pan/scroll gestures working; the
         // TouchSensor press-and-hold delay is what activates a card drag.
@@ -109,12 +109,29 @@ function TaskCardComponent({ task, onClick, onEdit, onDelete, onArchive, onUnarc
       )}
       onClick={() => { if (!wasDragging.current) onClick(); }}
     >
+      {/* Dedicated drag activator. Keeping dnd listeners off the card body
+          allows native wheel/touchpad/touch scrolling and reliable actions. */}
+      {!task.archived && (
+        <button
+          ref={setActivatorNodeRef}
+          type="button"
+          {...listeners}
+          onClick={(e) => e.stopPropagation()}
+          aria-label={`Drag ${task.title}`}
+          title="Drag task"
+          className="absolute left-1 top-1 z-10 flex h-11 w-11 cursor-grab touch-none items-center justify-center rounded-md text-muted-foreground/70 transition-colors hover:bg-accent hover:text-foreground active:cursor-grabbing lg:h-7 lg:w-7"
+        >
+          <GripVertical className="h-4 w-4" />
+        </button>
+      )}
 
       {/* Action buttons — top right, visible on hover */}
       {(onEdit || onDelete || onArchive || onUnarchive || onRetry) && (
         <div
           className="relative mb-1 flex items-center justify-end gap-0.5 opacity-100 transition-opacity lg:absolute lg:right-2 lg:top-2 lg:mb-0 lg:opacity-0 lg:group-hover:opacity-100"
           onPointerDown={(e) => e.stopPropagation()}
+          onMouseDown={(e) => e.stopPropagation()}
+          onTouchStart={(e) => e.stopPropagation()}
         >
           {onRetry && task.agentStatus === 'failed' && !task.archived && (
             <button
@@ -181,7 +198,7 @@ function TaskCardComponent({ task, onClick, onEdit, onDelete, onArchive, onUnarc
 
       <div>
         {/* Title with priority emoji */}
-        <h3 className="line-clamp-2 pr-16 text-base font-medium leading-snug text-card-foreground">
+        <h3 className="line-clamp-2 pl-10 pr-16 text-base font-medium leading-snug text-card-foreground lg:pl-7">
           {priorityDisplay && <span className="mr-1">{priorityDisplay.emoji}</span>}{task.title}
         </h3>
 

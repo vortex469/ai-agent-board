@@ -94,7 +94,7 @@ export function Column({ column, tasks, onTaskClick, onEditTask, onDeleteTask, o
           ref={(node) => { setNodeRef(node); (scrollRef as React.MutableRefObject<HTMLDivElement | null>).current = node; }}
           data-column-scroll
           className={cn(
-            'flex h-full flex-col gap-2 overflow-y-auto overscroll-y-contain p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] transition-colors duration-200',
+            'flex h-full min-h-0 flex-col gap-2 overflow-y-auto overscroll-y-contain p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] transition-colors duration-200',
             isOver
               ? 'bg-primary/5 ring-2 ring-primary/20 ring-inset'
               : 'bg-[var(--column-bg)]'
