@@ -496,7 +496,7 @@ test.describe('Task Groups UI', () => {
     await expect(page.getByRole('heading', { name: 'Create Task Group' })).not.toBeVisible({ timeout: 3000 });
 
     // Group card should appear on the board
-    await expect(page.getByText(`E2E Group ${ts}`)).toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole('heading', { name: `E2E Group ${ts}`, exact: true })).toBeVisible({ timeout: 5000 });
 
     // Clean up via API
     const groupsRes = await request.get(`${API}/api/groups`);

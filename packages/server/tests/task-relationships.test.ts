@@ -40,7 +40,7 @@ function makeDb() {
 
 const task = (id: string, projectId = 'project-a', title = id): Task => ({
   id, projectId, title, description: '', priority: 'medium', columnId: 'backlog', agentStatus: 'idle',
-  agentType: 'hermes', createdAt: Number(id.replace(/\D/g, '')) || 1, repoPath: '/repo', baseBranch: 'main',
+  agentType: 'hermes', createdAt: Number(id.replace(/\D/g, '')) || 1, repoPath: '/tmp/agentboard-test-repo', baseBranch: 'main',
   branchName: `agent/${id}`, useWorktree: true,
 });
 
@@ -52,7 +52,7 @@ const attempt = (id: string, taskId: string, key = id): ExecutionAttempt => ({
 
 const nextTurn = () => new Promise<void>((resolve) => setImmediate(resolve));
 
-const project: Project = { id: 'project-a', name: 'Project A', aliases: ['alpha'], repoPath: '/repo', isDefault: false, createdAt: 1, updatedAt: 1 };
+const project: Project = { id: 'project-a', name: 'Project A', aliases: ['alpha'], repoPath: '/tmp/agentboard-test-repo', isDefault: false, createdAt: 1, updatedAt: 1 };
 const projects = {
   getById: async (id: string) => id === project.id ? project : undefined,
   resolve: async (ref: string) => ['project-a', 'Project A', 'alpha'].some((v) => v.toLowerCase() === ref.trim().toLowerCase()) ? [project] : [],
@@ -272,9 +272,9 @@ test('batch full-roadmap autoRun queues dependent cards without starting them ea
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ tasks: [
-          { title: '01. First', description: '', projectId: 'project-a', columnId: 'in-progress', autoRun: true },
-          { title: '02. Second', description: '', projectId: 'project-a', columnId: 'backlog', autoRun: true, dependsOnTaskIndexes: [0] },
-          { title: '03. Third', description: '', projectId: 'project-a', columnId: 'backlog', autoRun: true, dependsOnTaskIndexes: [1] },
+          { title: '01. First', description: '', projectId: 'project-a', columnId: 'in-progress', agentType: 'hermes', autoRun: true },
+          { title: '02. Second', description: '', projectId: 'project-a', columnId: 'backlog', agentType: 'hermes', autoRun: true, dependsOnTaskIndexes: [0] },
+          { title: '03. Third', description: '', projectId: 'project-a', columnId: 'backlog', agentType: 'hermes', autoRun: true, dependsOnTaskIndexes: [1] },
         ] }),
       });
       assert.equal(response.status, 201);

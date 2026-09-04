@@ -33,6 +33,21 @@ test('parses a single plain-text instruction into one ordered card', () => {
   assert.equal(result.tasks[0].sourceText, 'Build the roadmap intake parser regression coverage.');
 });
 
+test('rejects vague single-line request prose without a clear task boundary', () => {
+  const result = parseRoadmapText('Please make the next release better.');
+  assert.match(String(result), /clear task boundaries/i);
+});
+
+test('humanizes ordinary hyphenated display words while preserving source text', () => {
+  const result = parseRoadmapText('- Build first-card payload');
+
+  assert.notEqual(typeof result, 'string');
+  if (typeof result === 'string') return;
+
+  assert.equal(result.tasks[0].title, '01. Build first card payload');
+  assert.equal(result.tasks[0].sourceText, '- Build first-card payload');
+});
+
 test('parses a single dash bullet into one ordered card', () => {
   const result = parseRoadmapText('- Build roadmap intake preview support');
 

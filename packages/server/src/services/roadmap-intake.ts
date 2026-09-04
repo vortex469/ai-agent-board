@@ -130,6 +130,13 @@ function parsePlainTextBlock(lines: string[]): ParsedBlock[] {
   if (meaningfulLines.length !== 1) return [];
 
   const sourceText = meaningfulLines[0].trim();
+
+  // Plain single-line intake is supported for direct actionable instructions,
+  // but vague request phrasing does not provide a reliable task boundary.
+  if (/^(?:please|could you|can you|would you|i want|we should)\b/i.test(sourceText)) {
+    return [];
+  }
+
   return [{ titleSeed: sourceText, sourceText }];
 }
 
@@ -185,7 +192,7 @@ function trimColonDetail(value: string): string {
 }
 
 function humanizeDisplayIdentifiers(value: string): string {
-  return normalizeWhitespace(value.replace(CODE_IDENTIFIER_RE, (identifier) => {
+  const codeHumanized = value.replace(CODE_IDENTIFIER_RE, (identifier) => {
     const withoutVersion = identifier.replace(/@[0-9][A-Za-z0-9._-]*$/, '');
     const withoutExtension = withoutVersion.replace(/\.[A-Za-z0-9]+$/, '');
     const pathParts = withoutExtension.split('/').filter(Boolean);
@@ -195,7 +202,11 @@ function humanizeDisplayIdentifiers(value: string): string {
     const words = basename.replace(/^--/, '').split(/[-_.]+/).filter(Boolean);
     if (words.length === 0) return identifier;
     return words.map((word) => word.toLowerCase()).join(' ');
-  }));
+  });
+
+  return normalizeWhitespace(
+    codeHumanized.replace(/\b([A-Za-z0-9]+)-([A-Za-z0-9]+)\b/g, '$1 $2'),
+  );
 }
 
 function stripDisplayMarkdown(value: string): string {

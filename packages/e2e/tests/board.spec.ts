@@ -204,7 +204,7 @@ test.describe('Task CRUD', () => {
     await waitForBoard(page);
     await page.getByRole('heading', { name: taskTitle }).click();
 
-    const copyButton = page.getByRole('button', { name: 'Copy Result' });
+    const copyButton = page.getByRole('button', { name: 'Copy Result', exact: true });
     await expect(copyButton).toBeVisible({ timeout: 3_000 });
     await copyButton.click();
     await expect(page.getByRole('button', { name: 'Copied' })).toBeVisible();

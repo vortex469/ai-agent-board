@@ -214,7 +214,7 @@ function compactToolSummary(content: string | undefined): string | null {
 
 function getMarkdownSection(markdown: string, heading: string): string {
   const escapedHeading = heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const match = markdown.match(new RegExp(`^##\\s*${escapedHeading}\\s*\\r?\\n([\\s\\S]*?)(?=\\r?\\n##\\s|$)`, 'im'));
+  const match = markdown.match(new RegExp(`(?:^|\\r?\\n)##\\s*${escapedHeading}\\s*\\r?\\n([\\s\\S]*?)(?=\\r?\\n##\\s|$)`, 'i'));
   return match?.[1].trim() ?? '';
 }
 

@@ -467,7 +467,8 @@ test('workspace bootstrap failure prevents agent execution and preserves the wor
     assert.ok(events.some((event) =>
       event.type === 'error' &&
       event.content.includes('npm workspace bootstrap failed') &&
-      event.content.includes('Command failed: npm run build:shared'),
+      event.content.includes('build stderr') &&
+      event.content.includes('build stdout'),
     ));
   } finally {
     if (previousThreshold === undefined) delete process.env.AGENTBOARD_WORKTREE_MIN_FREE_SPACE_BYTES;

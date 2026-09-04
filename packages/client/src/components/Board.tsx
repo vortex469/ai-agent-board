@@ -243,7 +243,7 @@ export function Board({
           ref={railRef}
           data-board-rail
           onScroll={updateActiveColumn}
-          className="flex min-h-0 flex-1 snap-x snap-mandatory gap-3 overflow-x-auto overscroll-x-contain scroll-px-3 p-3 pl-[max(0.75rem,env(safe-area-inset-left))] pr-[max(0.75rem,env(safe-area-inset-right))] lg:snap-none lg:gap-4 lg:scroll-px-6 lg:p-6"
+          className="flex min-h-0 flex-1 snap-x snap-mandatory gap-3 overflow-x-auto overflow-y-hidden overscroll-x-contain scroll-px-3 p-3 pl-[max(0.75rem,env(safe-area-inset-left))] pr-[max(0.75rem,env(safe-area-inset-right))] lg:snap-none lg:gap-4 lg:scroll-px-6 lg:p-6"
         >
         {columns.map((column, index) => (
           <motion.div
@@ -251,7 +251,7 @@ export function Board({
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: index * 0.1, duration: 0.3 }}
-            className="h-full w-[88vw] max-w-[26rem] shrink-0 snap-start sm:w-72 lg:w-80 lg:max-w-none"
+            className="min-h-0 w-[88vw] max-w-[26rem] shrink-0 snap-start self-stretch sm:w-72 lg:w-80 lg:max-w-none"
           >
             <Column
               column={column}

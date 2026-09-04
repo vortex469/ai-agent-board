@@ -194,7 +194,7 @@ test.describe('Roadmap intake UI', () => {
     await page.goto('/');
     await waitForBoard(page);
 
-    await page.getByRole('button', { name: 'Roadmap Intake' }).click();
+    await page.getByRole('button', { name: 'Roadmap Intake', exact: true }).click();
     await expect(page.getByRole('heading', { name: 'Roadmap Intake' })).toBeVisible();
     await page.getByLabel('Roadmap text').fill(`
 - Build intake parser ${stamp}
@@ -297,7 +297,7 @@ test.describe('Roadmap intake UI', () => {
 
     await page.goto(`/projects/${encodeURIComponent(project.id)}`);
     await waitForBoard(page);
-    await page.getByRole('button', { name: 'Roadmap Intake' }).click();
+    await page.getByRole('button', { name: 'Roadmap Intake', exact: true }).click();
     await page.getByLabel('Roadmap text').fill(`
 - Build first-card payload
 - Use selected project path
@@ -308,7 +308,7 @@ test.describe('Roadmap intake UI', () => {
     await page.getByLabel('Agent').selectOption('codex');
     await page.getByRole('button', { name: /Create 2 Cards/ }).click();
 
-    await page.getByRole('button', { name: 'Roadmap Intake' }).click();
+    await page.getByRole('button', { name: 'Roadmap Intake', exact: true }).click();
     await page.getByLabel('Roadmap text').fill(`
 - Build full-roadmap payload
 - Queue dependent card

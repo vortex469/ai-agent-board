@@ -71,7 +71,7 @@ export function RoadmapProgress({ tasks, groups }: RoadmapProgressProps) {
       completed: cards.filter((card) => card.columnId === 'done').length,
       running: cards.find((card) => card.running),
       blockedOrReview: cards.find((card) => card.blockedOrReview),
-      nextEligible: cards.find((card) => card.eligible),
+      nextEligible: cards.find((card) => card.eligible && !card.running && !card.blockedOrReview),
     };
   }, [tasks, groups]);
 

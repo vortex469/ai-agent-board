@@ -64,7 +64,7 @@ export function Column({ column, tasks, onTaskClick, onEditTask, onDeleteTask, o
   }, [column.color]);
 
   return (
-    <div className="flex h-full w-full min-w-0 flex-col" data-column={column.id}>
+    <div className="flex min-h-0 w-full min-w-0 flex-1 flex-col self-stretch" data-column={column.id}>
       {/* Column header */}
       <div className="mb-3 flex items-center justify-between px-1">
         <div className="flex items-center gap-2">
@@ -89,7 +89,7 @@ export function Column({ column, tasks, onTaskClick, onEditTask, onDeleteTask, o
       </div>
 
       {/* Drop zone with scroll fade */}
-      <div className="relative flex-1 overflow-hidden rounded-xl">
+      <div className="relative min-h-0 flex-1 overflow-hidden rounded-xl">
         <div
           ref={(node) => { setNodeRef(node); (scrollRef as React.MutableRefObject<HTMLDivElement | null>).current = node; }}
           className={cn(
