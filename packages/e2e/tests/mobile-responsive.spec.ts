@@ -19,6 +19,8 @@ const LONG_TITLE = `${FIXTURE_PREFIX} Backlog with an intentionally very long ta
 const IN_PROGRESS_TITLE = `${FIXTURE_PREFIX} InProgress agent task`;
 const REVIEW_TITLE = `${FIXTURE_PREFIX} Review task`;
 const COMPLETED_WORKTREE_TITLE = `${FIXTURE_PREFIX} Completed worktree task`;
+const DONE_SCROLL_PREFIX = `${FIXTURE_PREFIX} Done overflow`;
+const DONE_SCROLL_COUNT = 24;
 const LONG_DESCRIPTION = [
   'A long markdown description used to verify the expanded task description scroller.',
   '',
@@ -120,6 +122,36 @@ async function expectTouchTarget(locator: Locator) {
   expect(box).not.toBeNull();
   expect(box!.width).toBeGreaterThanOrEqual(44);
   expect(box!.height).toBeGreaterThanOrEqual(44);
+}
+
+async function isInViewport(locator: Locator) {
+  return locator.evaluate((el) => {
+    const rect = el.getBoundingClientRect();
+    return rect.bottom > 0
+      && rect.right > 0
+      && rect.top < window.innerHeight
+      && rect.left < window.innerWidth;
+  });
+}
+
+async function touchSwipe(page: Page, startX: number, startY: number, endX: number, endY: number, steps = 5) {
+  const client = await page.context().newCDPSession(page);
+  await client.send('Input.dispatchTouchEvent', {
+    type: 'touchStart',
+    touchPoints: [{ x: startX, y: startY }],
+  });
+  for (let i = 1; i <= steps; i++) {
+    const ratio = i / steps;
+    await client.send('Input.dispatchTouchEvent', {
+      type: 'touchMove',
+      touchPoints: [{
+        x: startX + (endX - startX) * ratio,
+        y: startY + (endY - startY) * ratio,
+      }],
+    });
+  }
+  await client.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  await client.detach();
 }
 
 for (const vp of MOBILE_VIEWPORTS) {
@@ -367,6 +399,97 @@ for (const vp of MOBILE_VIEWPORTS) {
     });
   });
 }
+
+test.describe('Mobile portrait Done column overflow', () => {
+  test.use({
+    viewport: { width: 375, height: 812 },
+    userAgent: IPHONE_UA,
+    isMobile: true,
+    hasTouch: true,
+    deviceScaleFactor: 3,
+  });
+
+  test.beforeEach(async ({ page, request }) => {
+    await seedFixture(request);
+
+    const existing = await (await request.get(`${API}/api/tasks`)).json();
+    const existingTitles = new Set(existing.map((task: any) => task.title));
+    for (let i = 1; i <= DONE_SCROLL_COUNT; i++) {
+      const title = `${DONE_SCROLL_PREFIX} ${String(i).padStart(2, '0')}`;
+      if (existingTitles.has(title)) continue;
+      const res = await request.post(`${API}/api/tasks`, {
+        data: {
+          title,
+          description: 'Done overflow fixture',
+          columnId: 'done',
+          agentStatus: 'complete',
+        },
+      });
+      seededIds.push((await res.json()).id);
+    }
+
+    await page.goto('/');
+    await waitForBoard(page);
+  });
+
+  test('vertical touch scroll reaches the last Done card while horizontal rail swipe still works', async ({ page }) => {
+    await page.getByRole('button', { name: 'Open menu' }).click();
+    await page.locator('input[aria-label="Search tasks"]:visible').fill(DONE_SCROLL_PREFIX);
+    await page.getByRole('button', { name: 'Close menu' }).click();
+
+    const nav = page.locator('nav[aria-label="Board columns"]');
+    const rail = page.locator('[data-board-rail]');
+    await nav.locator('button').nth(3).click();
+    await expect(page.getByRole('heading', { name: 'Done', exact: true })).toBeInViewport();
+
+    const doneScroller = page.locator('[data-column="done"] [data-column-scroll]');
+    await expect(doneScroller).toBeVisible();
+    await expect(doneScroller).toHaveCSS('overflow-y', 'auto');
+
+    const firstDone = page.getByRole('heading', { name: `${DONE_SCROLL_PREFIX} 01`, exact: true });
+    const lastDone = page.getByRole('heading', { name: `${DONE_SCROLL_PREFIX} ${DONE_SCROLL_COUNT}`, exact: true });
+    const lastDoneCard = page
+      .locator('[data-column="done"] .group')
+      .filter({ has: lastDone });
+    await expect(firstDone).toBeInViewport();
+    await expect(lastDone).not.toBeInViewport();
+
+    const scrollBox = await doneScroller.boundingBox();
+    expect(scrollBox).not.toBeNull();
+    const x = scrollBox!.x + scrollBox!.width / 2;
+    const startY = Math.min(scrollBox!.y + scrollBox!.height - 24, 740);
+    const endY = scrollBox!.y + 80;
+
+    for (let i = 0; i < 8; i++) {
+      await touchSwipe(page, x, startY, x + (i % 2 === 0 ? 2 : -2), endY, 6);
+      if (await isInViewport(lastDone)) break;
+    }
+
+    await expect.poll(() => doneScroller.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
+    await expect(lastDone).toBeInViewport();
+
+    const lastBox = await lastDoneCard.boundingBox();
+    const navBox = await nav.boundingBox();
+    expect(lastBox).not.toBeNull();
+    expect(navBox).not.toBeNull();
+    expect(lastBox!.y + lastBox!.height).toBeLessThanOrEqual(navBox!.y);
+
+    await nav.locator('button').nth(0).click();
+    await expect(page.getByRole('heading', { name: 'Backlog', exact: true })).toBeInViewport();
+
+    const railBox = await rail.boundingBox();
+    expect(railBox).not.toBeNull();
+    await touchSwipe(
+      page,
+      railBox!.x + railBox!.width - 35,
+      railBox!.y + 180,
+      railBox!.x + 35,
+      railBox!.y + 182,
+      6
+    );
+    await expect.poll(() => rail.evaluate((el) => el.scrollLeft)).toBeGreaterThan(20);
+  });
+});
 
 test.describe('Tablet portrait 768x1024', () => {
   test.use({

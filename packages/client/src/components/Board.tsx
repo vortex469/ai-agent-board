@@ -251,7 +251,7 @@ export function Board({
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: index * 0.1, duration: 0.3 }}
-            className="min-h-0 w-[88vw] max-w-[26rem] shrink-0 snap-start self-stretch sm:w-72 lg:w-80 lg:max-w-none"
+            className="flex min-h-0 w-[88vw] max-w-[26rem] shrink-0 snap-start self-stretch sm:w-72 lg:w-80 lg:max-w-none"
           >
             <Column
               column={column}

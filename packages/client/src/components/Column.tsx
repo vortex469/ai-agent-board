@@ -64,7 +64,7 @@ export function Column({ column, tasks, onTaskClick, onEditTask, onDeleteTask, o
   }, [column.color]);
 
   return (
-    <div className="flex min-h-0 w-full min-w-0 flex-1 flex-col self-stretch" data-column={column.id}>
+    <div className="flex h-full min-h-0 w-full min-w-0 flex-1 flex-col self-stretch" data-column={column.id}>
       {/* Column header */}
       <div className="mb-3 flex items-center justify-between px-1">
         <div className="flex items-center gap-2">
@@ -92,8 +92,9 @@ export function Column({ column, tasks, onTaskClick, onEditTask, onDeleteTask, o
       <div className="relative min-h-0 flex-1 overflow-hidden rounded-xl">
         <div
           ref={(node) => { setNodeRef(node); (scrollRef as React.MutableRefObject<HTMLDivElement | null>).current = node; }}
+          data-column-scroll
           className={cn(
-            'flex h-full flex-col gap-2 overflow-y-auto p-2 transition-colors duration-200',
+            'flex h-full flex-col gap-2 overflow-y-auto overscroll-y-contain p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] transition-colors duration-200',
             isOver
               ? 'bg-primary/5 ring-2 ring-primary/20 ring-inset'
               : 'bg-[var(--column-bg)]'
