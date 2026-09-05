@@ -137,6 +137,7 @@ The current single-host production layout uses `kanban-server.service` on `127.0
 ### Required Gate
 
 Use the deterministic gate before pushing changes. It runs the client build, server build, and required Playwright E2E suite; if E2E cannot run, the command fails.
+For documentation-only verification tasks, prefer a minimal, clearly harmless edit and record the focused check that was run.
 
 ```bash
 npm run gate:required
