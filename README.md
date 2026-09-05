@@ -138,6 +138,7 @@ The current single-host production layout uses `kanban-server.service` on `127.0
 
 Use the deterministic gate before pushing changes. It runs the client build, server build, and required Playwright E2E suite; if E2E cannot run, the command fails.
 For documentation-only verification tasks, prefer a minimal, clearly harmless edit and record the focused check that was run.
+Auto-run verification follow-ups should keep the change set runtime-neutral when the source item calls for a harmless documentation-only change.
 
 ```bash
 npm run gate:required
