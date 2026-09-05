@@ -9,6 +9,7 @@ import { isValidPriority, isValidColumnId, isValidAgentType, isValidAgentTimeout
 import { errorMessage } from '../utils.js';
 import { getCloneRoot } from '../config.js';
 import type { TaskRepository } from '../repositories/types.js';
+import type { ProjectRepository } from '../repositories/project-types.js';
 import { broadcast } from '../websocket.js';
 import type { AgentManager } from '../services/agent-manager.js';
 
@@ -550,10 +551,11 @@ export function makeStatusCallback(
   taskId: string,
   agentManager?: AgentManager,
   taskState?: Task,
+  projectRepo?: ProjectRepository,
 ): (status: Task['agentStatus']) => void {
   return async (status) => {
     if (status === 'complete') {
-      await autoProgressCompletedTask(repo, taskId, agentManager, taskState);
+      await autoProgressCompletedTask(repo, taskId, agentManager, taskState, projectRepo);
       return;
     }
 
@@ -591,6 +593,7 @@ export async function autoProgressCompletedTask(
   taskId: string,
   agentManager?: AgentManager,
   taskState?: Task,
+  projectRepo?: ProjectRepository,
 ): Promise<Task | undefined> {
   const completedAt = Date.now();
   const reviewUpdates: Partial<Task> = {
@@ -665,7 +668,7 @@ export async function autoProgressCompletedTask(
     `Auto-merged ${task.branchName} into ${mergeResult.baseBranch}, cleaned the worktree, and moved the task to Done.`,
     { agentType: task.agentType, command: 'git merge' },
   );
-  await triggerAutomaticDependentProgression(repo, done, agentManager);
+  await triggerAutomaticDependentProgression(repo, done, agentManager, projectRepo);
   return done;
 }
 
@@ -763,6 +766,7 @@ export async function reconcileInterruptedTaskCompletion(
   repo: TaskRepository,
   task: Task,
   agentManager: AgentManager,
+  projectRepo?: ProjectRepository,
 ): Promise<Task | undefined> {
   if (task.archived || task.columnId === 'done' || !task.repoPath || !task.branchName) return undefined;
   if (!['planning', 'executing', 'complete', 'failed'].includes(task.agentStatus) && task.columnId !== 'review') {
@@ -848,7 +852,7 @@ export async function reconcileInterruptedTaskCompletion(
       `Startup recovery verified ${task.branchName} is already merged into ${inspection.baseBranch} and moved the task to Done.`,
       { agentType: task.agentType, command: 'git merge-base --is-ancestor' },
     );
-    await triggerAutomaticDependentProgression(repo, done, agentManager);
+    await triggerAutomaticDependentProgression(repo, done, agentManager, projectRepo);
     return done;
   }
 
@@ -875,8 +879,12 @@ export async function triggerAutomaticDependentProgression(
   repo: TaskRepository,
   completedTask: Task,
   agentManager?: AgentManager,
+  projectRepo?: ProjectRepository,
 ): Promise<Task | undefined> {
   if (!agentManager || completedTask.columnId !== 'done' || completedTask.agentStatus === 'failed') {
+    return undefined;
+  }
+  if (projectRepo && !await isProjectAutoRunEnabled(projectRepo, completedTask.projectId)) {
     return undefined;
   }
 
@@ -916,7 +924,7 @@ export async function triggerAutomaticDependentProgression(
       return undefined;
     }
 
-    await startAgentForTask(dependent, repo, agentManager);
+    await startAgentForTask(dependent, repo, agentManager, projectRepo);
     return repo.getById(dependent.id);
   }
 
@@ -986,6 +994,7 @@ export async function startAgentForTask(
   task: Task,
   repo: TaskRepository,
   agentManager: AgentManager,
+  projectRepo?: ProjectRepository,
 ): Promise<void> {
   if (!await taskPrerequisitesAreDone(repo, task.id)) return;
 
@@ -1003,7 +1012,7 @@ export async function startAgentForTask(
   const updated = await repo.update(task.id, updates);
   if (updated) {
     broadcastTaskUpdate(updated);
-    const onStatusChange = makeStatusCallback(repo, task.id, agentManager, updated);
+    const onStatusChange = makeStatusCallback(repo, task.id, agentManager, updated, projectRepo);
     agentManager.startAgent(
       updated,
       async (status) => {
@@ -1013,6 +1022,51 @@ export async function startAgentForTask(
       makeWorktreeCallback(repo, task.id),
     );
   }
+}
+
+export async function startNextEligibleProjectAutoRunTask(
+  repo: TaskRepository,
+  projectRepo: ProjectRepository,
+  projectId: string,
+  agentManager: AgentManager,
+): Promise<Task | undefined> {
+  if (!await isProjectAutoRunEnabled(projectRepo, projectId)) return undefined;
+
+  const tasks = (await repo.getAll(false, projectId))
+    .filter((task) => !task.archived
+      && !task.groupId
+      && task.columnId === 'backlog'
+      && task.agentStatus === 'idle'
+      && task.runRequestedAt !== undefined
+      && task.runClaimedAt === undefined
+      && !agentManager.isRunning(task.id))
+    .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+
+  for (const task of tasks) {
+    if (!await taskPrerequisitesAreDone(repo, task.id)) continue;
+
+    const agentInfo = agentManager.getAvailableAgents().find((agent) => agent.name === task.agentType);
+    if (!agentInfo?.available) {
+      await emitTaskLifecycleEvent(
+        repo,
+        task,
+        'error',
+        `Automatic progression paused: agent ${agentInfo?.displayName || task.agentType || 'unknown'} is not available: ${agentInfo?.reason || 'unknown reason'}`,
+        { agentType: task.agentType, error: 'Automatic progression paused because the selected agent is unavailable.' },
+      );
+      return undefined;
+    }
+
+    await startAgentForTask(task, repo, agentManager, projectRepo);
+    return repo.getById(task.id);
+  }
+
+  return undefined;
+}
+
+async function isProjectAutoRunEnabled(projectRepo: ProjectRepository, projectId: string): Promise<boolean> {
+  const project = await projectRepo.getById(projectId);
+  return project?.autoRunEnabled === true;
 }
 
 async function taskPrerequisitesAreDone(repo: TaskRepository, taskId: string): Promise<boolean> {

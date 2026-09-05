@@ -118,6 +118,7 @@ export interface Project {
   defaultPriority?: Priority;
   defaultBaseBranch?: string;
   defaultUseWorktree?: boolean;
+  autoRunEnabled?: boolean;
   aliases?: string[];
 }
 
@@ -130,6 +131,7 @@ export interface CreateProjectRequest {
   defaultPriority?: Priority;
   defaultBaseBranch?: string;
   defaultUseWorktree?: boolean;
+  autoRunEnabled?: boolean;
   aliases?: string[];
 }
 
@@ -141,6 +143,7 @@ export interface UpdateProjectRequest {
   defaultPriority?: Priority | null;
   defaultBaseBranch?: string | null;
   defaultUseWorktree?: boolean | null;
+  autoRunEnabled?: boolean;
   aliases?: string[];
 }
 

@@ -43,6 +43,9 @@ export function migrateSqliteDatabase(db: Database.Database): void {
   if (!projectColNames.has('default_use_worktree')) {
     db.exec(`ALTER TABLE projects ADD COLUMN default_use_worktree INTEGER`);
   }
+  if (!projectColNames.has('auto_run_enabled')) {
+    db.exec(`ALTER TABLE projects ADD COLUMN auto_run_enabled INTEGER NOT NULL DEFAULT 0`);
+  }
   if (!projectColNames.has('repo_url')) {
     db.exec(`ALTER TABLE projects ADD COLUMN repo_url TEXT`);
   }
@@ -468,6 +471,7 @@ export async function initPostgresDatabase(pool: Pool): Promise<void> {
   await addProjectCol('default_priority', 'TEXT');
   await addProjectCol('default_base_branch', 'TEXT');
   await addProjectCol('default_use_worktree', 'BOOLEAN');
+  await addProjectCol('auto_run_enabled', 'BOOLEAN NOT NULL DEFAULT FALSE');
   await addProjectCol('repo_url', 'TEXT');
   await addProjectCol('aliases', "TEXT NOT NULL DEFAULT '[]'");
 

@@ -23,6 +23,7 @@ import type { TaskRepository } from './repositories/types.js';
 import type { TemplateRepository } from './repositories/template-types.js';
 import type { TaskGroupRepository } from './repositories/group-types.js';
 import type { ProjectRepository } from './repositories/project-types.js';
+import type { Task } from './types.js';
 import { reconcileInterruptedTaskCompletion, startAgentForTask } from './routes/helpers.js';
 import { isLoopbackAddress } from './network-policy.js';
 import { reconcileManagedWorktrees } from './services/worktree-cleanup.js';
@@ -119,7 +120,7 @@ const agentManager = new AgentManager();
   app.use('/api/roadmap-intake', createRoadmapIntakeRouter(projectRepo));
   app.use('/api/tasks', createTaskRouter(taskRepo, agentManager, projectRepo));
   app.use('/api/tasks', createAgentRouter(taskRepo, agentManager, groupRepo, projectRepo));
-  app.use('/api/tasks', createGitRouter(taskRepo, agentManager));
+  app.use('/api/tasks', createGitRouter(taskRepo, agentManager, projectRepo));
   app.use('/api/templates', createTemplateRouter(templateRepo));
   app.use('/api/groups', createGroupsRouter(groupRepo, taskRepo, agentManager, projectRepo));
   app.use('/api', createAttachmentsRouter(taskRepo, attachmentStore));
@@ -160,7 +161,7 @@ const agentManager = new AgentManager();
     }))).flat();
     for (const task of allRecoverableTasks) {
       if (branchRecoveredIds.has(task.id)) continue;
-      const recovered = await reconcileInterruptedTaskCompletion(taskRepo, task, agentManager);
+      const recovered = await reconcileInterruptedTaskCompletion(taskRepo, task, agentManager, projectRepo);
       if (recovered) branchRecoveredIds.add(task.id);
     }
   } catch (err) {
@@ -207,9 +208,10 @@ const agentManager = new AgentManager();
   const recoveredRunIds = new Set<string>();
   for (const pending of await taskRepo.getPendingRuns(Date.now())) {
     if (branchRecoveredIds.has(pending.id)) continue;
+    if (!await shouldRecoverPendingRun(pending)) continue;
     console.warn(`[server] recovering requested run ${pending.id}`);
     recoveredRunIds.add(pending.id);
-    await startAgentForTask(pending, taskRepo, agentManager);
+    await startAgentForTask(pending, taskRepo, agentManager, projectRepo);
   }
 
   // Recover standalone tasks orphaned by a previous server restart.
@@ -234,13 +236,18 @@ const agentManager = new AgentManager();
   const dispatchInterval = setInterval(() => {
     void (async () => {
       for (const pending of await taskRepo.getPendingRuns()) {
-        if (!agentManager.isRunning(pending.id)) {
-          await startAgentForTask(pending, taskRepo, agentManager);
+        if (!agentManager.isRunning(pending.id) && await shouldRecoverPendingRun(pending)) {
+          await startAgentForTask(pending, taskRepo, agentManager, projectRepo);
         }
       }
     })().catch((err) => console.error('[server] dispatch recovery failed:', err));
   }, 15_000);
   dispatchInterval.unref();
+
+  async function shouldRecoverPendingRun(task: Task): Promise<boolean> {
+    if (task.columnId !== 'backlog') return true;
+    return (await projectRepo.getById(task.projectId))?.autoRunEnabled === true;
+  }
 
   server.listen(PORT, HOST, () => {
     console.log(`[server] listening on http://${HOST}:${PORT}`);

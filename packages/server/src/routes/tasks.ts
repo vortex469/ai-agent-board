@@ -68,7 +68,7 @@ export function createTaskRouter(repo: TaskRepository, agentManager: AgentManage
         return;
       }
       await repo.requestRun(task.id, Date.now());
-      await startAgentForTask(task, repo, agentManager);
+      await startAgentForTask(task, repo, agentManager, projectRepo);
       const latest = await repo.getById(task.id);
       res.status(201).json(latest || task);
       return;
@@ -176,7 +176,7 @@ export function createTaskRouter(repo: TaskRepository, agentManager: AgentManage
           );
           if (failed) created[i] = failed;
         } else {
-          await startAgentForTask(task, repo, agentManager);
+          await startAgentForTask(task, repo, agentManager, projectRepo);
           const latest = await repo.getById(task.id);
           if (latest) created[i] = latest;
         }
@@ -379,7 +379,7 @@ export function createTaskRouter(repo: TaskRepository, agentManager: AgentManage
     }
     broadcastTaskUpdate(updated);
     if (columnId === 'done' && task.columnId !== 'done') {
-      await triggerAutomaticDependentProgression(repo, updated, agentManager);
+      await triggerAutomaticDependentProgression(repo, updated, agentManager, projectRepo);
     }
     res.json(updated);
   }));

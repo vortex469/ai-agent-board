@@ -47,12 +47,14 @@ function BoardPage({
   toggleTheme,
   onBackToProjects,
   initialTaskId,
+  onUpdateProject,
 }: {
   project: Project;
   theme: 'dark' | 'light';
   toggleTheme: () => void;
   onBackToProjects: () => void;
   initialTaskId?: string;
+  onUpdateProject: (id: string, updates: { autoRunEnabled?: boolean }) => Promise<Project | undefined>;
 }) {
   const lockedRepoPath = project.repoPath;
   const projectDefaults = {
@@ -70,6 +72,7 @@ function BoardPage({
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [autoRunUpdating, setAutoRunUpdating] = useState(false);
   useEffect(() => { if (initialTaskId) setSelectedTaskId(initialTaskId); }, [initialTaskId]);
   const [highlightRequiredFields, setHighlightRequiredFields] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -247,6 +250,15 @@ function BoardPage({
   const handleOpenRoadmapDialog = useCallback(() => {
     setRoadmapDialogOpen(true);
   }, []);
+
+  const handleToggleAutoRun = useCallback(async () => {
+    setAutoRunUpdating(true);
+    try {
+      await onUpdateProject(project.id, { autoRunEnabled: !project.autoRunEnabled });
+    } finally {
+      setAutoRunUpdating(false);
+    }
+  }, [onUpdateProject, project.id, project.autoRunEnabled]);
 
   const handleCloseDialog = useCallback(() => {
     setDialogOpen(false);
@@ -428,6 +440,9 @@ function BoardPage({
           onStopGroup={stopGroup}
           onDeleteGroup={handleDeleteGroup}
           onEditGroup={handleEditGroup}
+          autoRunEnabled={project.autoRunEnabled === true}
+          autoRunUpdating={autoRunUpdating}
+          onToggleAutoRun={handleToggleAutoRun}
         />
       </main>
 
@@ -631,6 +646,7 @@ export function App() {
       toggleTheme={toggleTheme}
       onBackToProjects={() => navigate('/projects')}
       initialTaskId={route.view === 'board' ? route.taskId : undefined}
+      onUpdateProject={updateProject}
     />
   );
 }

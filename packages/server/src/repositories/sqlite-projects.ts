@@ -14,6 +14,7 @@ interface ProjectRow {
   default_priority: string | null;
   default_base_branch: string | null;
   default_use_worktree: number | null;
+  auto_run_enabled: number;
   aliases: string;
 }
 
@@ -39,6 +40,7 @@ function rowToProject(row: ProjectRow, taskCounts?: ProjectTaskCounts): Project 
     defaultPriority: (row.default_priority ?? undefined) as Priority | undefined,
     defaultBaseBranch: row.default_base_branch ?? undefined,
     defaultUseWorktree: row.default_use_worktree === null ? undefined : Boolean(row.default_use_worktree),
+    autoRunEnabled: Boolean(row.auto_run_enabled),
     aliases: JSON.parse(row.aliases || '[]'),
     ...(taskCounts ? { taskCounts } : {}),
   };
@@ -83,6 +85,7 @@ export class SqliteProjectRepository implements ProjectRepository {
     defaultPriority?: Priority;
     defaultBaseBranch?: string;
     defaultUseWorktree?: boolean;
+    autoRunEnabled?: boolean;
     aliases?: string[];
     createdAt: number;
     updatedAt: number;
@@ -90,9 +93,9 @@ export class SqliteProjectRepository implements ProjectRepository {
     return this.db.transaction(() => {
       this.db.prepare(`
         INSERT INTO projects (id, name, repo_path, repo_url, is_default, created_at, updated_at,
-          default_agent_type, default_priority, default_base_branch, default_use_worktree, aliases)
+          default_agent_type, default_priority, default_base_branch, default_use_worktree, auto_run_enabled, aliases)
         VALUES (@id, @name, @repo_path, @repo_url, @is_default, @created_at, @updated_at,
-          @default_agent_type, @default_priority, @default_base_branch, @default_use_worktree, @aliases)
+          @default_agent_type, @default_priority, @default_base_branch, @default_use_worktree, @auto_run_enabled, @aliases)
       `).run({
         id: input.id,
         name: input.name,
@@ -104,7 +107,9 @@ export class SqliteProjectRepository implements ProjectRepository {
         default_agent_type: input.defaultAgentType ?? null,
         default_priority: input.defaultPriority ?? null,
         default_base_branch: input.defaultBaseBranch ?? null,
-        default_use_worktree: input.defaultUseWorktree === undefined ? null : input.defaultUseWorktree ? 1 : 0, aliases: JSON.stringify(input.aliases ?? []),
+        default_use_worktree: input.defaultUseWorktree === undefined ? null : input.defaultUseWorktree ? 1 : 0,
+        auto_run_enabled: input.autoRunEnabled ? 1 : 0,
+        aliases: JSON.stringify(input.aliases ?? []),
       });
       const created = this.db.prepare('SELECT * FROM projects WHERE id = ?').get(input.id) as ProjectRow;
       return rowToProject(created, this.getCounts(input.id));
@@ -119,6 +124,7 @@ export class SqliteProjectRepository implements ProjectRepository {
     defaultPriority?: Priority | null;
     defaultBaseBranch?: string | null;
     defaultUseWorktree?: boolean | null;
+    autoRunEnabled?: boolean;
     aliases?: string[];
     updatedAt: number;
   }): Promise<Project | undefined> {
@@ -137,13 +143,16 @@ export class SqliteProjectRepository implements ProjectRepository {
         default_base_branch: updates.defaultBaseBranch === undefined ? row.default_base_branch : updates.defaultBaseBranch,
         default_use_worktree: updates.defaultUseWorktree === undefined
           ? row.default_use_worktree
-          : updates.defaultUseWorktree === null ? null : updates.defaultUseWorktree ? 1 : 0, aliases: updates.aliases === undefined ? row.aliases : JSON.stringify(updates.aliases),
+          : updates.defaultUseWorktree === null ? null : updates.defaultUseWorktree ? 1 : 0,
+        auto_run_enabled: updates.autoRunEnabled === undefined ? row.auto_run_enabled : updates.autoRunEnabled ? 1 : 0,
+        aliases: updates.aliases === undefined ? row.aliases : JSON.stringify(updates.aliases),
       };
       this.db.prepare(`
         UPDATE projects
         SET name = @name, repo_path = @repo_path, repo_url = @repo_url, is_default = @is_default, updated_at = @updated_at,
           default_agent_type = @default_agent_type, default_priority = @default_priority,
-          default_base_branch = @default_base_branch, default_use_worktree = @default_use_worktree, aliases = @aliases
+          default_base_branch = @default_base_branch, default_use_worktree = @default_use_worktree,
+          auto_run_enabled = @auto_run_enabled, aliases = @aliases
         WHERE id = @id
       `).run(merged);
       const updated = this.db.prepare('SELECT * FROM projects WHERE id = ?').get(id) as ProjectRow;
