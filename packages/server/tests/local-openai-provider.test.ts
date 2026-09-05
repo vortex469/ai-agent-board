@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
+import { setImmediate as tick } from 'node:timers/promises';
 import type { AgentEvent } from '@codewithdan/agent-sdk-core';
 import { isValidAgentType } from '@ai-agent-board/shared/constants.js';
 import {
@@ -187,6 +188,58 @@ test('local AI DSH stdout and stderr are surfaced with credential redaction', as
   assert.match(contents, /\[redacted\]/);
   assert.match(contents, /\[DSH credentials file\]/);
   assert.doesNotMatch(contents, /sk-test-secret-value/);
+});
+
+test('local AI DSH activity records are normalized before process completion', async (t) => {
+  const { dir, cleanup } = tempDir('dsh-live-activity');
+  t.after(cleanup);
+  const launcher = makeLauncher(dir);
+  const events: AgentEvent[] = [];
+  const child = new FakeChild();
+  const { session: sessionPromise } = makeSession({ dir, launcherPath: launcher, child, events });
+  const session = await sessionPromise;
+
+  const resultPromise = session.execute('stream activity while working');
+  child.stdout.write('data: {"event":"tool_start","tool":"read_file","args":{"path":"packages/server/src/index.ts"},"message":"Reading server entry"}\n');
+  child.stdout.write('{"event":"command_start","command":"npm run build:server","message":"Running server build"}\n');
+  child.stdout.write('{"event":"tool_start","tool":"edit_file","args":{"path":"safe.ts"},"reasoning":"private chain of thought"}\n');
+  child.stdout.write('Edited file: packages/server/src/services/local-openai-provider.ts\n');
+  child.stderr.write('harness debug still raw\n');
+  child.stdout.write('Focused tests passed: representative DSH stream\n');
+  await tick();
+
+  assert.equal(child.killed, false);
+  assert.ok(events.some((event) =>
+    event.type === 'file_read' &&
+    event.metadata?.file === 'packages/server/src/index.ts' &&
+    event.metadata?.agentType === 'local-openai'
+  ));
+  assert.ok(events.some((event) =>
+    event.type === 'command' &&
+    event.metadata?.command === 'npm run build:server'
+  ));
+  assert.ok(events.some((event) =>
+    event.type === 'file_edit' &&
+    event.metadata?.file === 'packages/server/src/services/local-openai-provider.ts'
+  ));
+  assert.ok(events.some((event) =>
+    event.type === 'file_edit' &&
+    event.metadata?.file === 'safe.ts' &&
+    event.content === 'Edited safe.ts'
+  ));
+  assert.doesNotMatch(events.map((event) => event.content).join('\n'), /private chain of thought/);
+  assert.ok(events.some((event) =>
+    event.type === 'command_output' &&
+    event.content.includes('harness debug still raw')
+  ));
+  assert.ok(events.some((event) =>
+    event.type === 'test_result' &&
+    event.content.includes('Focused tests passed')
+  ));
+
+  child.close(0);
+  const result = await resultPromise;
+  assert.equal(result.status, 'complete');
 });
 
 test('local AI DSH non-zero exit fails with a clear error', async (t) => {

@@ -18,6 +18,20 @@ const DEFAULT_DSH_HOME = '/root/.dsh';
 const DEFAULT_DSH_PROFILE = 'headless';
 const LOCAL_AGENT_TYPE = 'local-openai' as AgentEventMetadata['agentType'];
 const TERMINATION_GRACE_MS = 2000;
+const MAX_PARTIAL_RECORD_LENGTH = 32_000;
+const AGENT_EVENT_TYPES = new Set<AgentEvent['type']>([
+  'thinking',
+  'tool_call',
+  'file_read',
+  'file_write',
+  'file_edit',
+  'command',
+  'command_output',
+  'output',
+  'test_result',
+  'error',
+  'complete',
+]);
 
 interface LocalOpenAIConfig {
   launcherPath: string;
@@ -121,6 +135,10 @@ function emit(config: AgentSessionConfig, type: AgentEvent['type'], content: str
   });
 }
 
+function metadata(extra?: AgentEventMetadata): AgentEventMetadata {
+  return { agentType: LOCAL_AGENT_TYPE, ...extra };
+}
+
 function sensitiveEnvValues(env: NodeJS.ProcessEnv = process.env): string[] {
   const names = /(?:KEY|TOKEN|SECRET|PASS|PASSWORD|CREDENTIAL|AUTH|DATABASE_URL)/i;
   const values = new Set<string>();
@@ -138,6 +156,253 @@ export function sanitizeOutput(value: string): string {
     sanitized = sanitized.split(secret).join('[redacted]');
   }
   return sanitized;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function stringField(record: Record<string, unknown>, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+    if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  }
+  return undefined;
+}
+
+function nestedRecord(record: Record<string, unknown>, keys: string[]): Record<string, unknown> | null {
+  for (const key of keys) {
+    const nested = asRecord(record[key]);
+    if (nested) return nested;
+  }
+  return null;
+}
+
+function stripHarnessPrefix(line: string): string {
+  const trimmed = line.trim();
+  const withoutAnsi = trimmed.replace(/\x1b\[[0-9;]*m/g, '');
+  if (withoutAnsi.startsWith('data:')) return withoutAnsi.slice('data:'.length).trim();
+  if (withoutAnsi.startsWith('[dsh]')) return withoutAnsi.slice('[dsh]'.length).trim();
+  if (withoutAnsi.startsWith('DSH:')) return withoutAnsi.slice('DSH:'.length).trim();
+  return withoutAnsi;
+}
+
+function parseJsonRecord(line: string): Record<string, unknown> | null {
+  const payload = stripHarnessPrefix(line);
+  if (!payload || payload === '[DONE]') return null;
+  if (!payload.startsWith('{') && !payload.startsWith('[')) return null;
+  try {
+    const parsed = JSON.parse(payload);
+    const record = asRecord(parsed);
+    if (record) return record;
+    if (Array.isArray(parsed) && parsed.length === 1) return asRecord(parsed[0]);
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function directEventType(value: string | undefined): AgentEvent['type'] | null {
+  if (!value) return null;
+  const normalized = value.toLowerCase().replace(/[-\s]/g, '_');
+  return AGENT_EVENT_TYPES.has(normalized as AgentEvent['type'])
+    ? normalized as AgentEvent['type']
+    : null;
+}
+
+function eventKind(record: Record<string, unknown>): string {
+  return [
+    stringField(record, ['type', 'event', 'kind', 'action', 'name', 'status']),
+    stringField(record, ['tool', 'toolName', 'tool_name', 'operation', 'currentOperation', 'current_operation']),
+  ].filter(Boolean).join(' ').toLowerCase();
+}
+
+function containsPrivateReasoning(record: Record<string, unknown>): boolean {
+  const kind = eventKind(record);
+  if (/\b(reasoning|thought|chain_of_thought|cot|analysis)\b/.test(kind)) return true;
+  return ['reasoning', 'thought', 'thoughts', 'analysis', 'chainOfThought', 'chain_of_thought']
+    .some((key) => typeof record[key] === 'string' && String(record[key]).trim().length > 0);
+}
+
+function withoutPrivateReasoning(record: Record<string, unknown>): Record<string, unknown> {
+  const filtered: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(record)) {
+    if (/^(reasoning|thoughts?|analysis|chainOfThought|chain_of_thought)$/i.test(key)) continue;
+    filtered[key] = value;
+  }
+  return filtered;
+}
+
+function operationContent(args: {
+  kind: string;
+  command?: string;
+  file?: string;
+  tool?: string;
+}): string {
+  if (args.command) return args.command;
+  if (args.file) {
+    if (/(read|open|view)/.test(args.kind)) return `Read ${args.file}`;
+    if (/(write|create|created|save)/.test(args.kind)) return `Wrote ${args.file}`;
+    if (/(edit|patch|modify|modified|update|updated)/.test(args.kind)) return `Edited ${args.file}`;
+    return args.file;
+  }
+  return args.tool ?? 'Harness activity';
+}
+
+function recordContent(record: Record<string, unknown>, fallback = ''): string {
+  const nested = nestedRecord(record, ['data', 'payload', 'message', 'item', 'event']);
+  const content = stringField(record, ['content', 'text', 'message', 'summary', 'description', 'output', 'result', 'title']);
+  if (content) return content;
+  if (nested) {
+    const nestedContent = stringField(nested, ['content', 'text', 'message', 'summary', 'description', 'output', 'result', 'title']);
+    if (nestedContent) return nestedContent;
+  }
+  return fallback || JSON.stringify(record);
+}
+
+function commandFromRecord(record: Record<string, unknown>): string | undefined {
+  const direct = stringField(record, ['command', 'cmd', 'shellCommand', 'shell_command']);
+  if (direct) return direct;
+  for (const key of ['args', 'arguments', 'input', 'parameters']) {
+    const nested = asRecord(record[key]);
+    if (!nested) continue;
+    const nestedCommand = stringField(nested, ['command', 'cmd', 'shellCommand', 'shell_command']);
+    if (nestedCommand) return nestedCommand;
+  }
+  return undefined;
+}
+
+function fileFromRecord(record: Record<string, unknown>): string | undefined {
+  const direct = stringField(record, ['file', 'path', 'filePath', 'file_path', 'filename']);
+  if (direct) return direct;
+  for (const key of ['args', 'arguments', 'input', 'parameters']) {
+    const nested = asRecord(record[key]);
+    if (!nested) continue;
+    const nestedFile = stringField(nested, ['file', 'path', 'filePath', 'file_path', 'filename']);
+    if (nestedFile) return nestedFile;
+  }
+  return undefined;
+}
+
+function classifyHarnessJson(record: Record<string, unknown>): Array<{ type: AgentEvent['type']; content: string; metadata?: AgentEventMetadata }> {
+  const nested = nestedRecord(record, ['data', 'payload', 'message', 'item', 'event']);
+  const source = nested ? { ...record, ...nested } : record;
+  const kind = eventKind(source);
+  const command = commandFromRecord(source);
+  const file = fileFromRecord(source);
+  const tool = stringField(source, ['tool', 'toolName', 'tool_name', 'name']);
+  const hasPrivateReasoning = containsPrivateReasoning(source);
+  const displaySource = hasPrivateReasoning ? withoutPrivateReasoning(source) : source;
+  const content = hasPrivateReasoning
+    ? operationContent({ kind, command, file, tool })
+    : recordContent(displaySource);
+
+  if (hasPrivateReasoning && !command && !file && !tool) return [];
+
+  const directType = directEventType(stringField(source, ['agentEventType', 'agent_event_type', 'eventType', 'event_type']));
+  if (directType && directType !== 'thinking') {
+    return [{ type: directType, content, metadata: metadata({ command, file }) }];
+  }
+
+  if (/(test|pytest|vitest|playwright|validation|gate)/.test(`${kind} ${command ?? ''}`) && /\b(pass|passed|fail|failed|result|complete|completed|success|error)\b/.test(`${kind} ${content}`)) {
+    return [{ type: 'test_result', content, metadata: metadata({ command }) }];
+  }
+
+  if (/(read|open|view)/.test(kind) && file) {
+    return [{ type: 'file_read', content, metadata: metadata({ file }) }];
+  }
+  if (/(write|create|created|save)/.test(kind) && file) {
+    return [{ type: 'file_write', content, metadata: metadata({ file }) }];
+  }
+  if (/(edit|patch|modify|modified|update|updated)/.test(kind) && file) {
+    return [{ type: 'file_edit', content, metadata: metadata({ file }) }];
+  }
+  if (/(shell|bash|command|exec|run|running)/.test(kind) && command) {
+    return [{ type: 'command', content: `bash: ${JSON.stringify({ command, description: content === command ? undefined : content })}`, metadata: metadata({ command }) }];
+  }
+  if (/(search|grep|rg|find|glob|list)/.test(kind)) {
+    const searchCommand = command ?? content;
+    return [{ type: 'command', content: `search: ${JSON.stringify({ command: searchCommand })}`, metadata: metadata({ command: searchCommand }) }];
+  }
+  if (tool) {
+    return [{ type: 'tool_call', content: JSON.stringify(displaySource), metadata: metadata({ command: tool, file }) }];
+  }
+  return [];
+}
+
+function classifyHarnessText(line: string): Array<{ type: AgentEvent['type']; content: string; metadata?: AgentEventMetadata }> {
+  const content = stripHarnessPrefix(line);
+  const fileRead = content.match(/^(?:read|reading|opened|viewed)(?:\s+file)?[:\s]+(.+)$/i);
+  if (fileRead) return [{ type: 'file_read', content, metadata: metadata({ file: fileRead[1].trim() }) }];
+  const fileWrite = content.match(/^(?:write|writing|wrote|created|saved)(?:\s+file)?[:\s]+(.+)$/i);
+  if (fileWrite) return [{ type: 'file_write', content, metadata: metadata({ file: fileWrite[1].trim() }) }];
+  const fileEdit = content.match(/^(?:edit|editing|edited|modified|patched|applying patch to)(?:\s+file)?[:\s]+(.+)$/i);
+  if (fileEdit) return [{ type: 'file_edit', content, metadata: metadata({ file: fileEdit[1].trim() }) }];
+  const command = content.match(/^(?:running|run|executing|execute)(?:\s+command)?[:\s]+(.+)$/i) ?? content.match(/^\$\s+(.+)$/);
+  if (command) return [{ type: 'command', content: `bash: ${JSON.stringify({ command: command[1].trim() })}`, metadata: metadata({ command: command[1].trim() }) }];
+  const search = content.match(/^(?:searching|search|grep|rg|finding|find)(?::|\s+for)?\s+(.+)$/i);
+  if (search) return [{ type: 'command', content: `search: ${JSON.stringify({ command: search[1].trim() })}`, metadata: metadata({ command: search[1].trim() }) }];
+  if (/\b(?:tests?|validation|gate)\b.*\b(?:passed|failed|complete|completed|succeeded|errored)\b/i.test(content)) {
+    return [{ type: 'test_result', content, metadata: metadata() }];
+  }
+  return [];
+}
+
+function emitHarnessRecord(config: AgentSessionConfig, stream: 'stdout' | 'stderr', line: string): void {
+  const json = parseJsonRecord(line);
+  const events = json ? classifyHarnessJson(json) : classifyHarnessText(line);
+  if (events.length > 0) {
+    for (const event of events) emit(config, event.type, event.content, event.metadata);
+    return;
+  }
+  emit(config, stream === 'stdout' ? 'output' : 'command_output', line.endsWith('\n') ? line : `${line}\n`, metadata({
+    command: stream === 'stdout' ? 'dsh stdout' : 'dsh stderr',
+  }));
+}
+
+class HarnessOutputStream {
+  private buffered = '';
+
+  constructor(
+    private readonly config: AgentSessionConfig,
+    private readonly stream: 'stdout' | 'stderr',
+  ) {}
+
+  write(chunk: Buffer | string): void {
+    this.buffered += chunk.toString();
+    let separatorIndex = this.nextSeparatorIndex();
+    while (separatorIndex >= 0) {
+      const record = this.buffered.slice(0, separatorIndex);
+      const separatorLength = this.buffered[separatorIndex] === '\r' && this.buffered[separatorIndex + 1] === '\n' ? 2 : 1;
+      this.buffered = this.buffered.slice(separatorIndex + separatorLength);
+      if (record.trim()) emitHarnessRecord(this.config, this.stream, record);
+      separatorIndex = this.nextSeparatorIndex();
+    }
+    if (this.buffered.length > MAX_PARTIAL_RECORD_LENGTH) {
+      emitHarnessRecord(this.config, this.stream, this.buffered);
+      this.buffered = '';
+    }
+  }
+
+  flush(): void {
+    if (!this.buffered.trim()) {
+      this.buffered = '';
+      return;
+    }
+    emitHarnessRecord(this.config, this.stream, this.buffered);
+    this.buffered = '';
+  }
+
+  private nextSeparatorIndex(): number {
+    const newline = this.buffered.indexOf('\n');
+    const carriage = this.buffered.indexOf('\r');
+    if (newline < 0) return carriage;
+    if (carriage < 0) return newline;
+    return Math.min(newline, carriage);
+  }
 }
 
 export class LocalOpenAIProvider implements AgentProvider {
@@ -255,18 +520,14 @@ class LocalOpenAISession implements AgentSession {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     this.child = child;
+    const stdout = new HarnessOutputStream(this.sessionConfig, 'stdout');
+    const stderr = new HarnessOutputStream(this.sessionConfig, 'stderr');
 
     child.stdout?.on('data', (chunk: Buffer | string) => {
-      emit(this.sessionConfig, 'output', chunk.toString(), {
-        agentType: LOCAL_AGENT_TYPE,
-        command: 'dsh stdout',
-      });
+      stdout.write(chunk);
     });
     child.stderr?.on('data', (chunk: Buffer | string) => {
-      emit(this.sessionConfig, 'command_output', chunk.toString(), {
-        agentType: LOCAL_AGENT_TYPE,
-        command: 'dsh stderr',
-      });
+      stderr.write(chunk);
     });
 
     return await new Promise<AgentResult>((resolve) => {
@@ -282,6 +543,8 @@ class LocalOpenAISession implements AgentSession {
       });
 
       child.once('close', (code: number | null, signal: NodeJS.Signals | null) => {
+        stdout.flush();
+        stderr.flush();
         if (this.aborted) {
           settle({ status: 'failed', error: 'DeepSeek Harness execution was cancelled.' });
           return;
