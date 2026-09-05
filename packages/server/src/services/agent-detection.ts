@@ -16,7 +16,6 @@ interface DetectAvailableAgentsOptions {
   detectAgents?: () => Promise<AgentInfo[]>;
   env?: NodeJS.ProcessEnv;
   execCommand?: ExecCommand;
-  fetchImpl?: typeof fetch;
   platform?: NodeJS.Platform;
 }
 
@@ -285,7 +284,7 @@ async function normalizeWindowsCopilotAvailability(
 
 export async function detectAvailableAgents(options: DetectAvailableAgentsOptions = {}): Promise<AgentInfo[]> {
   const sdkAgents = await (options.detectAgents ?? detectCoreAgents)();
-  const localOpenAI = await detectLocalOpenAIAgent({ env: options.env ? { ...process.env, ...options.env } : process.env, fetchImpl: options.fetchImpl });
+  const localOpenAI = await detectLocalOpenAIAgent({ env: options.env ? { ...process.env, ...options.env } : process.env });
   const agents = [
     ...sdkAgents.filter(agent => agent.name !== ('local-openai' as AgentInfo['name'])),
     localOpenAI as AgentInfo,

@@ -1,790 +1,313 @@
-import { execFile } from 'child_process';
-import fs from 'fs';
-import path from 'path';
-import { promisify } from 'util';
+import { spawn } from 'child_process';
+import { existsSync, statSync } from 'fs';
 import { v4 as uuid } from 'uuid';
+import type { Readable } from 'stream';
 import type {
   AgentAttachment,
+  AgentEvent,
+  AgentEventMetadata,
   AgentProvider,
   AgentResult,
   AgentSession,
   AgentSessionConfig,
 } from '@codewithdan/agent-sdk-core';
-import type { AgentEvent, AgentEventMetadata } from '@codewithdan/agent-sdk-core';
 import type { AgentInfo } from '../types.js';
 import { errorMessage } from '../utils.js';
 
-const execFileAsync = promisify(execFile);
-const DEFAULT_MAX_TOKENS = 4096;
-const MAX_TOOL_TURNS = 40;
-const MAX_FILE_BYTES = 512 * 1024;
-const MAX_COMMAND_OUTPUT = 128 * 1024;
-const MAX_COMMAND_TIMEOUT_MS = 120_000;
-const DEFAULT_COMMAND_TIMEOUT_MS = 60_000;
-
-type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
+const DEFAULT_DSH_HOME = '/root/.dsh';
+const DEFAULT_DSH_PROFILE = 'headless';
+const LOCAL_AGENT_TYPE = 'local-openai' as AgentEventMetadata['agentType'];
+const TERMINATION_GRACE_MS = 2000;
 
 interface LocalOpenAIConfig {
-  baseUrl: string;
-  model: string;
-  apiKey?: string;
+  launcherPath: string;
+  dshHome: string;
+  profile: string;
   displayName: string;
-  maxTokens: number;
+  model?: string;
 }
 
-interface ChatMessage {
-  role: 'system' | 'user' | 'assistant' | 'tool';
-  content: string | null;
-  tool_call_id?: string;
-  tool_calls?: ToolCall[];
-}
+type SpawnedProcess = {
+  stdout?: Readable | null;
+  stderr?: Readable | null;
+  killed?: boolean;
+  kill(signal?: NodeJS.Signals | number): boolean;
+  once(event: 'error', listener: (err: Error) => void): SpawnedProcess;
+  once(event: 'close', listener: (code: number | null, signal: NodeJS.Signals | null) => void): SpawnedProcess;
+};
 
-interface ToolCall {
-  id: string;
-  type: 'function';
-  function: {
-    name: string;
-    arguments: string;
-  };
-}
-
-interface ModelStep {
-  content: string;
-  reasoning: string;
-  toolCalls: ToolCall[];
-}
-
-interface ToolResult {
-  ok: boolean;
-  content?: unknown;
-  error?: string;
-}
-
-interface ToolCallAccumulator {
-  id: string;
-  type: 'function';
-  function: {
-    name: string;
-    arguments: string;
-  };
-}
+type SpawnCommand = (
+  command: string,
+  args: string[],
+  options: {
+    cwd: string;
+    env: NodeJS.ProcessEnv;
+    windowsHide: boolean;
+    stdio: ['ignore', 'pipe', 'pipe'];
+  },
+) => SpawnedProcess;
 
 function trimEnv(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   return trimmed || undefined;
 }
 
-function normalizeBaseUrl(value: string): string {
-  return value.replace(/\/+$/, '');
-}
-
-function parsePositiveInteger(value: string | undefined, fallback: number): number {
-  if (!value) return fallback;
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
-}
-
 export function getLocalOpenAIConfig(env: NodeJS.ProcessEnv = process.env): LocalOpenAIConfig | null {
-  const baseUrl = trimEnv(env.LOCAL_OPENAI_BASE_URL);
-  const model = trimEnv(env.LOCAL_OPENAI_MODEL);
-  if (!baseUrl || !model) return null;
+  const launcherPath = trimEnv(env.DSH_LAUNCHER_PATH);
+  if (!launcherPath) return null;
   return {
-    baseUrl: normalizeBaseUrl(baseUrl),
-    model,
-    apiKey: trimEnv(env.LOCAL_OPENAI_API_KEY),
+    launcherPath,
+    dshHome: trimEnv(env.DSH_HOME) ?? DEFAULT_DSH_HOME,
+    profile: trimEnv(env.DSH_PROFILE) ?? DEFAULT_DSH_PROFILE,
     displayName: trimEnv(env.LOCAL_OPENAI_DISPLAY_NAME) ?? 'Local AI',
-    maxTokens: parsePositiveInteger(env.LOCAL_OPENAI_MAX_TOKENS, DEFAULT_MAX_TOKENS),
+    model: trimEnv(env.LOCAL_OPENAI_MODEL),
   };
 }
 
-function authHeaders(config: Pick<LocalOpenAIConfig, 'apiKey'>): Record<string, string> {
-  return config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {};
+function launcherValidationError(launcherPath: string): string | null {
+  try {
+    if (!existsSync(launcherPath)) return 'DSH_LAUNCHER_PATH does not exist';
+    const stat = statSync(launcherPath);
+    if (!stat.isFile()) return 'DSH_LAUNCHER_PATH must point to a file';
+    return null;
+  } catch (err: unknown) {
+    return `DSH_LAUNCHER_PATH could not be inspected: ${errorMessage(err)}`;
+  }
 }
 
 export async function detectLocalOpenAIAgent(args: {
   env?: NodeJS.ProcessEnv;
-  fetchImpl?: FetchLike;
 } = {}): Promise<AgentInfo> {
-  const config = getLocalOpenAIConfig(args.env ?? process.env);
-  const displayName = trimEnv(args.env?.LOCAL_OPENAI_DISPLAY_NAME) ?? 'Local AI';
+  const env = args.env ?? process.env;
+  const config = getLocalOpenAIConfig(env);
+  const displayName = trimEnv(env.LOCAL_OPENAI_DISPLAY_NAME) ?? 'Local AI';
   if (!config) {
     return {
       name: 'local-openai',
       displayName,
       available: false,
-      reason: 'LOCAL_OPENAI_BASE_URL and LOCAL_OPENAI_MODEL are required',
+      reason: 'DSH_LAUNCHER_PATH is required',
     };
   }
 
-  try {
-    const fetchImpl = args.fetchImpl ?? fetch;
-    const response = await fetchImpl(`${config.baseUrl}/models`, {
-      method: 'GET',
-      headers: authHeaders(config),
-      signal: AbortSignal.timeout(5000),
-    });
-    if (!response.ok) {
-      return {
-        name: 'local-openai',
-        displayName: config.displayName,
-        available: false,
-        reason: `/models probe failed with HTTP ${response.status}`,
-      };
-    }
-    return {
-      name: 'local-openai',
-      displayName: config.displayName,
-      available: true,
-      version: config.model,
-    };
-  } catch (err: unknown) {
+  const validationError = launcherValidationError(config.launcherPath);
+  if (validationError) {
     return {
       name: 'local-openai',
       displayName: config.displayName,
       available: false,
-      reason: `/models probe failed: ${errorMessage(err)}`,
+      reason: validationError,
     };
   }
+
+  return {
+    name: 'local-openai',
+    displayName: config.displayName,
+    available: true,
+    version: config.model,
+  };
 }
 
 function emit(config: AgentSessionConfig, type: AgentEvent['type'], content: string, metadata?: AgentEventMetadata): void {
+  const safeContent = sanitizeOutput(content);
+  if (!safeContent.trim() && type !== 'complete' && type !== 'error') return;
   config.onEvent({
     id: uuid(),
     contextId: config.contextId,
     type,
-    content,
+    content: safeContent,
     timestamp: Date.now(),
     metadata,
   });
 }
 
-function isInside(root: string, target: string): boolean {
-  const relative = path.relative(root, target);
-  return relative === '' || (!!relative && !relative.startsWith('..') && !path.isAbsolute(relative));
+function sensitiveEnvValues(env: NodeJS.ProcessEnv = process.env): string[] {
+  const names = /(?:KEY|TOKEN|SECRET|PASS|PASSWORD|CREDENTIAL|AUTH|DATABASE_URL)/i;
+  const values = new Set<string>();
+  for (const [key, value] of Object.entries(env)) {
+    if (!value || value.length < 4 || !names.test(key)) continue;
+    values.add(value);
+  }
+  return [...values].sort((a, b) => b.length - a.length);
 }
 
-function isLikelyPath(value: string): boolean {
-  return value.includes('/') || value.includes('\\') || value === '..' || value.startsWith('.');
+export function sanitizeOutput(value: string): string {
+  let sanitized = value.replace(/\S*\.dsh\/\.credentials\.yaml/g, '[DSH credentials file]');
+  sanitized = sanitized.replace(/([A-Za-z0-9_.-]*(?:key|token|secret|password|credential|auth)[A-Za-z0-9_.-]*\s*[:=]\s*)(["']?)[^\s"',]+/gi, '$1$2[redacted]');
+  for (const secret of sensitiveEnvValues()) {
+    sanitized = sanitized.split(secret).join('[redacted]');
+  }
+  return sanitized;
 }
-
-function parseJsonObject(value: string): Record<string, unknown> {
-  const parsed = JSON.parse(value || '{}') as unknown;
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('tool arguments must be a JSON object');
-  }
-  return parsed as Record<string, unknown>;
-}
-
-function stringArg(args: Record<string, unknown>, key: string, fallback = ''): string {
-  const value = args[key];
-  return typeof value === 'string' ? value : fallback;
-}
-
-function booleanArg(args: Record<string, unknown>, key: string, fallback = false): boolean {
-  const value = args[key];
-  return typeof value === 'boolean' ? value : fallback;
-}
-
-function numberArg(args: Record<string, unknown>, key: string, fallback: number): number {
-  const value = args[key];
-  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
-}
-
-export class LocalOpenAIToolbox {
-  private rootReal: string | null = null;
-
-  constructor(private readonly workingDirectory: string) {}
-
-  private async root(): Promise<string> {
-    if (!this.rootReal) {
-      this.rootReal = await fs.promises.realpath(this.workingDirectory);
-    }
-    return this.rootReal;
-  }
-
-  private async resolveExistingPath(requestedPath: string): Promise<string> {
-    const root = await this.root();
-    const resolved = path.resolve(root, requestedPath || '.');
-    if (!isInside(root, resolved)) {
-      throw new Error('path escapes working directory');
-    }
-    const real = await fs.promises.realpath(resolved);
-    if (!isInside(root, real)) {
-      throw new Error('path escapes working directory');
-    }
-    return real;
-  }
-
-  private async resolveWritablePath(requestedPath: string): Promise<string> {
-    if (!requestedPath.trim()) throw new Error('path is required');
-    const root = await this.root();
-    const resolved = path.resolve(root, requestedPath);
-    if (!isInside(root, resolved)) {
-      throw new Error('path escapes working directory');
-    }
-    const parentReal = await fs.promises.realpath(path.dirname(resolved));
-    if (!isInside(root, parentReal)) {
-      throw new Error('path escapes working directory');
-    }
-    if (fs.existsSync(resolved)) {
-      const real = await fs.promises.realpath(resolved);
-      if (!isInside(root, real)) {
-        throw new Error('path escapes working directory');
-      }
-    }
-    return resolved;
-  }
-
-  async listFiles(args: Record<string, unknown>): Promise<ToolResult> {
-    const dir = await this.resolveExistingPath(stringArg(args, 'directory', '.'));
-    const recursive = booleanArg(args, 'recursive');
-    const root = await this.root();
-    const results: string[] = [];
-    const visit = async (current: string): Promise<void> => {
-      const entries = await fs.promises.readdir(current, { withFileTypes: true });
-      for (const entry of entries) {
-        if (entry.name === '.git' || entry.name === 'node_modules') continue;
-        const full = path.join(current, entry.name);
-        const relative = path.relative(root, full);
-        results.push(entry.isDirectory() ? `${relative}/` : relative);
-        if (entry.isDirectory() && recursive && results.length < 500) {
-          await visit(full);
-        }
-        if (results.length >= 500) return;
-      }
-    };
-    await visit(dir);
-    return { ok: true, content: { files: results } };
-  }
-
-  async searchFiles(args: Record<string, unknown>): Promise<ToolResult> {
-    const query = stringArg(args, 'query').toLowerCase();
-    if (!query) throw new Error('query is required');
-    const dir = await this.resolveExistingPath(stringArg(args, 'directory', '.'));
-    const root = await this.root();
-    const matches: Array<{ file: string; line: number; text: string }> = [];
-
-    const visit = async (current: string): Promise<void> => {
-      const entries = await fs.promises.readdir(current, { withFileTypes: true });
-      for (const entry of entries) {
-        if (entry.name === '.git' || entry.name === 'node_modules') continue;
-        const full = path.join(current, entry.name);
-        if (entry.isDirectory()) {
-          await visit(full);
-        } else if (entry.isFile()) {
-          const stat = await fs.promises.stat(full);
-          if (stat.size > MAX_FILE_BYTES) continue;
-          const text = await fs.promises.readFile(full, 'utf8').catch(() => '');
-          const lines = text.split(/\r?\n/);
-          lines.forEach((line, index) => {
-            if (matches.length < 100 && line.toLowerCase().includes(query)) {
-              matches.push({ file: path.relative(root, full), line: index + 1, text: line.slice(0, 500) });
-            }
-          });
-        }
-        if (matches.length >= 100) return;
-      }
-    };
-    await visit(dir);
-    return { ok: true, content: { matches } };
-  }
-
-  async readFile(args: Record<string, unknown>): Promise<ToolResult> {
-    const file = await this.resolveExistingPath(stringArg(args, 'path'));
-    const stat = await fs.promises.stat(file);
-    if (!stat.isFile()) throw new Error('path is not a file');
-    if (stat.size > MAX_FILE_BYTES) throw new Error(`file exceeds ${MAX_FILE_BYTES} byte read limit`);
-    const text = await fs.promises.readFile(file, 'utf8');
-    const startLine = Math.max(1, Math.floor(numberArg(args, 'start_line', 1)));
-    const maxLines = Math.min(1000, Math.max(1, Math.floor(numberArg(args, 'max_lines', 400))));
-    const lines = text.split(/\r?\n/).slice(startLine - 1, startLine - 1 + maxLines);
-    return { ok: true, content: { content: lines.join('\n'), start_line: startLine } };
-  }
-
-  async writeFile(args: Record<string, unknown>): Promise<ToolResult> {
-    const requestedPath = stringArg(args, 'path');
-    const content = stringArg(args, 'content');
-    const file = await this.resolveWritablePath(requestedPath);
-    await fs.promises.writeFile(file, content, 'utf8');
-    return { ok: true, content: { path: requestedPath, bytes: Buffer.byteLength(content) } };
-  }
-
-  async replaceInFile(args: Record<string, unknown>): Promise<ToolResult> {
-    const requestedPath = stringArg(args, 'path');
-    const oldText = stringArg(args, 'old_text');
-    const newText = stringArg(args, 'new_text');
-    if (!oldText) throw new Error('old_text is required');
-    const file = await this.resolveWritablePath(requestedPath);
-    const current = await fs.promises.readFile(file, 'utf8');
-    if (!current.includes(oldText)) throw new Error('old_text was not found');
-    const next = current.replace(oldText, newText);
-    await fs.promises.writeFile(file, next, 'utf8');
-    return { ok: true, content: { path: requestedPath, replacements: 1 } };
-  }
-
-  private async validateCommand(command: string, args: string[]): Promise<void> {
-    if (!command.trim()) throw new Error('command is required');
-    if (/[;&|`$<>]/.test(command)) throw new Error('shell metacharacters are not allowed in command');
-    const root = await this.root();
-    if (isLikelyPath(command)) {
-      const resolvedCommand = path.resolve(root, command);
-      if (!isInside(root, resolvedCommand)) throw new Error('command path escapes working directory');
-    }
-    for (const arg of args) {
-      if (/[`$]/.test(arg)) throw new Error('shell expansion is not allowed in command arguments');
-      const valueParts = arg.includes('=') ? [arg.slice(arg.indexOf('=') + 1)] : [arg];
-      for (const part of valueParts) {
-        if (!isLikelyPath(part)) continue;
-        const resolved = path.resolve(root, part);
-        if (!isInside(root, resolved)) {
-          throw new Error('command argument path escapes working directory');
-        }
-      }
-    }
-  }
-
-  async runCommand(args: Record<string, unknown>, signal: AbortSignal): Promise<ToolResult> {
-    const command = stringArg(args, 'command');
-    const commandArgsRaw = args.args;
-    const commandArgs = Array.isArray(commandArgsRaw)
-      ? commandArgsRaw.map((arg) => String(arg))
-      : [];
-    await this.validateCommand(command, commandArgs);
-    const timeoutMs = Math.min(
-      MAX_COMMAND_TIMEOUT_MS,
-      Math.max(1000, Math.floor(numberArg(args, 'timeout_ms', DEFAULT_COMMAND_TIMEOUT_MS))),
-    );
-    const started = Date.now();
-    try {
-      const result = await execFileAsync(command, commandArgs, {
-        cwd: await this.root(),
-        timeout: timeoutMs,
-        maxBuffer: MAX_COMMAND_OUTPUT,
-        signal,
-        windowsHide: true,
-      });
-      return {
-        ok: true,
-        content: {
-          stdout: result.stdout.toString(),
-          stderr: result.stderr.toString(),
-          duration_ms: Date.now() - started,
-        },
-      };
-    } catch (err: unknown) {
-      const withOutput = err as Error & { stdout?: Buffer | string; stderr?: Buffer | string; code?: string | number };
-      return {
-        ok: false,
-        error: errorMessage(err),
-        content: {
-          stdout: withOutput.stdout?.toString() ?? '',
-          stderr: withOutput.stderr?.toString() ?? '',
-          code: withOutput.code,
-          duration_ms: Date.now() - started,
-        },
-      };
-    }
-  }
-}
-
-const tools = [
-  {
-    type: 'function',
-    function: {
-      name: 'list_files',
-      description: 'List repository files under the working directory.',
-      parameters: {
-        type: 'object',
-        properties: {
-          directory: { type: 'string', description: 'Relative directory path. Defaults to .' },
-          recursive: { type: 'boolean' },
-        },
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'search_files',
-      description: 'Search text files under the working directory for a case-insensitive string.',
-      parameters: {
-        type: 'object',
-        properties: {
-          query: { type: 'string' },
-          directory: { type: 'string', description: 'Relative directory path. Defaults to .' },
-        },
-        required: ['query'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'read_file',
-      description: 'Read a UTF-8 file inside the working directory.',
-      parameters: {
-        type: 'object',
-        properties: {
-          path: { type: 'string' },
-          start_line: { type: 'number' },
-          max_lines: { type: 'number' },
-        },
-        required: ['path'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'write_file',
-      description: 'Create or overwrite a UTF-8 file inside the working directory.',
-      parameters: {
-        type: 'object',
-        properties: {
-          path: { type: 'string' },
-          content: { type: 'string' },
-        },
-        required: ['path', 'content'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'replace_in_file',
-      description: 'Replace the first exact text occurrence in a file inside the working directory.',
-      parameters: {
-        type: 'object',
-        properties: {
-          path: { type: 'string' },
-          old_text: { type: 'string' },
-          new_text: { type: 'string' },
-        },
-        required: ['path', 'old_text', 'new_text'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'run_command',
-      description: 'Run a build, test, git, or repository command with cwd fixed to the working directory. Pass executable and args separately; shell syntax is not supported.',
-      parameters: {
-        type: 'object',
-        properties: {
-          command: { type: 'string' },
-          args: { type: 'array', items: { type: 'string' } },
-          timeout_ms: { type: 'number' },
-        },
-        required: ['command'],
-      },
-    },
-  },
-] as const;
 
 export class LocalOpenAIProvider implements AgentProvider {
   readonly name = 'local-openai' as AgentProvider['name'];
   readonly displayName: string;
   readonly model: string;
   private readonly config: LocalOpenAIConfig;
-  private readonly fetchImpl: FetchLike;
+  private readonly spawnCommand: SpawnCommand;
 
-  constructor(args: { env?: NodeJS.ProcessEnv; fetchImpl?: FetchLike } = {}) {
+  constructor(args: { env?: NodeJS.ProcessEnv; spawnCommand?: SpawnCommand } = {}) {
     const config = getLocalOpenAIConfig(args.env ?? process.env);
     if (!config) {
-      throw new Error('LOCAL_OPENAI_BASE_URL and LOCAL_OPENAI_MODEL are required');
+      throw new Error('DSH_LAUNCHER_PATH is required');
     }
     this.config = config;
     this.displayName = config.displayName;
-    this.model = config.model;
-    this.fetchImpl = args.fetchImpl ?? fetch;
+    this.model = config.model ?? 'DeepSeek Harness';
+    this.spawnCommand = args.spawnCommand ?? spawn;
   }
 
   async start(): Promise<void> {
-    const info = await detectLocalOpenAIAgent({ fetchImpl: this.fetchImpl, env: {
-      LOCAL_OPENAI_BASE_URL: this.config.baseUrl,
-      LOCAL_OPENAI_MODEL: this.config.model,
-      LOCAL_OPENAI_API_KEY: this.config.apiKey,
-      LOCAL_OPENAI_DISPLAY_NAME: this.config.displayName,
-      LOCAL_OPENAI_MAX_TOKENS: String(this.config.maxTokens),
-    } });
-    if (!info.available) {
-      throw new Error(info.reason ?? 'Local OpenAI-compatible endpoint is unavailable');
+    const validationError = launcherValidationError(this.config.launcherPath);
+    if (validationError) {
+      throw new Error(validationError);
     }
   }
 
   async stop(): Promise<void> {}
 
   async createSession(config: AgentSessionConfig): Promise<AgentSession> {
-    return new LocalOpenAISession(this.config, this.fetchImpl, config);
+    return new LocalOpenAISession(this.config, this.spawnCommand, config);
   }
 }
 
 class LocalOpenAISession implements AgentSession {
   readonly sessionId = uuid();
-  private readonly abortController = new AbortController();
-  private readonly toolbox: LocalOpenAIToolbox;
-  private messages: ChatMessage[] = [];
+  private child: SpawnedProcess | null = null;
+  private aborted = false;
+  private killTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private readonly localConfig: LocalOpenAIConfig,
-    private readonly fetchImpl: FetchLike,
+    private readonly spawnCommand: SpawnCommand,
     private readonly sessionConfig: AgentSessionConfig,
-  ) {
-    this.toolbox = new LocalOpenAIToolbox(sessionConfig.workingDirectory);
-  }
+  ) {}
 
   async execute(prompt: string, attachments?: AgentAttachment[]): Promise<AgentResult> {
-    this.messages = [
-      { role: 'system', content: this.sessionConfig.systemPrompt },
-      { role: 'user', content: this.userContent(prompt, attachments) },
-    ];
+    const taskText = this.userContent([
+      this.sessionConfig.systemPrompt.trim(),
+      prompt,
+    ].filter(Boolean).join('\n\n'), attachments);
+    emit(this.sessionConfig, 'command', `DeepSeek Harness headless started with profile ${this.localConfig.profile}.`, {
+      agentType: LOCAL_AGENT_TYPE,
+      command: 'dsh headless',
+    });
+
     try {
-      return await this.runLoop();
+      const result = await this.runHeadless(taskText);
+      if (result.status === 'failed') {
+        emit(this.sessionConfig, 'error', result.error ?? 'DeepSeek Harness failed.', {
+          agentType: LOCAL_AGENT_TYPE,
+          command: 'dsh headless',
+          error: result.error,
+        });
+      }
+      return result;
     } catch (err: unknown) {
-      const message = errorMessage(err);
-      emit(this.sessionConfig, 'error', message, { agentType: 'local-openai' as AgentEventMetadata['agentType'] });
+      const message = sanitizeOutput(errorMessage(err));
+      emit(this.sessionConfig, 'error', message, {
+        agentType: LOCAL_AGENT_TYPE,
+        command: 'dsh headless',
+        error: message,
+      });
       return { status: 'failed', error: message };
+    } finally {
+      this.clearKillTimer();
+      this.child = null;
     }
   }
 
-  async send(message: string, attachments?: AgentAttachment[]): Promise<void> {
-    this.messages.push({ role: 'user', content: this.userContent(message, attachments) });
-    await this.runLoop();
+  async send(): Promise<void> {
+    throw new Error('Local AI headless execution does not support follow-up messages while a task is running.');
   }
 
   async abort(): Promise<void> {
-    this.abortController.abort();
+    this.aborted = true;
+    this.terminateChild();
   }
 
   async destroy(): Promise<void> {
-    this.abortController.abort();
+    this.aborted = true;
+    this.terminateChild();
   }
 
   private userContent(prompt: string, attachments?: AgentAttachment[]): string {
     if (!attachments?.length) return prompt;
     const names = attachments.map((attachment) => attachment.displayName ?? attachment.path ?? attachment.type).join(', ');
-    return `${prompt}\n\nAttachments available to Agent Board but not directly readable by local-openai: ${names}`;
+    return `${prompt}\n\nAttachments available to Agent Board but not directly readable by DeepSeek Harness headless: ${names}`;
   }
 
-  private async runLoop(): Promise<AgentResult> {
-    for (let turn = 0; turn < MAX_TOOL_TURNS; turn += 1) {
-      const step = await this.chatCompletion();
-      const assistantMessage: ChatMessage = {
-        role: 'assistant',
-        content: step.content || null,
-      };
-      if (step.toolCalls.length > 0) {
-        assistantMessage.tool_calls = step.toolCalls;
-      }
-      this.messages.push(assistantMessage);
-
-      if (step.toolCalls.length === 0) {
-        if (step.content.trim()) return { status: 'complete' };
-        if (step.reasoning.trim()) {
-          this.messages.push({
-            role: 'user',
-            content: 'You only produced reasoning. Provide the final task result, or call tools if more work is needed.',
-          });
-          continue;
-        }
-        return { status: 'failed', error: 'Local OpenAI-compatible model returned no content or tool calls' };
-      }
-
-      for (const toolCall of step.toolCalls) {
-        const result = await this.executeTool(toolCall);
-        this.messages.push({
-          role: 'tool',
-          tool_call_id: toolCall.id,
-          content: JSON.stringify(result),
-        });
-      }
-    }
-    return { status: 'failed', error: `Local OpenAI-compatible model exceeded ${MAX_TOOL_TURNS} tool turns` };
-  }
-
-  private requestHeaders(): Record<string, string> {
-    return {
-      'Content-Type': 'application/json',
-      ...authHeaders(this.localConfig),
-    };
-  }
-
-  private async chatCompletion(): Promise<ModelStep> {
-    const response = await this.fetchImpl(`${this.localConfig.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: this.requestHeaders(),
-      body: JSON.stringify({
-        model: this.localConfig.model,
-        messages: this.messages,
-        tools,
-        tool_choice: 'auto',
-        stream: true,
-        max_tokens: this.localConfig.maxTokens,
-      }),
-      signal: this.abortController.signal,
+  private async runHeadless(taskText: string): Promise<AgentResult> {
+    const child = this.spawnCommand('node', [
+      this.localConfig.launcherPath,
+      '--profile',
+      this.localConfig.profile,
+      taskText,
+    ], {
+      cwd: this.sessionConfig.workingDirectory,
+      env: {
+        ...process.env,
+        DSH_HOME: this.localConfig.dshHome,
+        DSH_PROFILE: this.localConfig.profile,
+      },
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
-    if (!response.ok) {
-      throw new Error(`/chat/completions failed with HTTP ${response.status}: ${await response.text().catch(() => '')}`);
-    }
-    const contentType = response.headers.get('content-type') ?? '';
-    if (contentType.includes('text/event-stream')) {
-      return this.readStreamingResponse(response);
-    }
-    const json = await response.json() as {
-      choices?: Array<{
-        message?: {
-          content?: string | null;
-          reasoning_content?: string | null;
-          tool_calls?: ToolCall[];
-        };
-      }>;
-    };
-    const message = json.choices?.[0]?.message;
-    const reasoning = message?.reasoning_content ?? '';
-    const content = message?.content ?? '';
-    if (reasoning) emit(this.sessionConfig, 'thinking', reasoning, { agentType: 'local-openai' as AgentEventMetadata['agentType'] });
-    if (content) emit(this.sessionConfig, 'output', content, { agentType: 'local-openai' as AgentEventMetadata['agentType'] });
-    return { content, reasoning, toolCalls: message?.tool_calls ?? [] };
-  }
+    this.child = child;
 
-  private async readStreamingResponse(response: Response): Promise<ModelStep> {
-    if (!response.body) throw new Error('streaming response had no body');
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    let content = '';
-    let reasoning = '';
-    const toolCalls = new Map<number, ToolCallAccumulator>();
-
-    const handleFrame = (frame: string) => {
-      const data = frame
-        .split(/\r?\n/)
-        .filter((line) => line.startsWith('data:'))
-        .map((line) => line.slice(5).trim())
-        .join('\n');
-      if (!data || data === '[DONE]') return;
-      const parsed = JSON.parse(data) as {
-        choices?: Array<{
-          delta?: {
-            content?: string | null;
-            reasoning_content?: string | null;
-            tool_calls?: Array<{
-              index?: number;
-              id?: string;
-              type?: 'function';
-              function?: {
-                name?: string;
-                arguments?: string;
-              };
-            }>;
-          };
-        }>;
-      };
-      const delta = parsed.choices?.[0]?.delta;
-      if (!delta) return;
-      if (delta.reasoning_content) {
-        reasoning += delta.reasoning_content;
-        emit(this.sessionConfig, 'thinking', delta.reasoning_content, { agentType: 'local-openai' as AgentEventMetadata['agentType'] });
-      }
-      if (delta.content) {
-        content += delta.content;
-        emit(this.sessionConfig, 'output', delta.content, { agentType: 'local-openai' as AgentEventMetadata['agentType'] });
-      }
-      for (const part of delta.tool_calls ?? []) {
-        const index = part.index ?? 0;
-        const existing = toolCalls.get(index) ?? {
-          id: part.id ?? `call_${index}`,
-          type: 'function' as const,
-          function: { name: '', arguments: '' },
-        };
-        if (part.id) existing.id = part.id;
-        if (part.type) existing.type = part.type;
-        if (part.function?.name) existing.function.name += part.function.name;
-        if (part.function?.arguments) existing.function.arguments += part.function.arguments;
-        toolCalls.set(index, existing);
-      }
-    };
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const frames = buffer.split(/\r?\n\r?\n/);
-      buffer = frames.pop() ?? '';
-      for (const frame of frames) handleFrame(frame);
-    }
-    buffer += decoder.decode();
-    if (buffer.trim()) handleFrame(buffer);
-    return { content, reasoning, toolCalls: [...toolCalls.values()] };
-  }
-
-  private async executeTool(toolCall: ToolCall): Promise<ToolResult> {
-    let args: Record<string, unknown>;
-    try {
-      args = parseJsonObject(toolCall.function.arguments);
-    } catch (err: unknown) {
-      return { ok: false, error: errorMessage(err) };
-    }
-
-    emit(this.sessionConfig, 'tool_call', `${toolCall.function.name}: ${toolCall.function.arguments}`, {
-      agentType: 'local-openai' as AgentEventMetadata['agentType'],
-    });
-
-    try {
-      switch (toolCall.function.name) {
-        case 'list_files':
-          return await this.toolbox.listFiles(args);
-        case 'search_files':
-          return await this.toolbox.searchFiles(args);
-        case 'read_file': {
-          const result = await this.toolbox.readFile(args);
-          emit(this.sessionConfig, 'file_read', `read_file: ${toolCall.function.arguments}`, {
-            file: stringArg(args, 'path'),
-            agentType: 'local-openai' as AgentEventMetadata['agentType'],
-          });
-          return result;
-        }
-        case 'write_file': {
-          const result = await this.toolbox.writeFile(args);
-          emit(this.sessionConfig, 'file_write', `write_file: ${toolCall.function.arguments}`, {
-            file: stringArg(args, 'path'),
-            agentType: 'local-openai' as AgentEventMetadata['agentType'],
-          });
-          return result;
-        }
-        case 'replace_in_file': {
-          const result = await this.toolbox.replaceInFile(args);
-          emit(this.sessionConfig, 'file_edit', `replace_in_file: ${toolCall.function.arguments}`, {
-            file: stringArg(args, 'path'),
-            agentType: 'local-openai' as AgentEventMetadata['agentType'],
-          });
-          return result;
-        }
-        case 'run_command': {
-          const command = stringArg(args, 'command');
-          const commandArgsRaw = args.args;
-          const commandArgs = Array.isArray(commandArgsRaw) ? commandArgsRaw.map((arg) => String(arg)) : [];
-          emit(this.sessionConfig, 'command', [command, ...commandArgs].join(' '), {
-            command,
-            agentType: 'local-openai' as AgentEventMetadata['agentType'],
-          });
-          const result = await this.toolbox.runCommand(args, this.abortController.signal);
-          emit(this.sessionConfig, 'command_output', JSON.stringify(result.content ?? result.error), {
-            command,
-            agentType: 'local-openai' as AgentEventMetadata['agentType'],
-          });
-          return result;
-        }
-        default:
-          return { ok: false, error: `unknown tool: ${toolCall.function.name}` };
-      }
-    } catch (err: unknown) {
-      const result = { ok: false, error: errorMessage(err) };
-      emit(this.sessionConfig, 'error', `${toolCall.function.name} failed: ${result.error}`, {
-        agentType: 'local-openai' as AgentEventMetadata['agentType'],
+    child.stdout?.on('data', (chunk: Buffer | string) => {
+      emit(this.sessionConfig, 'output', chunk.toString(), {
+        agentType: LOCAL_AGENT_TYPE,
+        command: 'dsh stdout',
       });
-      return result;
-    }
+    });
+    child.stderr?.on('data', (chunk: Buffer | string) => {
+      emit(this.sessionConfig, 'command_output', chunk.toString(), {
+        agentType: LOCAL_AGENT_TYPE,
+        command: 'dsh stderr',
+      });
+    });
+
+    return await new Promise<AgentResult>((resolve) => {
+      let settled = false;
+      const settle = (result: AgentResult) => {
+        if (settled) return;
+        settled = true;
+        resolve(result);
+      };
+
+      child.once('error', (err: Error) => {
+        settle({ status: 'failed', error: `DeepSeek Harness failed to start: ${sanitizeOutput(errorMessage(err))}` });
+      });
+
+      child.once('close', (code: number | null, signal: NodeJS.Signals | null) => {
+        if (this.aborted) {
+          settle({ status: 'failed', error: 'DeepSeek Harness execution was cancelled.' });
+          return;
+        }
+        if (code === 0) {
+          settle({ status: 'complete' });
+          return;
+        }
+        const exit = code == null ? `signal ${signal ?? 'unknown'}` : `exit code ${code}`;
+        settle({ status: 'failed', error: `DeepSeek Harness exited with ${exit}.` });
+      });
+    });
+  }
+
+  private terminateChild(): void {
+    const child = this.child;
+    if (!child || child.killed) return;
+    child.kill('SIGTERM');
+    this.killTimer = setTimeout(() => {
+      if (!child.killed) child.kill('SIGKILL');
+    }, TERMINATION_GRACE_MS);
+  }
+
+  private clearKillTimer(): void {
+    if (!this.killTimer) return;
+    clearTimeout(this.killTimer);
+    this.killTimer = null;
   }
 }

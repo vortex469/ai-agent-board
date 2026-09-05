@@ -238,12 +238,11 @@ test('non-Windows detection uses SDK results without Windows probes', async () =
   assert.equal(copilot?.reason, 'Copilot CLI not found in PATH');
 });
 
-test('detection appends local OpenAI provider as unavailable when unconfigured', async () => {
+test('detection appends local AI DSH provider as unavailable when unconfigured', async () => {
   const agents = await detectAvailableAgents({
     detectAgents: async () => agentsWithCopilot(),
     env: {
-      LOCAL_OPENAI_BASE_URL: '',
-      LOCAL_OPENAI_MODEL: '',
+      DSH_LAUNCHER_PATH: '',
       LOCAL_OPENAI_DISPLAY_NAME: '',
     },
     platform: 'linux',
@@ -255,7 +254,33 @@ test('detection appends local OpenAI provider as unavailable when unconfigured',
   const local = agents.find(agent => agent.name === ('local-openai' as AgentInfo['name']));
   assert.equal(local?.displayName, 'Local AI');
   assert.equal(local?.available, false);
-  assert.match(local?.reason ?? '', /LOCAL_OPENAI_BASE_URL/);
+  assert.match(local?.reason ?? '', /DSH_LAUNCHER_PATH/);
+});
+
+test('detection appends configured local AI DSH provider as available', async (t) => {
+  const { binDir, cleanup } = createFixtureBin('dsh-local');
+  t.after(cleanup);
+  const launcher = path.join(binDir, 'dsh.js');
+  copyFileSync(process.execPath, launcher);
+  chmodSync(launcher, 0o755);
+
+  const agents = await detectAvailableAgents({
+    detectAgents: async () => agentsWithCopilot(),
+    env: {
+      DSH_LAUNCHER_PATH: launcher,
+      LOCAL_OPENAI_DISPLAY_NAME: 'Local AI / Qwen R9700',
+      LOCAL_OPENAI_MODEL: 'Qwen R9700',
+    },
+    platform: 'linux',
+    execCommand: async (file) => {
+      throw new Error(`unexpected probe: ${file}`);
+    },
+  });
+
+  const local = agents.find(agent => agent.name === ('local-openai' as AgentInfo['name']));
+  assert.equal(local?.displayName, 'Local AI / Qwen R9700');
+  assert.equal(local?.available, true);
+  assert.equal(local?.version, 'Qwen R9700');
 });
 
 test('configured Hermes command is the detection authority', async () => {

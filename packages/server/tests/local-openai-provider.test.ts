@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { EventEmitter } from 'node:events';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { PassThrough } from 'node:stream';
 import test from 'node:test';
 import type { AgentEvent } from '@codewithdan/agent-sdk-core';
 import { isValidAgentType } from '@ai-agent-board/shared/constants.js';
@@ -9,65 +11,85 @@ import {
   detectLocalOpenAIAgent,
   getLocalOpenAIConfig,
   LocalOpenAIProvider,
-  LocalOpenAIToolbox,
+  sanitizeOutput,
 } from '../src/services/local-openai-provider.js';
+
+type SpawnCall = {
+  command: string;
+  args: string[];
+  options: {
+    cwd: string;
+    env: NodeJS.ProcessEnv;
+    windowsHide: boolean;
+    stdio: ['ignore', 'pipe', 'pipe'];
+  };
+};
+
+class FakeChild extends EventEmitter {
+  stdout = new PassThrough();
+  stderr = new PassThrough();
+  killed = false;
+  signals: Array<NodeJS.Signals | number | undefined> = [];
+
+  kill(signal?: NodeJS.Signals | number): boolean {
+    this.killed = true;
+    this.signals.push(signal);
+    return true;
+  }
+
+  close(code: number | null, signal: NodeJS.Signals | null = null): void {
+    this.emit('close', code, signal);
+  }
+}
 
 function tempDir(name: string): { dir: string; cleanup: () => void } {
   const dir = mkdtempSync(path.join(tmpdir(), `agentboard-${name}-`));
   return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
-function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
-  return new Response(JSON.stringify(body), {
-    status: init.status ?? 200,
-    headers: { 'content-type': 'application/json', ...(init.headers ?? {}) },
-  });
-}
-
-function sseResponse(frames: unknown[]): Response {
-  const encoder = new TextEncoder();
-  const body = frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join('') + 'data: [DONE]\n\n';
-  return new Response(new ReadableStream({
-    start(controller) {
-      controller.enqueue(encoder.encode(body));
-      controller.close();
-    },
-  }), {
-    status: 200,
-    headers: { 'content-type': 'text/event-stream' },
-  });
+function makeLauncher(dir: string): string {
+  const launcher = path.join(dir, 'dsh-launcher.js');
+  writeFileSync(launcher, '#!/usr/bin/env node\n');
+  chmodSync(launcher, 0o755);
+  return launcher;
 }
 
 function makeSession(args: {
   dir: string;
-  responses: Response[];
+  launcherPath: string;
   events?: AgentEvent[];
+  calls?: SpawnCall[];
+  child?: FakeChild;
   env?: NodeJS.ProcessEnv;
-  urls?: string[];
-  headers?: HeadersInit[];
 }) {
-  const responses = [...args.responses];
   const events = args.events ?? [];
+  const child = args.child ?? new FakeChild();
+  const calls = args.calls ?? [];
   const provider = new LocalOpenAIProvider({
     env: {
-      LOCAL_OPENAI_BASE_URL: 'http://local-llm.test/v1',
-      LOCAL_OPENAI_MODEL: 'test-coder',
+      DSH_LAUNCHER_PATH: args.launcherPath,
+      DSH_HOME: '/tmp/test-dsh-home',
+      DSH_PROFILE: 'headless-test',
+      LOCAL_OPENAI_DISPLAY_NAME: 'Local AI',
+      LOCAL_OPENAI_MODEL: 'Qwen R9700',
       ...args.env,
     },
-    fetchImpl: async (url, init) => {
-      args.urls?.push(String(url));
-      args.headers?.push(init?.headers ?? {});
-      const response = responses.shift();
-      if (!response) throw new Error('unexpected fetch');
-      return response;
+    spawnCommand: (command, spawnArgs, options) => {
+      calls.push({ command, args: spawnArgs, options });
+      return child;
     },
   });
-  return provider.createSession({
-    contextId: 'task-1',
-    workingDirectory: args.dir,
-    systemPrompt: 'system',
-    onEvent: (event) => events.push(event),
-  });
+  return {
+    child,
+    calls,
+    events,
+    session: provider.createSession({
+      contextId: 'task-1',
+      workingDirectory: args.dir,
+      systemPrompt: 'system prompt',
+      onEvent: (event) => events.push(event),
+    }),
+  };
 }
 
 test('AgentType validation accepts local-openai', () => {
@@ -75,207 +97,142 @@ test('AgentType validation accepts local-openai', () => {
   assert.equal(isValidAgentType('local-openai '), false);
 });
 
-test('local OpenAI config requires base URL and model', () => {
+test('local AI DSH config requires a launcher and defaults headless settings', () => {
   assert.equal(getLocalOpenAIConfig({}), null);
-  assert.equal(getLocalOpenAIConfig({ LOCAL_OPENAI_BASE_URL: 'http://localhost:1234' }), null);
   assert.deepEqual(getLocalOpenAIConfig({
-    LOCAL_OPENAI_BASE_URL: 'http://localhost:1234/v1/',
-    LOCAL_OPENAI_MODEL: 'coder',
-    LOCAL_OPENAI_DISPLAY_NAME: 'Desk Model',
-    LOCAL_OPENAI_MAX_TOKENS: '1234',
+    DSH_LAUNCHER_PATH: '/opt/dsh/bin.js',
+    LOCAL_OPENAI_DISPLAY_NAME: 'Local AI / Qwen R9700',
+    LOCAL_OPENAI_MODEL: 'Qwen R9700',
   }), {
-    baseUrl: 'http://localhost:1234/v1',
-    model: 'coder',
-    displayName: 'Desk Model',
-    maxTokens: 1234,
-    apiKey: undefined,
+    launcherPath: '/opt/dsh/bin.js',
+    dshHome: '/root/.dsh',
+    profile: 'headless',
+    displayName: 'Local AI / Qwen R9700',
+    model: 'Qwen R9700',
   });
 });
 
-test('local OpenAI detection fails closed when config is missing', async () => {
-  const info = await detectLocalOpenAIAgent({ env: {} });
-  assert.equal(info.name, 'local-openai');
-  assert.equal(info.available, false);
-  assert.match(info.reason ?? '', /LOCAL_OPENAI_BASE_URL/);
-});
+test('local AI DSH detection validates the configured launcher path', async (t) => {
+  const { dir, cleanup } = tempDir('dsh-detect');
+  t.after(cleanup);
+  const launcher = makeLauncher(dir);
 
-test('local OpenAI detection probes /models and only sends auth when configured', async () => {
-  const seen: Array<{ url: string; auth: string | null }> = [];
-  const info = await detectLocalOpenAIAgent({
+  const available = await detectLocalOpenAIAgent({
     env: {
-      LOCAL_OPENAI_BASE_URL: 'http://local-llm.test/v1',
-      LOCAL_OPENAI_MODEL: 'coder',
-      LOCAL_OPENAI_API_KEY: 'secret',
-      LOCAL_OPENAI_DISPLAY_NAME: 'Workshop',
-    },
-    fetchImpl: async (url, init) => {
-      const headers = new Headers(init?.headers);
-      seen.push({ url: String(url), auth: headers.get('authorization') });
-      return jsonResponse({ data: [] });
+      DSH_LAUNCHER_PATH: launcher,
+      LOCAL_OPENAI_DISPLAY_NAME: 'Local AI / Qwen R9700',
+      LOCAL_OPENAI_MODEL: 'Qwen R9700',
     },
   });
+  assert.equal(available.name, 'local-openai');
+  assert.equal(available.displayName, 'Local AI / Qwen R9700');
+  assert.equal(available.available, true);
+  assert.equal(available.version, 'Qwen R9700');
 
-  assert.equal(info.available, true);
-  assert.equal(info.displayName, 'Workshop');
-  assert.equal(info.version, 'coder');
-  assert.deepEqual(seen, [{ url: 'http://local-llm.test/v1/models', auth: 'Bearer secret' }]);
-
-  seen.length = 0;
-  await detectLocalOpenAIAgent({
-    env: { LOCAL_OPENAI_BASE_URL: 'http://local-llm.test/v1', LOCAL_OPENAI_MODEL: 'coder' },
-    fetchImpl: async (url, init) => {
-      seen.push({ url: String(url), auth: new Headers(init?.headers).get('authorization') });
-      return jsonResponse({ data: [] });
-    },
-  });
-  assert.equal(seen[0].auth, null);
+  const missing = await detectLocalOpenAIAgent({ env: { DSH_LAUNCHER_PATH: path.join(dir, 'missing.js') } });
+  assert.equal(missing.available, false);
+  assert.match(missing.reason ?? '', /does not exist/);
 });
 
-test('local OpenAI detection reports failed probe as unavailable', async () => {
-  const info = await detectLocalOpenAIAgent({
-    env: { LOCAL_OPENAI_BASE_URL: 'http://local-llm.test/v1', LOCAL_OPENAI_MODEL: 'coder' },
-    fetchImpl: async () => jsonResponse({ error: 'nope' }, { status: 503 }),
-  });
-  assert.equal(info.available, false);
-  assert.match(info.reason ?? '', /HTTP 503/);
-});
-
-test('local OpenAI session completes from non-streaming content', async (t) => {
-  const { dir, cleanup } = tempDir('local-complete');
+test('local AI DSH session passes worktree cwd, DSH env, profile, and one-shot prompt', async (t) => {
+  const { dir, cleanup } = tempDir('dsh-contract');
   t.after(cleanup);
-  const events: AgentEvent[] = [];
-  const session = await makeSession({
-    dir,
-    events,
-    responses: [jsonResponse({ choices: [{ message: { content: 'done' } }] })],
-  });
+  const launcher = makeLauncher(dir);
+  const child = new FakeChild();
+  const calls: SpawnCall[] = [];
+  const { session: sessionPromise } = makeSession({ dir, launcherPath: launcher, calls, child });
+  const session = await sessionPromise;
 
-  const result = await session.execute('finish task');
+  const resultPromise = session.execute('do the task');
+  child.close(0);
+  const result = await resultPromise;
+
   assert.equal(result.status, 'complete');
-  assert.equal(events.some((event) => event.type === 'output' && event.content === 'done'), true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, 'node');
+  assert.equal(calls[0].args[0], launcher);
+  assert.deepEqual(calls[0].args.slice(1, 3), ['--profile', 'headless-test']);
+  assert.match(calls[0].args[3], /system prompt/);
+  assert.match(calls[0].args[3], /do the task/);
+  assert.equal(calls[0].options.cwd, dir);
+  assert.equal(calls[0].options.env.DSH_HOME, '/tmp/test-dsh-home');
+  assert.equal(calls[0].options.env.DSH_PROFILE, 'headless-test');
+  assert.deepEqual(calls[0].options.stdio, ['ignore', 'pipe', 'pipe']);
 });
 
-test('local OpenAI session preserves streaming output and reasoning_content', async (t) => {
-  const { dir, cleanup } = tempDir('local-stream');
+test('local AI DSH stdout and stderr are surfaced with credential redaction', async (t) => {
+  const { dir, cleanup } = tempDir('dsh-output');
   t.after(cleanup);
+  const launcher = makeLauncher(dir);
   const events: AgentEvent[] = [];
-  const session = await makeSession({
+  const child = new FakeChild();
+  const { session: sessionPromise } = makeSession({
     dir,
+    launcherPath: launcher,
+    child,
     events,
-    responses: [sseResponse([
-      { choices: [{ delta: { reasoning_content: 'thinking ' } }] },
-      { choices: [{ delta: { content: 'final ' } }] },
-      { choices: [{ delta: { content: 'answer' } }] },
-    ])],
+    env: { OPENAI_API_KEY: 'sk-test-secret-value' },
   });
+  const session = await sessionPromise;
 
-  const result = await session.execute('finish task');
+  const resultPromise = session.execute('emit output');
+  child.stdout.write('created file\napi_key: sk-test-secret-value\n');
+  child.stderr.write('debug /root/.dsh/.credentials.yaml token=sk-test-secret-value\n');
+  child.close(0);
+  const result = await resultPromise;
+
   assert.equal(result.status, 'complete');
-  assert.equal(events.filter((event) => event.type === 'thinking').map((event) => event.content).join(''), 'thinking ');
-  assert.equal(events.filter((event) => event.type === 'output').map((event) => event.content).join(''), 'final answer');
+  const contents = events.map((event) => event.content).join('\n');
+  assert.match(contents, /created file/);
+  assert.match(contents, /\[redacted\]/);
+  assert.match(contents, /\[DSH credentials file\]/);
+  assert.doesNotMatch(contents, /sk-test-secret-value/);
 });
 
-test('reasoning-only responses are not treated as useful final output', async (t) => {
-  const { dir, cleanup } = tempDir('local-reasoning');
+test('local AI DSH non-zero exit fails with a clear error', async (t) => {
+  const { dir, cleanup } = tempDir('dsh-fail');
   t.after(cleanup);
+  const launcher = makeLauncher(dir);
   const events: AgentEvent[] = [];
-  const session = await makeSession({
-    dir,
-    events,
-    responses: [
-      jsonResponse({ choices: [{ message: { reasoning_content: 'analysis only' } }] }),
-      jsonResponse({ choices: [{ message: { content: 'actual final' } }] }),
-    ],
-  });
+  const child = new FakeChild();
+  const { session: sessionPromise } = makeSession({ dir, launcherPath: launcher, child, events });
+  const session = await sessionPromise;
 
-  const result = await session.execute('finish task');
-  assert.equal(result.status, 'complete');
-  assert.equal(events.some((event) => event.type === 'thinking' && event.content === 'analysis only'), true);
-  assert.equal(events.some((event) => event.type === 'output' && event.content === 'actual final'), true);
-});
+  const resultPromise = session.execute('fail task');
+  child.close(7);
+  const result = await resultPromise;
 
-test('file toolbox allows confined read/write and rejects traversal', async (t) => {
-  const { dir, cleanup } = tempDir('local-files');
-  t.after(cleanup);
-  writeFileSync(path.join(dir, 'inside.txt'), 'hello');
-  const toolbox = new LocalOpenAIToolbox(dir);
-
-  assert.equal((await toolbox.readFile({ path: 'inside.txt' })).ok, true);
-  assert.equal((await toolbox.writeFile({ path: 'created.txt', content: 'new' })).ok, true);
-  assert.equal(readFileSync(path.join(dir, 'created.txt'), 'utf8'), 'new');
-  await assert.rejects(() => toolbox.readFile({ path: '../outside.txt' }), /escapes working directory/);
-  await assert.rejects(() => toolbox.writeFile({ path: '../outside.txt', content: 'bad' }), /escapes working directory/);
-});
-
-test('tool loop can modify a repository file', async (t) => {
-  const { dir, cleanup } = tempDir('local-tool-loop');
-  t.after(cleanup);
-  writeFileSync(path.join(dir, 'README.md'), 'before\n');
-  const events: AgentEvent[] = [];
-  const session = await makeSession({
-    dir,
-    events,
-    responses: [
-      jsonResponse({ choices: [{ message: { content: '', tool_calls: [{
-        id: 'call-1',
-        type: 'function',
-        function: { name: 'replace_in_file', arguments: JSON.stringify({ path: 'README.md', old_text: 'before', new_text: 'after' }) },
-      }] } }] }),
-      jsonResponse({ choices: [{ message: { content: 'changed README' } }] }),
-    ],
-  });
-
-  const result = await session.execute('change README');
-  assert.equal(result.status, 'complete');
-  assert.equal(readFileSync(path.join(dir, 'README.md'), 'utf8'), 'after\n');
-  assert.equal(events.some((event) => event.type === 'file_edit' && event.metadata?.file === 'README.md'), true);
-});
-
-test('streaming tool calls are assembled and executed', async (t) => {
-  const { dir, cleanup } = tempDir('local-stream-tools');
-  t.after(cleanup);
-  const session = await makeSession({
-    dir,
-    responses: [
-      sseResponse([
-        { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-1', type: 'function', function: { name: 'write_file', arguments: '{"path":"' } }] } }] },
-        { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: 'note.txt","content":"ok"}' } }] } }] },
-      ]),
-      jsonResponse({ choices: [{ message: { content: 'wrote file' } }] }),
-    ],
-  });
-
-  const result = await session.execute('write note');
-  assert.equal(result.status, 'complete');
-  assert.equal(readFileSync(path.join(dir, 'note.txt'), 'utf8'), 'ok');
-});
-
-test('command execution keeps cwd confined and rejects path escapes', async (t) => {
-  const { dir, cleanup } = tempDir('local-command');
-  t.after(cleanup);
-  const toolbox = new LocalOpenAIToolbox(dir);
-  const ok = await toolbox.runCommand({ command: 'pwd' }, new AbortController().signal);
-  assert.equal(ok.ok, true);
-  assert.equal((ok.content as { stdout: string }).stdout.trim(), dir);
-
-  await assert.rejects(
-    () => toolbox.runCommand({ command: 'node', args: ['../outside.js'] }, new AbortController().signal),
-    /escapes working directory/,
-  );
-});
-
-test('chat completion HTTP failures fail the session', async (t) => {
-  const { dir, cleanup } = tempDir('local-failure');
-  t.after(cleanup);
-  const events: AgentEvent[] = [];
-  const session = await makeSession({
-    dir,
-    events,
-    responses: [jsonResponse({ error: 'bad' }, { status: 500 })],
-  });
-
-  const result = await session.execute('finish task');
   assert.equal(result.status, 'failed');
-  assert.match(result.error ?? '', /HTTP 500/);
-  assert.equal(events.some((event) => event.type === 'error' && event.content.includes('HTTP 500')), true);
+  assert.match(result.error ?? '', /exit code 7/);
+  assert.ok(events.some((event) => event.type === 'error' && event.content.includes('exit code 7')));
+});
+
+test('local AI DSH cancellation terminates the subprocess', async (t) => {
+  const { dir, cleanup } = tempDir('dsh-cancel');
+  t.after(cleanup);
+  const launcher = makeLauncher(dir);
+  const child = new FakeChild();
+  const { session: sessionPromise } = makeSession({ dir, launcherPath: launcher, child });
+  const session = await sessionPromise;
+
+  const resultPromise = session.execute('long task');
+  await session.abort();
+  child.close(null, 'SIGTERM');
+  const result = await resultPromise;
+
+  assert.equal(result.status, 'failed');
+  assert.match(result.error ?? '', /cancelled/);
+  assert.deepEqual(child.signals, ['SIGTERM']);
+});
+
+test('sanitizeOutput redacts sensitive env values and credential references', () => {
+  process.env.AGENTBOARD_TEST_TOKEN = 'super-sensitive-token';
+  try {
+    const output = sanitizeOutput('token=super-sensitive-token from /root/.dsh/.credentials.yaml');
+    assert.doesNotMatch(output, /super-sensitive-token/);
+    assert.match(output, /\[redacted\]/);
+    assert.match(output, /\[DSH credentials file\]/);
+  } finally {
+    delete process.env.AGENTBOARD_TEST_TOKEN;
+  }
 });
