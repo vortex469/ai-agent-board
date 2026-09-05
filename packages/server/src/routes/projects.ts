@@ -4,7 +4,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { v4 as uuid } from 'uuid';
-import type { AgentType, Priority } from '../types.js';
+import type { AgentType, Priority, Project, Task } from '../types.js';
 import type { ProjectRepository } from '../repositories/project-types.js';
 import type { TaskRepository } from '../repositories/types.js';
 import type { TaskGroupRepository } from '../repositories/group-types.js';
@@ -28,6 +28,7 @@ import {
   normalizeRepoUrl,
   paramId,
   parseGitRepoUrl,
+  startAgentForTask,
   startNextEligibleProjectAutoRunTask,
   validateRepoPath,
   type ParsedRepoUrl,
@@ -118,6 +119,96 @@ interface ParsedProjectDefaults {
   defaultPriority?: Priority | null;
   defaultBaseBranch?: string | null;
   defaultUseWorktree?: boolean | null;
+}
+
+
+async function autoRunPrerequisitesAreDone(taskRepo: TaskRepository, taskId: string): Promise<boolean> {
+  const prerequisites = (await taskRepo.getRelationships(taskId))
+    .filter((relationship) => relationship.type === 'blocks' && relationship.direction === 'blocked-by');
+
+  for (const prerequisite of prerequisites) {
+    const task = await taskRepo.getById(prerequisite.relatedTaskId);
+    if (!task || task.columnId !== 'done' || task.agentStatus === 'failed') return false;
+  }
+
+  return true;
+}
+
+export async function tickProjectAutoRun(args: {
+  project: Project;
+  orderedBacklogIds: string[];
+  taskRepo: TaskRepository;
+  agentManager: AgentManager;
+}): Promise<
+  | { started: false; reason: string; task?: Task }
+  | { started: true; task: Task }
+> {
+  const { project, orderedBacklogIds, taskRepo, agentManager } = args;
+
+  if (!project.autoRunEnabled) {
+    return { started: false, reason: 'auto-run-disabled' };
+  }
+
+  const projectTasks = await taskRepo.getAll(true, project.id);
+
+  if (projectTasks.some((task) =>
+    agentManager.isRunning(task.id)
+    || task.agentStatus === 'planning'
+    || task.agentStatus === 'executing'
+  )) {
+    return { started: false, reason: 'task-running' };
+  }
+
+  if (projectTasks.some((task) =>
+    !task.archived
+    && !task.groupId
+    && (task.columnId === 'in-progress' || task.columnId === 'review')
+  )) {
+    return { started: false, reason: 'awaiting-current-card-done' };
+  }
+
+  const firstId = orderedBacklogIds[0];
+  if (!firstId) {
+    return { started: false, reason: 'empty-backlog' };
+  }
+
+  const topTask = await taskRepo.getById(firstId);
+
+  if (
+    !topTask
+    || topTask.projectId !== project.id
+    || topTask.columnId !== 'backlog'
+    || topTask.archived
+    || topTask.groupId
+  ) {
+    return { started: false, reason: 'top-card-not-runnable', task: topTask };
+  }
+
+  if (
+    topTask.agentStatus !== 'idle'
+    || topTask.runClaimedAt !== undefined
+    || agentManager.isRunning(topTask.id)
+  ) {
+    return { started: false, reason: 'top-card-not-idle', task: topTask };
+  }
+
+  if (!await autoRunPrerequisitesAreDone(taskRepo, topTask.id)) {
+    return { started: false, reason: 'top-card-blocked', task: topTask };
+  }
+
+  const agentInfo = agentManager
+    .getAvailableAgents()
+    .find((agent) => agent.name === topTask.agentType);
+
+  if (!agentInfo?.available) {
+    return { started: false, reason: 'selected-agent-unavailable', task: topTask };
+  }
+
+  await taskRepo.requestRun(topTask.id, Date.now());
+  await startAgentForTask(topTask, taskRepo, agentManager);
+
+  const latest = await taskRepo.getById(topTask.id);
+  return { started: true, task: latest ?? topTask };
 }
 
 /**
@@ -323,6 +414,37 @@ export function createProjectsRouter(
     });
     broadcastProjectUpdate(project);
     res.status(201).json(project);
+  }));
+
+  router.post('/:id/auto-run/tick', asyncHandler(async (req: Request, res: Response) => {
+    const id = paramId(req);
+    const project = id === 'default'
+      ? await projectRepo.getDefault()
+      : await projectRepo.getById(id);
+
+    if (!project) {
+      res.status(404).json({ error: 'project not found' });
+      return;
+    }
+
+    if (
+      !Array.isArray(req.body.orderedBacklogIds)
+      || req.body.orderedBacklogIds.some((item: unknown) => typeof item !== 'string')
+    ) {
+      res.status(400).json({ error: 'orderedBacklogIds must be an array of task ids' });
+      return;
+    }
+
+    const orderedBacklogIds = [
+      ...new Set(req.body.orderedBacklogIds as string[])
+    ];
+
+    res.json(await tickProjectAutoRun({
+      project,
+      orderedBacklogIds,
+      taskRepo,
+      agentManager,
+    }));
   }));
 
   router.patch('/:id', asyncHandler(async (req: Request, res: Response) => {
