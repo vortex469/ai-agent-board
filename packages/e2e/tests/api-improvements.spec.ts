@@ -62,20 +62,23 @@ test.describe('Single-call task creation + autoRun', () => {
     await deleteTaskViaAPI(request, task.id);
   });
 
-  test('POST /api/tasks with autoRun=true but columnId=backlog does NOT auto-run', async ({ request }) => {
+  test('POST /api/tasks with autoRun=true and columnId=backlog evaluates automatic admission', async ({ request }) => {
     const res = await request.post(`${API}/api/tasks`, {
       data: {
-        title: 'No auto-run backlog',
-        description: 'Should not run because not in-progress',
+        title: 'Auto-run backlog',
+        description: 'Should auto-admit from backlog when an agent is available',
         columnId: 'backlog',
         autoRun: true,
       },
     });
     expect(res.status()).toBe(201);
     const task = await res.json();
-    // Should still be idle since columnId is backlog
-    expect(task.agentStatus).toBe('idle');
-    expect(task.columnId).toBe('backlog');
+    expect(['planning', 'executing', 'failed']).toContain(task.agentStatus);
+    if (task.agentStatus === 'failed') {
+      expect(task.columnId).toBe('backlog');
+    } else {
+      expect(task.columnId).toBe('in-progress');
+    }
 
     await deleteTaskViaAPI(request, task.id);
   });

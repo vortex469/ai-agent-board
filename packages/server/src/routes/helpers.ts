@@ -923,6 +923,47 @@ export async function triggerAutomaticDependentProgression(
   return undefined;
 }
 
+export async function triggerAutomaticBacklogProgression(
+  repo: TaskRepository,
+  projectId: string,
+  agentManager?: AgentManager,
+): Promise<Task | undefined> {
+  if (!agentManager) return undefined;
+
+  const queued = (await repo.getAll(false, projectId))
+    .filter((task) => (
+      !task.archived
+      && !task.groupId
+      && task.columnId === 'backlog'
+      && task.agentStatus === 'idle'
+      && task.runRequestedAt !== undefined
+      && task.runClaimedAt === undefined
+      && !agentManager.isRunning(task.id)
+    ))
+    .sort((a, b) => (a.runRequestedAt ?? 0) - (b.runRequestedAt ?? 0) || a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+
+  for (const task of queued) {
+    if (!await taskPrerequisitesAreDone(repo, task.id)) continue;
+
+    const agentInfo = agentManager.getAvailableAgents().find((agent) => agent.name === task.agentType);
+    if (!agentInfo?.available) {
+      await emitTaskLifecycleEvent(
+        repo,
+        task,
+        'error',
+        `Automatic progression paused: agent ${agentInfo?.displayName || task.agentType || 'unknown'} is not available: ${agentInfo?.reason || 'unknown reason'}`,
+        { agentType: task.agentType, error: 'Automatic progression paused because the selected agent is unavailable.' },
+      );
+      return undefined;
+    }
+
+    await startAgentForTask(task, repo, agentManager);
+    return repo.getById(task.id);
+  }
+
+  return undefined;
+}
+
 function passedGateIndex(evidence: string, gateName: string): number {
   const escaped = gateName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const beforeColon = new RegExp(`${escaped}\\s*(?:passed|pass|ok|succeeded|success|green|approved)\\s*:`, 'i').exec(evidence);

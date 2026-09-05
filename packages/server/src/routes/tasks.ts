@@ -10,7 +10,7 @@ import {
   asyncHandler, paramId, isAllowedRepoPath, expandTilde,
   validateTaskFields, buildTask, broadcastTaskUpdate,
   failTaskWithEvent, startAgentForTask, normalizeRepoPathForCompare,
-  triggerAutomaticDependentProgression,
+  triggerAutomaticBacklogProgression, triggerAutomaticDependentProgression,
 } from './helpers.js';
 
 export function createTaskRouter(repo: TaskRepository, agentManager: AgentManager, projectRepo: ProjectRepository): Router {
@@ -54,8 +54,7 @@ export function createTaskRouter(repo: TaskRepository, agentManager: AgentManage
 
     const { autoRun } = req.body;
 
-    // autoRun: true — immediately start agent if columnId is in-progress
-    if (autoRun === true && task.columnId === 'in-progress') {
+    if (autoRun === true && (task.columnId === 'backlog' || task.columnId === 'in-progress')) {
       const agents = agentManager.getAvailableAgents();
       const agentInfo = agents.find(a => a.name === task.agentType);
       if (!agentInfo?.available) {
@@ -68,7 +67,11 @@ export function createTaskRouter(repo: TaskRepository, agentManager: AgentManage
         return;
       }
       await repo.requestRun(task.id, Date.now());
-      await startAgentForTask(task, repo, agentManager);
+      if (task.columnId === 'in-progress') {
+        await startAgentForTask(task, repo, agentManager);
+      } else if (task.columnId === 'backlog') {
+        await triggerAutomaticBacklogProgression(repo, task.projectId, agentManager);
+      }
       const latest = await repo.getById(task.id);
       res.status(201).json(latest || task);
       return;
@@ -183,6 +186,13 @@ export function createTaskRouter(repo: TaskRepository, agentManager: AgentManage
       }
     }
 
+    for (const projectId of new Set(created.map((task) => task.projectId))) {
+      await triggerAutomaticBacklogProgression(repo, projectId, agentManager);
+    }
+    for (let i = 0; i < created.length; i++) {
+      created[i] = await repo.getById(created[i].id) ?? created[i];
+    }
+
     res.status(201).json({ tasks: created });
   }));
 
@@ -269,7 +279,7 @@ export function createTaskRouter(repo: TaskRepository, agentManager: AgentManage
       return;
     }
 
-    const { title, description, priority, columnId, agentStatus, agentType, repoPath, branchName, baseBranch, useWorktree, archived, timeoutMinutes } = req.body;
+    const { title, description, priority, columnId, agentStatus, agentType, repoPath, branchName, baseBranch, useWorktree, archived, timeoutMinutes, autoRun } = req.body;
 
     if (title !== undefined && (typeof title !== 'string' || !title.trim())) {
       res.status(400).json({ error: 'title must be a non-empty string' });
@@ -305,6 +315,10 @@ export function createTaskRouter(repo: TaskRepository, agentManager: AgentManage
     }
     if (timeoutMinutes !== undefined && timeoutMinutes !== null && !isValidAgentTimeoutMinutes(timeoutMinutes)) {
       res.status(400).json({ error: `timeoutMinutes must be an integer between ${MIN_AGENT_TIMEOUT_MINUTES} and ${MAX_AGENT_TIMEOUT_MINUTES}` });
+      return;
+    }
+    if (autoRun !== undefined && typeof autoRun !== 'boolean') {
+      res.status(400).json({ error: 'autoRun must be a boolean' });
       return;
     }
     if (archived !== undefined) {
@@ -372,12 +386,24 @@ export function createTaskRouter(repo: TaskRepository, agentManager: AgentManage
       if (cleanup.status !== 'blocked') updates.worktreePath = undefined;
     }
 
-    const updated = await repo.update(task.id, updates);
+    let updated = await repo.update(task.id, updates);
     if (!updated) {
       res.status(500).json({ error: 'failed to update task' });
       return;
     }
     broadcastTaskUpdate(updated);
+    if (autoRun === true && (updated.columnId === 'backlog' || updated.columnId === 'in-progress')) {
+      const requested = await repo.requestRun(task.id, Date.now());
+      if (requested) {
+        updated = requested;
+        if (updated.columnId === 'in-progress') {
+          await startAgentForTask(updated, repo, agentManager);
+        } else if (updated.columnId === 'backlog') {
+          await triggerAutomaticBacklogProgression(repo, updated.projectId, agentManager);
+        }
+        updated = await repo.getById(task.id) ?? updated;
+      }
+    }
     if (columnId === 'done' && task.columnId !== 'done') {
       await triggerAutomaticDependentProgression(repo, updated, agentManager);
     }
