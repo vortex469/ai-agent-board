@@ -1006,14 +1006,15 @@ export class AgentManager {
             try {
               if (worktreePath) {
                 const commit = this.commitWorktreeChanges(task);
-                if (commit.committed) {
-                  this.emitEvent(task.id, {
-                    id: uuid(), taskId: task.id, type: 'output',
-                    content: `Committed worktree changes on ${task.branchName}: ${commit.commit}`,
-                    timestamp: Date.now(),
-                    metadata: { command: 'git commit' },
-                  });
+                if (!commit.committed) {
+                  throw new Error('Agent reported completion without repository changes. Coding tasks must modify and validate the managed worktree before they can complete.');
                 }
+                this.emitEvent(task.id, {
+                  id: uuid(), taskId: task.id, type: 'output',
+                  content: `Committed worktree changes on ${task.branchName}: ${commit.commit}`,
+                  timestamp: Date.now(),
+                  metadata: { command: 'git commit' },
+                });
               }
               const summary = extractTaskSummary(summaryBuffer);
               await this.eventRepo?.update(task.id, { summary });

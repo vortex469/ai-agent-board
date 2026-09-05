@@ -363,7 +363,10 @@ test('isolated npm workspace bootstrap runs after provisioning and before agent 
       assert.equal(existsSync(path.join(workingDirectory, 'node_modules', '.package-lock.json')), true);
       assert.equal(existsSync(path.join(workingDirectory, 'shared', 'dist', 'index.js')), true);
       return {
-        execute: async () => ({ status: 'complete' as const }),
+        execute: async () => {
+          writeFileSync(path.join(workingDirectory, 'agent-output.txt'), 'completed after bootstrap\n');
+          return { status: 'complete' as const };
+        },
         destroy: async () => {},
         abort: async () => {},
       };
