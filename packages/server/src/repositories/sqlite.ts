@@ -11,6 +11,7 @@ interface TaskRow {
   column_id: ColumnId;
   agent_status: AgentStatus;
   created_at: number;
+  sort_order: number | null;
   started_at: number | null;
   completed_at: number | null;
   repo_path: string | null;
@@ -39,6 +40,7 @@ function rowToTask(row: TaskRow): Task {
     columnId: row.column_id,
     agentStatus: row.agent_status,
     createdAt: row.created_at,
+    sortOrder: row.sort_order ?? row.created_at,
     startedAt: row.started_at ?? undefined,
     completedAt: row.completed_at ?? undefined,
     repoPath: row.repo_path ?? undefined,
@@ -92,16 +94,21 @@ export class SqliteTaskRepository implements TaskRepository {
 
   constructor(db: Database.Database) {
     this.db = db;
+    const cols = db.pragma('table_info(tasks)') as { name: string }[];
+    if (cols.length > 0 && !cols.some((column) => column.name === 'sort_order')) {
+      db.exec('ALTER TABLE tasks ADD COLUMN sort_order INTEGER');
+      db.exec('UPDATE tasks SET sort_order = created_at WHERE sort_order IS NULL');
+    }
     this.stmts = {
-      getAll: db.prepare('SELECT * FROM tasks WHERE project_id = ? AND archived = 0 AND group_id IS NULL ORDER BY created_at ASC'),
-      getAllIncludingArchived: db.prepare('SELECT * FROM tasks WHERE project_id = ? AND group_id IS NULL ORDER BY created_at ASC'),
+      getAll: db.prepare('SELECT * FROM tasks WHERE project_id = ? AND archived = 0 AND group_id IS NULL ORDER BY COALESCE(sort_order, created_at) ASC, created_at ASC'),
+      getAllIncludingArchived: db.prepare('SELECT * FROM tasks WHERE project_id = ? AND group_id IS NULL ORDER BY COALESCE(sort_order, created_at) ASC, created_at ASC'),
       getArchived: db.prepare('SELECT * FROM tasks WHERE project_id = ? AND archived = 1 ORDER BY created_at DESC'),
       getById: db.prepare('SELECT * FROM tasks WHERE id = ?'),
       insert: db.prepare(`
         INSERT INTO tasks (id, project_id, title, description, priority, column_id, agent_status, agent_type, created_at, started_at, completed_at,
-          repo_path, branch_name, base_branch, use_worktree, worktree_path, archived, group_id, group_order, summary, external_source, external_key, provenance, run_requested_at, run_claimed_at, timeout_minutes)
+          repo_path, branch_name, base_branch, use_worktree, worktree_path, archived, group_id, group_order, summary, external_source, external_key, provenance, run_requested_at, run_claimed_at, timeout_minutes, sort_order)
         VALUES (@id, @project_id, @title, @description, @priority, @column_id, @agent_status, @agent_type, @created_at, @started_at, @completed_at,
-          @repo_path, @branch_name, @base_branch, @use_worktree, @worktree_path, @archived, @group_id, @group_order, @summary, @external_source, @external_key, @provenance, @run_requested_at, @run_claimed_at, @timeout_minutes)
+          @repo_path, @branch_name, @base_branch, @use_worktree, @worktree_path, @archived, @group_id, @group_order, @summary, @external_source, @external_key, @provenance, @run_requested_at, @run_claimed_at, @timeout_minutes, @sort_order)
       `),
       update: db.prepare(`
         UPDATE tasks SET
@@ -120,7 +127,8 @@ export class SqliteTaskRepository implements TaskRepository {
           worktree_path = @worktree_path,
           archived = @archived,
           summary = @summary, run_requested_at = @run_requested_at, run_claimed_at = @run_claimed_at,
-          timeout_minutes = @timeout_minutes
+          timeout_minutes = @timeout_minutes,
+          sort_order = @sort_order
         WHERE id = @id
       `),
       delete: db.prepare('DELETE FROM tasks WHERE id = ?'),
@@ -172,6 +180,7 @@ export class SqliteTaskRepository implements TaskRepository {
       agent_status: task.agentStatus,
       agent_type: task.agentType ?? 'copilot',
       created_at: task.createdAt,
+      sort_order: task.sortOrder ?? task.createdAt,
       started_at: task.startedAt ?? null,
       completed_at: task.completedAt ?? null,
       repo_path: task.repoPath ?? null,
@@ -199,6 +208,24 @@ export class SqliteTaskRepository implements TaskRepository {
   async claimRun(id: string, at: number) { const staleBefore=at-30_000; const r=this.db.prepare("UPDATE tasks SET run_claimed_at=? WHERE id=? AND run_requested_at IS NOT NULL AND (run_claimed_at IS NULL OR run_claimed_at < ?) AND agent_status IN ('idle','planning')").run(at,id,staleBefore); return r.changes ? this.getById(id) : undefined; }
   async clearRun(id: string) { this.db.prepare('UPDATE tasks SET run_requested_at=NULL, run_claimed_at=NULL WHERE id=?').run(id); return this.getById(id); }
   async getPendingRuns(staleBefore = Date.now()-30_000) { return (this.db.prepare("SELECT * FROM tasks WHERE run_requested_at IS NOT NULL AND (run_claimed_at IS NULL OR run_claimed_at < ?) AND agent_status IN ('idle','planning') ORDER BY run_requested_at").all(staleBefore) as TaskRow[]).map(rowToTask); }
+
+  async reorderTasks(projectId: string, columnId: ColumnId, orderedTaskIds: string[], updatedAt: number): Promise<Task[]> {
+    return this.db.transaction(() => {
+      const uniqueIds = [...new Set(orderedTaskIds)];
+      const existing = (this.db.prepare(
+        'SELECT id FROM tasks WHERE project_id = ? AND column_id = ? AND archived = 0 AND group_id IS NULL'
+      ).all(projectId, columnId) as Array<{ id: string }>).map((row) => row.id);
+      const existingSet = new Set(existing);
+      if (uniqueIds.length !== existing.length || uniqueIds.some((id) => !existingSet.has(id))) {
+        throw new Error('orderedTaskIds must include every visible task in the target column exactly once');
+      }
+      const update = this.db.prepare('UPDATE tasks SET sort_order = ? WHERE id = ?');
+      uniqueIds.forEach((id, index) => update.run(updatedAt + index, id));
+      return (this.db.prepare(
+        'SELECT * FROM tasks WHERE project_id = ? AND column_id = ? AND archived = 0 AND group_id IS NULL ORDER BY COALESCE(sort_order, created_at), created_at'
+      ).all(projectId, columnId) as TaskRow[]).map(rowToTask);
+    })();
+  }
 
   async update(id: string, updates: Partial<Task>): Promise<Task | undefined> {
     return this.db.transaction(() => {
@@ -229,6 +256,7 @@ export class SqliteTaskRepository implements TaskRepository {
         archived: merged.archived ? 1 : 0,
         summary: merged.summary ?? null, run_requested_at: merged.runRequestedAt ?? null, run_claimed_at: merged.runClaimedAt ?? null,
         timeout_minutes: merged.timeoutMinutes ?? null,
+        sort_order: merged.sortOrder ?? merged.createdAt,
       });
       return merged;
   }

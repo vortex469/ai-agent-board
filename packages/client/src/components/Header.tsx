@@ -1,11 +1,11 @@
 import { useState, useRef, useEffect } from 'react';
-import { ArrowLeft, Kanban, Search, Archive, ArrowUpDown, Filter, Plus, X, Menu, ClipboardList } from 'lucide-react';
+import { ArrowLeft, Kanban, Search, Archive, ArrowUpDown, Filter, Plus, X, Menu, ClipboardList, PlayCircle } from 'lucide-react';
 import { ThemeToggle } from './ThemeToggle';
 import { FilterChips, type StatusFilter } from './FilterChips';
 import { useConnectionStatus } from '@/hooks/useConnectionStatus';
 import type { AgentType } from '@/types';
 
-type SortBy = 'title' | 'priority' | 'created' | 'status';
+type SortBy = 'manual' | 'title' | 'priority' | 'created' | 'status';
 type SortDir = 'asc' | 'desc';
 
 interface HeaderProps {
@@ -27,18 +27,21 @@ interface HeaderProps {
   onNewTask: () => void;
   onNewGroup: () => void;
   onRoadmapIntake: () => void;
+  autoRunEnabled: boolean;
+  onToggleAutoRun: () => void;
   title?: string;
   onBackToProjects?: () => void;
 }
 
 const SORT_OPTIONS: { value: SortBy; label: string }[] = [
+  { value: 'manual', label: 'Manual' },
   { value: 'title', label: 'Title' },
   { value: 'priority', label: 'Priority' },
   { value: 'created', label: 'Created' },
   { value: 'status', label: 'Status' },
 ];
 
-export function Header({ theme, toggleTheme, searchQuery, onSearchChange, showArchived, onToggleArchived, sortBy, sortDir, onSortByChange, onSortDirChange, activeAgentTypes, activeStatuses, onToggleAgentType, onToggleStatus, onClearFilters, onNewTask, onNewGroup, onRoadmapIntake, title = 'AI Agent Board', onBackToProjects }: HeaderProps) {
+export function Header({ theme, toggleTheme, searchQuery, onSearchChange, showArchived, onToggleArchived, sortBy, sortDir, onSortByChange, onSortDirChange, activeAgentTypes, activeStatuses, onToggleAgentType, onToggleStatus, onClearFilters, onNewTask, onNewGroup, onRoadmapIntake, autoRunEnabled, onToggleAutoRun, title = 'AI Agent Board', onBackToProjects }: HeaderProps) {
   const [showFilters, setShowFilters] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const mobileMenuSearchRef = useRef<HTMLInputElement>(null);
@@ -100,6 +103,20 @@ export function Header({ theme, toggleTheme, searchQuery, onSearchChange, showAr
 
           {/* Group 1: Create actions */}
           <div className="hidden lg:flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={onToggleAutoRun}
+              aria-pressed={autoRunEnabled}
+              aria-label={`Auto Run ${autoRunEnabled ? 'On' : 'Off'}`}
+              className={`flex items-center gap-1.5 h-8 rounded-lg border px-3 text-xs font-medium transition-colors ${
+                autoRunEnabled
+                  ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-400'
+                  : 'border-zinc-700 bg-zinc-800 text-zinc-300 hover:bg-zinc-700 hover:text-zinc-100'
+              }`}
+            >
+              <PlayCircle className="h-3.5 w-3.5 shrink-0" />
+              <span>Auto Run {autoRunEnabled ? 'On' : 'Off'}</span>
+            </button>
             <button
               onClick={onNewTask}
               className="flex items-center gap-1.5 h-8 rounded-lg bg-primary text-primary-foreground text-xs font-medium hover:bg-primary/90 transition-colors px-3"
@@ -239,6 +256,23 @@ export function Header({ theme, toggleTheme, searchQuery, onSearchChange, showAr
           </div>
 
           {/* New Task + New Group + Roadmap */}
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={onToggleAutoRun}
+              aria-pressed={autoRunEnabled}
+              aria-label={`Auto Run ${autoRunEnabled ? 'On' : 'Off'}`}
+              className={`flex flex-1 items-center justify-center gap-1.5 h-11 rounded-lg border text-xs font-medium transition-colors ${
+                autoRunEnabled
+                  ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-400'
+                  : 'border-zinc-700 bg-zinc-800 text-zinc-300 hover:bg-zinc-700 hover:text-zinc-100'
+              }`}
+            >
+              <PlayCircle className="h-3.5 w-3.5 shrink-0" />
+              Auto Run {autoRunEnabled ? 'On' : 'Off'}
+            </button>
+          </div>
+
           <div className="flex gap-2">
             <button
               onClick={() => { onNewTask(); setMobileMenuOpen(false); }}

@@ -14,6 +14,7 @@ interface ProjectRow {
   default_priority: string | null;
   default_base_branch: string | null;
   default_use_worktree: boolean | null;
+  auto_run_enabled: boolean;
   aliases: string;
 }
 
@@ -39,6 +40,7 @@ function rowToProject(row: ProjectRow, taskCounts?: ProjectTaskCounts): Project 
     defaultPriority: (row.default_priority ?? undefined) as Priority | undefined,
     defaultBaseBranch: row.default_base_branch ?? undefined,
     defaultUseWorktree: row.default_use_worktree === null ? undefined : row.default_use_worktree,
+    autoRunEnabled: row.auto_run_enabled,
     aliases: JSON.parse(row.aliases || '[]'),
     ...(taskCounts ? { taskCounts } : {}),
   };
@@ -84,6 +86,7 @@ export class PostgresProjectRepository implements ProjectRepository {
     defaultPriority?: Priority;
     defaultBaseBranch?: string;
     defaultUseWorktree?: boolean;
+    autoRunEnabled?: boolean;
     aliases?: string[];
     createdAt: number;
     updatedAt: number;
@@ -93,8 +96,8 @@ export class PostgresProjectRepository implements ProjectRepository {
       await client.query('BEGIN');
       const { rows } = await client.query<ProjectRow>(
         `INSERT INTO projects (id, name, repo_path, repo_url, is_default, created_at, updated_at,
-           default_agent_type, default_priority, default_base_branch, default_use_worktree, aliases)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+           default_agent_type, default_priority, default_base_branch, default_use_worktree, auto_run_enabled, aliases)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
          RETURNING *`,
         [
           input.id,
@@ -107,7 +110,9 @@ export class PostgresProjectRepository implements ProjectRepository {
           input.defaultAgentType ?? null,
           input.defaultPriority ?? null,
           input.defaultBaseBranch ?? null,
-          input.defaultUseWorktree ?? null, JSON.stringify(input.aliases ?? []),
+          input.defaultUseWorktree ?? null,
+          input.autoRunEnabled ?? false,
+          JSON.stringify(input.aliases ?? []),
         ],
       );
       await client.query('COMMIT');
@@ -128,6 +133,7 @@ export class PostgresProjectRepository implements ProjectRepository {
     defaultPriority?: Priority | null;
     defaultBaseBranch?: string | null;
     defaultUseWorktree?: boolean | null;
+    autoRunEnabled?: boolean;
     aliases?: string[];
     updatedAt: number;
   }): Promise<Project | undefined> {
@@ -143,8 +149,9 @@ export class PostgresProjectRepository implements ProjectRepository {
       const { rows: updatedRows } = await client.query<ProjectRow>(
         `UPDATE projects
          SET name = $1, repo_path = $2, repo_url = $3, is_default = $4, updated_at = $5,
-           default_agent_type = $6, default_priority = $7, default_base_branch = $8, default_use_worktree = $9, aliases=$10
-         WHERE id = $11
+           default_agent_type = $6, default_priority = $7, default_base_branch = $8, default_use_worktree = $9,
+           auto_run_enabled = $10, aliases=$11
+         WHERE id = $12
          RETURNING *`,
         [
           updates.name ?? existing.name,
@@ -155,7 +162,9 @@ export class PostgresProjectRepository implements ProjectRepository {
           updates.defaultAgentType === undefined ? existing.default_agent_type : updates.defaultAgentType,
           updates.defaultPriority === undefined ? existing.default_priority : updates.defaultPriority,
           updates.defaultBaseBranch === undefined ? existing.default_base_branch : updates.defaultBaseBranch,
-          updates.defaultUseWorktree === undefined ? existing.default_use_worktree : updates.defaultUseWorktree, updates.aliases === undefined ? existing.aliases : JSON.stringify(updates.aliases),
+          updates.defaultUseWorktree === undefined ? existing.default_use_worktree : updates.defaultUseWorktree,
+          updates.autoRunEnabled === undefined ? existing.auto_run_enabled : updates.autoRunEnabled,
+          updates.aliases === undefined ? existing.aliases : JSON.stringify(updates.aliases),
           id,
         ],
       );

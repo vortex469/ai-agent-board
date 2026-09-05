@@ -14,6 +14,7 @@ export interface ProjectRepository {
     defaultPriority?: Priority;
     defaultBaseBranch?: string;
     defaultUseWorktree?: boolean;
+    autoRunEnabled?: boolean;
     aliases?: string[];
     createdAt: number;
     updatedAt: number;
@@ -26,6 +27,7 @@ export interface ProjectRepository {
     defaultPriority?: Priority | null;
     defaultBaseBranch?: string | null;
     defaultUseWorktree?: boolean | null;
+    autoRunEnabled?: boolean;
     aliases?: string[];
     updatedAt: number;
   }): Promise<Project | undefined>;

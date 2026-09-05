@@ -25,6 +25,7 @@ export interface TaskRepository {
   claimRun(id: string, claimedAt: number): Promise<Task | undefined>;
   clearRun(id: string): Promise<Task | undefined>;
   getPendingRuns(staleBefore?: number): Promise<Task[]>;
+  reorderTasks(projectId: string, columnId: Task['columnId'], orderedTaskIds: string[], updatedAt: number): Promise<Task[]>;
   update(id: string, updates: Partial<Task>): Promise<Task | undefined>;
   delete(id: string): Promise<boolean>;
   count(): Promise<number>;

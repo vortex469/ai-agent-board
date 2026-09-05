@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, memo } from 'react';
 import { useDraggable } from '@dnd-kit/core';
+import { useDroppable } from '@dnd-kit/core';
 import { CSS } from '@dnd-kit/utilities';
 import {
   Clock,
@@ -57,6 +58,10 @@ function TaskCardComponent({ task, onClick, onEdit, onDelete, onArchive, onUnarc
       id: task.id,
       disabled: task.archived // Disable dragging for archived tasks
     });
+  const { setNodeRef: setDropNodeRef } = useDroppable({
+    id: task.id,
+    disabled: task.archived,
+  });
   const agentDisplay = task.agentType ? getAgentDisplay(task.agentType) : undefined;
 
   // Suppress click that fires immediately after a drag ends
@@ -94,7 +99,10 @@ function TaskCardComponent({ task, onClick, onEdit, onDelete, onArchive, onUnarc
 
   return (
     <div
-      ref={setNodeRef}
+      ref={(node) => {
+        setNodeRef(node);
+        setDropNodeRef(node);
+      }}
       style={style}
       {...attributes}
       className={cn(

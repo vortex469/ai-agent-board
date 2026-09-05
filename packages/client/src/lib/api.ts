@@ -79,6 +79,9 @@ export const api = {
   updateProject: (id: string, data: UpdateProjectRequest) =>
     request<Project>(`/projects/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(data) }),
 
+  tickProjectAutoRun: (id: string, orderedBacklogIds: string[]) =>
+    request<{ started: boolean; reason?: string; task?: Task }>(`/projects/${encodeURIComponent(id)}/auto-run/tick`, { method: 'POST', body: JSON.stringify({ orderedBacklogIds }) }),
+
   deleteProject: (id: string) =>
     request<void>(`/projects/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
@@ -109,6 +112,9 @@ export const api = {
 
   updateTask: (id: string, data: Partial<Task>) =>
     request<Task>(`/tasks/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+
+  reorderTasks: (data: { projectId?: string; columnId: ColumnId; orderedTaskIds: string[] }) =>
+    request<{ tasks: Task[] }>('/tasks/reorder', { method: 'POST', body: JSON.stringify(data) }),
 
   deleteTask: (id: string) =>
     request<void>(`/tasks/${id}`, { method: 'DELETE' }),
