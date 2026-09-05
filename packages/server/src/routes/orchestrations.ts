@@ -471,7 +471,7 @@ export function createOrchestrationsRouter(
     const reset = result.task;
     broadcastTaskUpdate(reset);
     queueMicrotask(() => {
-      void startAgentForTask(reset, repo, agents).catch((err) => {
+      void startAgentForTask(reset, repo, agents, projects).catch((err) => {
         console.error(`[orchestrations] failed to retry task ${task.id}:`, err);
       });
     });
@@ -623,7 +623,7 @@ export function createOrchestrationsRouter(
       const reset = aggregate.task;
       broadcastTaskUpdate(reset);
       if (autoStart) queueMicrotask(() => {
-        void startAgentForTask(reset, repo, agents).catch((err) => console.error(`[orchestrations] failed to continue task ${reset.id}:`, err));
+        void startAgentForTask(reset, repo, agents, projects).catch((err) => console.error(`[orchestrations] failed to continue task ${reset.id}:`, err));
       });
       const deepLink = taskLink(req, reset.projectId, reset.id);
       res.status(202).json({ task: reset, attempt: aggregate.attempt, continuation: true,
@@ -774,7 +774,7 @@ export function createOrchestrationsRouter(
     broadcastTaskUpdate(aggregate.task);
     if (autoStart) {
       queueMicrotask(() => {
-        void startAgentForTask(aggregate.task, repo, agents).catch((err) => {
+        void startAgentForTask(aggregate.task, repo, agents, projects).catch((err) => {
           console.error(`[orchestrations] failed to dispatch task ${aggregate.task.id}:`, err);
         });
       });

@@ -68,7 +68,7 @@ export function createTaskRouter(repo: TaskRepository, agentManager: AgentManage
       }
       await repo.requestRun(task.id, Date.now());
       if (task.columnId === 'in-progress') {
-        await startAgentForTask(task, repo, agentManager);
+        await startAgentForTask(task, repo, agentManager, projectRepo);
       } else if (task.columnId === 'backlog') {
         await triggerAutomaticBacklogProgression(repo, task.projectId, agentManager);
       }
@@ -179,7 +179,7 @@ export function createTaskRouter(repo: TaskRepository, agentManager: AgentManage
           );
           if (failed) created[i] = failed;
         } else {
-          await startAgentForTask(task, repo, agentManager);
+          await startAgentForTask(task, repo, agentManager, projectRepo);
           const latest = await repo.getById(task.id);
           if (latest) created[i] = latest;
         }
@@ -405,7 +405,7 @@ export function createTaskRouter(repo: TaskRepository, agentManager: AgentManage
       }
     }
     if (columnId === 'done' && task.columnId !== 'done') {
-      await triggerAutomaticDependentProgression(repo, updated, agentManager);
+      await triggerAutomaticDependentProgression(repo, updated, agentManager, projectRepo);
     }
     res.json(updated);
   }));

@@ -16,6 +16,7 @@ type Project = {
   defaultPriority?: string;
   defaultBaseBranch?: string;
   defaultUseWorktree?: boolean;
+  autoRunEnabled?: boolean;
 };
 
 type Task = {
@@ -50,6 +51,7 @@ async function createProject(
     defaultPriority?: string;
     defaultBaseBranch?: string;
     defaultUseWorktree?: boolean;
+    autoRunEnabled?: boolean;
   },
 ): Promise<Project> {
   const res = await request.post(`${API}/api/projects`, { data });
@@ -197,6 +199,40 @@ test.describe('Projects API', () => {
     expect(tasks).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: implicitTask.id, projectId: 'default' }),
     ]));
+  });
+
+  test('project Auto Run toggle is visible, persists, and reloads on the board', async ({ page, request }) => {
+    const repoPath = prepareTestRepo('projects-api-auto-run-toggle', { clean: true });
+    const project = await createProject(request, {
+      name: 'Auto Run Toggle Project',
+      repoPath,
+    });
+    createdProjectIds.push(project.id);
+    expect(project.autoRunEnabled).toBe(false);
+
+    await page.goto(`/projects/${project.id}`);
+    await waitForBoard(page);
+    const autoRunSwitch = page.getByRole('switch', { name: 'Auto Run OFF' });
+    await expect(autoRunSwitch).toBeVisible();
+    await autoRunSwitch.click();
+    await expect(page.getByRole('switch', { name: 'Auto Run ON' })).toBeVisible();
+
+    const enabledRes = await request.get(`${API}/api/projects/${project.id}`);
+    expect(enabledRes.status()).toBe(200);
+    expect(((await enabledRes.json()) as Project).autoRunEnabled).toBe(true);
+
+    await page.reload();
+    await waitForBoard(page);
+    await expect(page.getByRole('switch', { name: 'Auto Run ON' })).toBeVisible();
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(page.getByRole('switch', { name: 'Auto Run ON' })).toBeVisible();
+    await page.getByRole('switch', { name: 'Auto Run ON' }).click();
+    await expect(page.getByRole('switch', { name: 'Auto Run OFF' })).toBeVisible();
+
+    const disabledRes = await request.get(`${API}/api/projects/${project.id}`);
+    expect(disabledRes.status()).toBe(200);
+    expect(((await disabledRes.json()) as Project).autoRunEnabled).toBe(false);
   });
 
   test('rejects mismatched locked repo paths for tasks and groups', async ({ request }) => {

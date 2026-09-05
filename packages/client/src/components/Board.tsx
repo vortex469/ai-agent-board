@@ -13,6 +13,7 @@ import {
   CollisionDetection,
 } from '@dnd-kit/core';
 import { motion } from 'framer-motion';
+import { Zap } from 'lucide-react';
 import type { Task, ColumnId, Column as ColumnType } from '@/types';
 import { VALID_TRANSITIONS } from '@/types';
 import { columns as baseColumns } from '@/lib/columns';
@@ -45,6 +46,9 @@ interface BoardProps {
   onStopGroup?: (id: string) => void;
   onDeleteGroup?: (id: string) => void;
   onEditGroup?: (group: TaskGroupWithChildren) => void;
+  autoRunEnabled?: boolean;
+  autoRunUpdating?: boolean;
+  onToggleAutoRun?: () => void;
 }
 
 // Use pointerWithin first (ideal for dropping into columns),
@@ -76,6 +80,9 @@ export function Board({
   onStopGroup,
   onDeleteGroup,
   onEditGroup,
+  autoRunEnabled = false,
+  autoRunUpdating = false,
+  onToggleAutoRun,
 }: BoardProps) {
   const [activeTask, setActiveTask] = useState<Task | null>(null);
 
@@ -231,6 +238,47 @@ export function Board({
       onDragCancel={handleDragCancel}
     >
       <div className="flex h-full min-h-0 flex-col">
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border/60 bg-background px-3 py-2 lg:px-6">
+          <div className="flex min-w-0 items-center gap-2">
+            <Zap className={cn('h-4 w-4 shrink-0', autoRunEnabled ? 'text-emerald-500' : 'text-muted-foreground')} />
+            <div className="min-w-0">
+              <p className="truncate text-xs font-semibold text-foreground">Auto Run</p>
+              <p className="truncate text-[11px] text-muted-foreground">
+                {autoRunEnabled ? 'ON: starts queued roadmap cards' : 'OFF: queued cards wait'}
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={autoRunEnabled}
+            aria-label={`Auto Run ${autoRunEnabled ? 'ON' : 'OFF'}`}
+            disabled={!onToggleAutoRun || autoRunUpdating}
+            onClick={onToggleAutoRun}
+            className={cn(
+              'flex h-9 shrink-0 items-center gap-2 rounded-lg border px-2.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60',
+              autoRunEnabled
+                ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
+                : 'border-border bg-card text-muted-foreground hover:bg-accent hover:text-foreground',
+            )}
+          >
+            <span
+              aria-hidden="true"
+              className={cn(
+                'relative h-4 w-7 rounded-full transition-colors',
+                autoRunEnabled ? 'bg-emerald-500' : 'bg-muted-foreground/40',
+              )}
+            >
+              <span
+                className={cn(
+                  'absolute top-0.5 h-3 w-3 rounded-full bg-white transition-transform',
+                  autoRunEnabled ? 'translate-x-3.5' : 'translate-x-0.5',
+                )}
+              />
+            </span>
+            {autoRunEnabled ? 'ON' : 'OFF'}
+          </button>
+        </div>
         <RoadmapProgress tasks={progressTasks ?? tasks} groups={progressGroups ?? groups} />
 
         {/*

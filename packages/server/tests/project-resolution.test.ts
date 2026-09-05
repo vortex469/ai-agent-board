@@ -10,23 +10,26 @@ const rows = [
     id: 'Project-Exact-ID', name: 'AgentMic', repo_path: '/root/projects/agent-mic',
     repo_url: 'https://example.test/agent-mic.git', is_default: false, created_at: '1', updated_at: '1',
     default_agent_type: null, default_priority: null, default_base_branch: null,
-    default_use_worktree: null, aliases: JSON.stringify(['voice']),
+    default_use_worktree: null, auto_run_enabled: false, aliases: JSON.stringify(['voice']),
   },
   {
     id: 'other-id', name: 'project-exact-id', repo_path: '/other', repo_url: null,
     is_default: false, created_at: '2', updated_at: '2', default_agent_type: null,
-    default_priority: null, default_base_branch: null, default_use_worktree: null, aliases: '[]',
+    default_priority: null, default_base_branch: null, default_use_worktree: null,
+    auto_run_enabled: false, aliases: '[]',
   },
   {
     id: 'duplicate-one', name: 'Shared Project', repo_path: '/duplicate-one', repo_url: null,
     is_default: false, created_at: '3', updated_at: '3', default_agent_type: null,
     default_priority: null, default_base_branch: null, default_use_worktree: null,
+    auto_run_enabled: false,
     aliases: JSON.stringify(['shared-alias']),
   },
   {
     id: 'duplicate-two', name: 'shared project', repo_path: '/duplicate-two', repo_url: null,
     is_default: false, created_at: '4', updated_at: '4', default_agent_type: null,
     default_priority: null, default_base_branch: null, default_use_worktree: null,
+    auto_run_enabled: false,
     aliases: JSON.stringify(['SHARED-ALIAS']),
   },
 ];
@@ -37,14 +40,14 @@ function sqliteRepository(): { repository: SqliteProjectRepository; close(): voi
     CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, repo_path TEXT, repo_url TEXT,
       is_default INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
       default_agent_type TEXT, default_priority TEXT, default_base_branch TEXT,
-      default_use_worktree INTEGER, aliases TEXT NOT NULL);
+      default_use_worktree INTEGER, auto_run_enabled INTEGER NOT NULL DEFAULT 0, aliases TEXT NOT NULL);
     CREATE TABLE tasks (project_id TEXT, column_id TEXT, archived INTEGER, group_id TEXT);
     CREATE TABLE task_groups (project_id TEXT, column_id TEXT, archived INTEGER);
   `);
   const insert = db.prepare(`INSERT INTO projects VALUES
     (@id,@name,@repo_path,@repo_url,@is_default,@created_at,@updated_at,@default_agent_type,
-     @default_priority,@default_base_branch,@default_use_worktree,@aliases)`);
-  for (const row of rows) insert.run({ ...row, is_default: 0 });
+     @default_priority,@default_base_branch,@default_use_worktree,@auto_run_enabled,@aliases)`);
+  for (const row of rows) insert.run({ ...row, is_default: 0, auto_run_enabled: row.auto_run_enabled ? 1 : 0 });
   return { repository: new SqliteProjectRepository(db), close: () => db.close() };
 }
 
@@ -77,4 +80,35 @@ test('SQLite resolves only exact ids, names, and aliases', async () => {
 
 test('PostgreSQL resolves only exact ids, names, and aliases', async () => {
   await assertResolutionContract(postgresRepository());
+});
+
+test('SQLite persists project Auto Run setting across reads and updates', async () => {
+  const db = new Database(':memory:');
+  db.exec(`
+    CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, repo_path TEXT, repo_url TEXT,
+      is_default INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+      default_agent_type TEXT, default_priority TEXT, default_base_branch TEXT,
+      default_use_worktree INTEGER, auto_run_enabled INTEGER NOT NULL DEFAULT 0, aliases TEXT NOT NULL);
+    CREATE TABLE tasks (project_id TEXT, column_id TEXT, archived INTEGER, group_id TEXT);
+    CREATE TABLE task_groups (project_id TEXT, column_id TEXT, archived INTEGER);
+  `);
+  const repository = new SqliteProjectRepository(db);
+  try {
+    const created = await repository.create({
+      id: 'auto-run-project',
+      name: 'Auto Run Project',
+      autoRunEnabled: true,
+      aliases: [],
+      createdAt: 10,
+      updatedAt: 10,
+    });
+    assert.equal(created.autoRunEnabled, true);
+    assert.equal((await repository.getById('auto-run-project'))?.autoRunEnabled, true);
+
+    const updated = await repository.update('auto-run-project', { autoRunEnabled: false, updatedAt: 11 });
+    assert.equal(updated?.autoRunEnabled, false);
+    assert.equal((await repository.getById('auto-run-project'))?.autoRunEnabled, false);
+  } finally {
+    db.close();
+  }
 });

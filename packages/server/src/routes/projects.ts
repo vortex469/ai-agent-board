@@ -28,6 +28,7 @@ import {
   normalizeRepoUrl,
   paramId,
   parseGitRepoUrl,
+  startNextEligibleProjectAutoRunTask,
   validateRepoPath,
   type ParsedRepoUrl,
 } from './helpers.js';
@@ -275,6 +276,9 @@ export function createProjectsRouter(
     if (repoPath !== undefined && typeof repoPath !== 'string') {
       res.status(400).json({ error: 'repoPath must be a string' }); return;
     }
+    if (req.body.autoRunEnabled !== undefined && typeof req.body.autoRunEnabled !== 'boolean') {
+      res.status(400).json({ error: 'autoRunEnabled must be a boolean' }); return;
+    }
 
     let expandedRepoPath: string | undefined;
     let storedRepoUrl: string | undefined;
@@ -311,7 +315,9 @@ export function createProjectsRouter(
       defaultAgentType: defaults.defaultAgentType ?? undefined,
       defaultPriority: defaults.defaultPriority ?? undefined,
       defaultBaseBranch: defaults.defaultBaseBranch ?? undefined,
-      defaultUseWorktree: defaults.defaultUseWorktree ?? undefined, aliases,
+      defaultUseWorktree: defaults.defaultUseWorktree ?? undefined,
+      autoRunEnabled: req.body.autoRunEnabled === true,
+      aliases,
       createdAt: now,
       updatedAt: now,
     });
@@ -335,6 +341,7 @@ export function createProjectsRouter(
       defaultPriority?: Priority | null;
       defaultBaseBranch?: string | null;
       defaultUseWorktree?: boolean | null;
+      autoRunEnabled?: boolean;
       aliases?: string[];
       updatedAt: number;
     } = {
@@ -401,11 +408,20 @@ export function createProjectsRouter(
     const parsedDefaults = parseProjectDefaults(req.body, true);
     if (typeof parsedDefaults === 'string') { res.status(400).json({ error: parsedDefaults }); return; }
     Object.assign(updates, parsedDefaults);
+    if (req.body.autoRunEnabled !== undefined) {
+      if (typeof req.body.autoRunEnabled !== 'boolean') {
+        res.status(400).json({ error: 'autoRunEnabled must be a boolean' }); return;
+      }
+      updates.autoRunEnabled = req.body.autoRunEnabled;
+    }
     if (req.body.aliases !== undefined) { const aliases=parseAliases(req.body.aliases); if (typeof aliases === 'string') { res.status(400).json({error:aliases}); return; } updates.aliases=aliases; }
 
     const updated = await projectRepo.update(id, updates);
     if (!updated) { res.status(404).json({ error: 'project not found' }); return; }
     broadcastProjectUpdate(updated);
+    if (updates.autoRunEnabled === true) {
+      await startNextEligibleProjectAutoRunTask(taskRepo, projectRepo, updated.id, agentManager);
+    }
     res.json(updated);
   }));
 

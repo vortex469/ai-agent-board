@@ -52,7 +52,7 @@ const attempt = (id: string, taskId: string, key = id): ExecutionAttempt => ({
 
 const nextTurn = () => new Promise<void>((resolve) => setImmediate(resolve));
 
-const project: Project = { id: 'project-a', name: 'Project A', aliases: ['alpha'], repoPath: '/tmp/agentboard-test-repo', isDefault: false, createdAt: 1, updatedAt: 1 };
+const project: Project = { id: 'project-a', name: 'Project A', aliases: ['alpha'], repoPath: '/tmp/agentboard-test-repo', isDefault: false, createdAt: 1, updatedAt: 1, autoRunEnabled: true };
 const projects = {
   getById: async (id: string) => id === project.id ? project : undefined,
   resolve: async (ref: string) => ['project-a', 'Project A', 'alpha'].some((v) => v.toLowerCase() === ref.trim().toLowerCase()) ? [project] : [],
