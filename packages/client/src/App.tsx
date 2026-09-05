@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { X } from 'lucide-react';
 import type { Task, AgentType, Priority, ColumnId, Project } from '@/types';
@@ -11,6 +11,7 @@ import { useTaskGroups } from '@/hooks/useTaskGroups';
 import { PRIORITY_WEIGHT } from '@/lib/priority-config';
 import { slugify } from '@/lib/utils';
 import { SK_SORT_BY, SK_SORT_DIR, SK_FILTER_AGENTS, SK_FILTER_STATUSES } from '@/lib/storage-keys';
+import { api } from '@/lib/api';
 import { Header } from '@/components/Header';
 import type { StatusFilter } from '@/components/FilterChips';
 import { statusFilterToStatuses } from '@/components/FilterChips';
@@ -46,15 +47,15 @@ function BoardPage({
   theme,
   toggleTheme,
   onBackToProjects,
-  initialTaskId,
   onUpdateProject,
+  initialTaskId,
 }: {
   project: Project;
   theme: 'dark' | 'light';
   toggleTheme: () => void;
   onBackToProjects: () => void;
-  initialTaskId?: string;
   onUpdateProject: (id: string, updates: { autoRunEnabled?: boolean }) => Promise<Project | undefined>;
+  initialTaskId?: string;
 }) {
   const lockedRepoPath = project.repoPath;
   const projectDefaults = {
@@ -63,7 +64,7 @@ function BoardPage({
     defaultBaseBranch: project.defaultBaseBranch,
     defaultUseWorktree: project.defaultUseWorktree,
   };
-  const { tasks, error, clearError, showArchived, setShowArchived, addTask, addTasksBatch, updateTask, moveTask, runTask, stopTask, deleteTask, archiveTask, unarchiveTask, configureAndRunTask, createPR, mergeLocal, cleanupWorktree } = useTasks(project.id);
+  const { tasks, error, clearError, showArchived, setShowArchived, addTask, addTasksBatch, updateTask, moveTask, reorderBacklogTasks, runTask, stopTask, deleteTask, archiveTask, unarchiveTask, configureAndRunTask, createPR, mergeLocal, cleanupWorktree } = useTasks(project.id);
   const { groups, createGroup, runGroup, stopGroup, deleteGroup, updateGroup, refreshGroup } = useTaskGroups(project.id);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [roadmapDialogOpen, setRoadmapDialogOpen] = useState(false);
@@ -78,8 +79,8 @@ function BoardPage({
   const [searchQuery, setSearchQuery] = useState('');
   const [deletingTask, setDeletingTask] = useState<Task | null>(null);
   const [deletingGroupId, setDeletingGroupId] = useState<string | null>(null);
-  const [sortBy, setSortBy] = useState<'title' | 'priority' | 'created' | 'status'>(
-    () => (localStorage.getItem(SK_SORT_BY) as 'title' | 'priority' | 'created' | 'status') || 'title'
+  const [sortBy, setSortBy] = useState<'manual' | 'title' | 'priority' | 'created' | 'status'>(
+    () => (localStorage.getItem(SK_SORT_BY) as 'manual' | 'title' | 'priority' | 'created' | 'status') || 'manual'
   );
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>(
     () => (localStorage.getItem(SK_SORT_DIR) as 'asc' | 'desc') || 'asc'
@@ -187,6 +188,8 @@ function BoardPage({
     switch (sortBy) {
       case 'title':
         return dir * a.title.localeCompare(b.title);
+      case 'manual':
+        return dir * ((a.sortOrder ?? a.createdAt) - (b.sortOrder ?? b.createdAt));
       case 'priority':
         return dir * ((PRIORITY_WEIGHT[a.priority] ?? 2) - (PRIORITY_WEIGHT[b.priority] ?? 2));
       case 'created':
@@ -202,6 +205,48 @@ function BoardPage({
     (columnId: ColumnId) => filteredTasks.filter((t) => t.columnId === columnId).sort(sortTasks),
     [filteredTasks, sortTasks]
   );
+
+  const visibleBacklogTasks = useMemo(
+    () => getFilteredTasksByColumn('backlog'),
+    [getFilteredTasksByColumn],
+  );
+  const visibleBacklogIds = useMemo(() => visibleBacklogTasks.map((task) => task.id), [visibleBacklogTasks]);
+  const autoRunTickKeyRef = useRef<string>('');
+
+  useEffect(() => {
+    if (!project.autoRunEnabled) {
+      autoRunTickKeyRef.current = '';
+      return;
+    }
+    const hasRunningTask = tasks.some((task) => task.agentStatus === 'planning' || task.agentStatus === 'executing');
+    if (hasRunningTask) return;
+    const topTask = visibleBacklogTasks[0];
+    if (!topTask) return;
+    const tickKey = `${project.id}:${topTask.id}:${topTask.agentStatus}:${visibleBacklogIds.join(',')}`;
+    if (autoRunTickKeyRef.current === tickKey) return;
+    autoRunTickKeyRef.current = tickKey;
+    void api.tickProjectAutoRun(project.id, visibleBacklogIds).catch((err) => {
+      console.error('[auto-run] tick failed:', err);
+    });
+  }, [project.id, project.autoRunEnabled, tasks, visibleBacklogTasks, visibleBacklogIds]);
+
+  const handleToggleProjectAutoRun = useCallback(() => {
+    void onUpdateProject(project.id, { autoRunEnabled: !project.autoRunEnabled });
+  }, [onUpdateProject, project.id, project.autoRunEnabled]);
+
+  const handleReorderBacklog = useCallback((orderedTaskIds: string[]) => {
+    setSortBy('manual');
+    const visibleSet = new Set(visibleBacklogIds);
+    const fullBacklog = tasks
+      .filter((task) => task.columnId === 'backlog' && !task.archived && !task.groupId)
+      .sort((a, b) => (a.sortOrder ?? a.createdAt) - (b.sortOrder ?? b.createdAt));
+    let visibleIndex = 0;
+    const fullOrder = fullBacklog.map((task) => {
+      if (!visibleSet.has(task.id)) return task.id;
+      return orderedTaskIds[visibleIndex++] ?? task.id;
+    });
+    return reorderBacklogTasks(fullOrder);
+  }, [reorderBacklogTasks, tasks, visibleBacklogIds]);
 
   const handleToggleAgentType = useCallback((agentType: AgentType) => {
     setActiveAgentTypes((prev) =>
@@ -416,6 +461,8 @@ function BoardPage({
         onNewTask={handleOpenDialog}
         onNewGroup={handleOpenGroupDialog}
         onRoadmapIntake={handleOpenRoadmapDialog}
+        autoRunEnabled={Boolean(project.autoRunEnabled)}
+        onToggleAutoRun={handleToggleProjectAutoRun}
       />
 
       <main className="min-h-0 flex-1 overflow-hidden">
@@ -426,6 +473,7 @@ function BoardPage({
           progressGroups={groups}
           getTasksByColumn={getFilteredTasksByColumn}
           onMoveTask={moveTask}
+          onReorderBacklog={handleReorderBacklog}
           onTaskClick={handleTaskClick}
           onEditTask={handleEditTask}
           onDeleteTask={handleDeleteTask}
@@ -645,8 +693,8 @@ export function App() {
       theme={theme}
       toggleTheme={toggleTheme}
       onBackToProjects={() => navigate('/projects')}
-      initialTaskId={route.view === 'board' ? route.taskId : undefined}
       onUpdateProject={updateProject}
+      initialTaskId={route.view === 'board' ? route.taskId : undefined}
     />
   );
 }

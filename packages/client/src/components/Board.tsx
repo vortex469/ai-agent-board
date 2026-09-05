@@ -32,6 +32,7 @@ interface BoardProps {
   progressGroups?: TaskGroupWithChildren[];
   getTasksByColumn: (columnId: ColumnId) => Task[];
   onMoveTask: (taskId: string, targetColumn: ColumnId) => void;
+  onReorderBacklog?: (orderedTaskIds: string[]) => void;
   onTaskClick: (task: Task) => void;
   onEditTask?: (task: Task) => void;
   onDeleteTask?: (task: Task) => void;
@@ -66,6 +67,7 @@ export function Board({
   progressGroups,
   getTasksByColumn,
   onMoveTask,
+  onReorderBacklog,
   onTaskClick,
   onEditTask,
   onDeleteTask,
@@ -210,8 +212,20 @@ export function Board({
       // Don't allow dropping into archived column
       if ((targetColumn as string) === 'archived') return;
 
+      if (targetColumn === draggedTask.columnId) {
+        if (targetColumn !== 'backlog' || !onReorderBacklog || isColumn) return;
+        const backlogTasks = getTasksForColumn('backlog');
+        const fromIndex = backlogTasks.findIndex((task) => task.id === taskId);
+        const toIndex = backlogTasks.findIndex((task) => task.id === overId);
+        if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return;
+        const next = [...backlogTasks];
+        const [moved] = next.splice(fromIndex, 1);
+        next.splice(toIndex, 0, moved);
+        onReorderBacklog(next.map((task) => task.id));
+        return;
+      }
+
       // Validate transition before moving
-      if (targetColumn === draggedTask.columnId) return;
       if (!VALID_TRANSITIONS[draggedTask.columnId]?.includes(targetColumn)) return;
 
       onMoveTask(taskId, targetColumn);
@@ -221,7 +235,7 @@ export function Board({
         onDropInProgress(draggedTask);
       }
     },
-    [onMoveTask, onDropInProgress, tasks, columns]
+    [onMoveTask, onReorderBacklog, onDropInProgress, tasks, columns, getTasksForColumn]
   );
 
   const handleDragCancel = useCallback(() => {

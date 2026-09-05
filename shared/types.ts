@@ -19,6 +19,7 @@ export interface Task {
   columnId: ColumnId;
   agentStatus: AgentStatus;
   createdAt: number;
+  sortOrder?: number;
   startedAt?: number;
   completedAt?: number;
   repoPath?: string;

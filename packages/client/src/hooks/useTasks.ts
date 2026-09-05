@@ -118,6 +118,28 @@ export function useTasks(projectId = 'default') {
       });
   }, [showArchived, projectId, runTask]);
 
+  const reorderBacklogTasks = useCallback(async (orderedTaskIds: string[]) => {
+    const priorTasks = tasks;
+    const order = new Map(orderedTaskIds.map((id, index) => [id, index]));
+    setTasks((prev) => [...prev].sort((a, b) => {
+      const aOrder = order.get(a.id);
+      const bOrder = order.get(b.id);
+      if (aOrder !== undefined && bOrder !== undefined) return aOrder - bOrder;
+      if (aOrder !== undefined) return -1;
+      if (bOrder !== undefined) return 1;
+      return (a.sortOrder ?? a.createdAt) - (b.sortOrder ?? b.createdAt);
+    }));
+    try {
+      const result = await api.reorderTasks({ projectId, columnId: 'backlog', orderedTaskIds });
+      setTasks((prev) => prev.map((task) => result.tasks.find((updated) => updated.id === task.id) ?? task));
+      return result.tasks;
+    } catch (err) {
+      setTasks(priorTasks);
+      setError(`Failed to reorder backlog: ${(err as Error).message}`);
+      return undefined;
+    }
+  }, [projectId, tasks]);
+
   const configureAndRunTask = useCallback(async (
     id: string,
     config: { repoPath: string; branchName: string; baseBranch: string; useWorktree: boolean; agentType?: AgentType }
@@ -210,5 +232,5 @@ export function useTasks(projectId = 'default') {
 
   const clearError = useCallback(() => setError(null), []);
 
-  return { tasks, error, clearError, showArchived, setShowArchived, addTask, addTasksBatch, updateTask, moveTask, runTask, stopTask, deleteTask, archiveTask, unarchiveTask, configureAndRunTask, createPR, mergeLocal, cleanupWorktree };
+  return { tasks, error, clearError, showArchived, setShowArchived, addTask, addTasksBatch, updateTask, moveTask, reorderBacklogTasks, runTask, stopTask, deleteTask, archiveTask, unarchiveTask, configureAndRunTask, createPR, mergeLocal, cleanupWorktree };
 }

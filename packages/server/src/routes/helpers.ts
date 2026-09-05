@@ -536,6 +536,7 @@ export function buildTask(body: Record<string, any>): Task {
     agentStatus: 'idle',
     agentType: agentType || 'copilot',
     createdAt: typeof body.createdAt === 'number' ? body.createdAt : Date.now(),
+    sortOrder: typeof body.sortOrder === 'number' ? body.sortOrder : undefined,
     repoPath: typeof repoPath === 'string' ? expandTilde(repoPath) : undefined,
     branchName: branchName || undefined,
     baseBranch: baseBranch || undefined,

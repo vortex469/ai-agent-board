@@ -28,6 +28,7 @@ interface TaskRow {
   external_source: string | null; external_key: string | null; provenance: string | null;
   run_requested_at: string | null; run_claimed_at: string | null;
   timeout_minutes: number | null;
+  sort_order: string | null;
 }
 
 function rowToTask(row: TaskRow): Task {
@@ -61,6 +62,7 @@ function rowToTask(row: TaskRow): Task {
     columnId: row.column_id as ColumnId,
     agentStatus: row.agent_status as AgentStatus,
     createdAt: Number(row.created_at),
+    sortOrder: row.sort_order != null ? Number(row.sort_order) : Number(row.created_at),
     startedAt: row.started_at != null ? Number(row.started_at) : undefined,
     completedAt: row.completed_at != null ? Number(row.completed_at) : undefined,
     repoPath: row.repo_path ?? undefined,
@@ -104,8 +106,8 @@ export class PostgresTaskRepository implements TaskRepository {
 
   async getAll(includeArchived = false, projectId = 'default'): Promise<Task[]> {
     const query = includeArchived
-      ? 'SELECT * FROM tasks WHERE project_id = $1 AND group_id IS NULL ORDER BY created_at ASC'
-      : 'SELECT * FROM tasks WHERE project_id = $1 AND archived = FALSE AND group_id IS NULL ORDER BY created_at ASC';
+      ? 'SELECT * FROM tasks WHERE project_id = $1 AND group_id IS NULL ORDER BY COALESCE(sort_order, created_at) ASC, created_at ASC'
+      : 'SELECT * FROM tasks WHERE project_id = $1 AND archived = FALSE AND group_id IS NULL ORDER BY COALESCE(sort_order, created_at) ASC, created_at ASC';
     const { rows } = await this.pool.query<TaskRow>(query, [projectId]);
     return rows.map(rowToTask);
   }
@@ -134,8 +136,8 @@ export class PostgresTaskRepository implements TaskRepository {
     await this.pool.query(
       `INSERT INTO tasks (id, project_id, title, description, priority, column_id, agent_status, agent_type,
         created_at, started_at, completed_at, repo_path, branch_name, base_branch, use_worktree, worktree_path, archived,
-        group_id, group_order, summary, external_source, external_key, provenance, run_requested_at, run_claimed_at, timeout_minutes)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)`,
+        group_id, group_order, summary, external_source, external_key, provenance, run_requested_at, run_claimed_at, timeout_minutes, sort_order)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)`,
       [
         task.id,
         task.projectId,
@@ -156,7 +158,7 @@ export class PostgresTaskRepository implements TaskRepository {
         task.archived ?? false,
         task.groupId ?? null,
         task.groupOrder ?? null,
-        task.summary ?? null, task.externalSource ?? null, task.externalKey ?? null, task.provenance ? JSON.stringify(task.provenance) : null, task.runRequestedAt ?? null, task.runClaimedAt ?? null, task.timeoutMinutes ?? null,
+        task.summary ?? null, task.externalSource ?? null, task.externalKey ?? null, task.provenance ? JSON.stringify(task.provenance) : null, task.runRequestedAt ?? null, task.runClaimedAt ?? null, task.timeoutMinutes ?? null, task.sortOrder ?? task.createdAt,
       ]
     );
     return task;
@@ -171,6 +173,37 @@ export class PostgresTaskRepository implements TaskRepository {
   async claimRun(id:string,at:number) { const staleBefore=at-30_000; const {rows}=await this.pool.query<TaskRow>("UPDATE tasks SET run_claimed_at=$1 WHERE id=$2 AND run_requested_at IS NOT NULL AND (run_claimed_at IS NULL OR run_claimed_at < $3) AND agent_status IN ('idle','planning') RETURNING *",[at,id,staleBefore]); return rows[0]?rowToTask(rows[0]):undefined; }
   async clearRun(id:string) { const {rows}=await this.pool.query<TaskRow>('UPDATE tasks SET run_requested_at=NULL,run_claimed_at=NULL WHERE id=$1 RETURNING *',[id]); return rows[0]?rowToTask(rows[0]):undefined; }
   async getPendingRuns(staleBefore=Date.now()-30_000) { const {rows}=await this.pool.query<TaskRow>("SELECT * FROM tasks WHERE run_requested_at IS NOT NULL AND (run_claimed_at IS NULL OR run_claimed_at < $1) AND agent_status IN ('idle','planning') ORDER BY run_requested_at",[staleBefore]); return rows.map(rowToTask); }
+
+  async reorderTasks(projectId: string, columnId: ColumnId, orderedTaskIds: string[], updatedAt: number): Promise<Task[]> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const uniqueIds = [...new Set(orderedTaskIds)];
+      const { rows: existingRows } = await client.query<{ id: string }>(
+        'SELECT id FROM tasks WHERE project_id = $1 AND column_id = $2 AND archived = FALSE AND group_id IS NULL FOR UPDATE',
+        [projectId, columnId],
+      );
+      const existing = existingRows.map((row) => row.id);
+      const existingSet = new Set(existing);
+      if (uniqueIds.length !== existing.length || uniqueIds.some((id) => !existingSet.has(id))) {
+        throw new Error('orderedTaskIds must include every visible task in the target column exactly once');
+      }
+      for (let index = 0; index < uniqueIds.length; index++) {
+        await client.query('UPDATE tasks SET sort_order = $1 WHERE id = $2', [updatedAt + index, uniqueIds[index]]);
+      }
+      const { rows } = await client.query<TaskRow>(
+        'SELECT * FROM tasks WHERE project_id = $1 AND column_id = $2 AND archived = FALSE AND group_id IS NULL ORDER BY COALESCE(sort_order, created_at), created_at',
+        [projectId, columnId],
+      );
+      await client.query('COMMIT');
+      return rows.map(rowToTask);
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
 
   async update(id: string, updates: Partial<Task>): Promise<Task | undefined> {
     const client = await this.pool.connect();
@@ -192,8 +225,8 @@ export class PostgresTaskRepository implements TaskRepository {
           agent_status = $5, agent_type = $6, started_at = $7, completed_at = $8,
           repo_path = $9, branch_name = $10, base_branch = $11, use_worktree = $12,
           worktree_path = $13, archived = $14, summary = $15, run_requested_at=$16, run_claimed_at=$17,
-          timeout_minutes=$18
-        WHERE id = $19`,
+          timeout_minutes=$18, sort_order=$19
+        WHERE id = $20`,
         [
           merged.title,
           merged.description,
@@ -209,7 +242,7 @@ export class PostgresTaskRepository implements TaskRepository {
           merged.useWorktree ?? null,
           merged.worktreePath ?? null,
           merged.archived ?? false,
-          merged.summary ?? null, merged.runRequestedAt ?? null, merged.runClaimedAt ?? null, merged.timeoutMinutes ?? null,
+          merged.summary ?? null, merged.runRequestedAt ?? null, merged.runClaimedAt ?? null, merged.timeoutMinutes ?? null, merged.sortOrder ?? merged.createdAt,
           id,
         ]
       );

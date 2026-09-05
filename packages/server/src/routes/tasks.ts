@@ -31,6 +31,24 @@ export function createTaskRouter(repo: TaskRepository, agentManager: AgentManage
     res.json(await repo.getArchivedTasks(project.id));
   }));
 
+  router.post('/reorder', asyncHandler(async (req: Request, res: Response) => {
+    const project = await getProjectForRequest(projectRepo, req.body.projectId);
+    if (!project) { res.status(400).json({ error: 'projectId is invalid' }); return; }
+    if (req.body.columnId !== 'backlog') {
+      res.status(400).json({ error: 'only backlog reorder is supported' }); return;
+    }
+    if (!Array.isArray(req.body.orderedTaskIds) || req.body.orderedTaskIds.some((item: unknown) => typeof item !== 'string')) {
+      res.status(400).json({ error: 'orderedTaskIds must be an array of task ids' }); return;
+    }
+    try {
+      const ordered = await repo.reorderTasks(project.id, 'backlog', req.body.orderedTaskIds, Date.now());
+      for (const task of ordered) broadcastTaskUpdate(task);
+      res.json({ tasks: ordered });
+    } catch (err: unknown) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'failed to reorder tasks' });
+    }
+  }));
+
   // POST /api/tasks
   router.post('/', asyncHandler(async (req: Request, res: Response) => {
     const project = await getProjectForRequest(projectRepo, req.body.projectId);
