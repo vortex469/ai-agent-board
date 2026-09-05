@@ -1,5 +1,7 @@
 import { spawn } from 'child_process';
-import { existsSync, statSync } from 'fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'fs';
+import path from 'path';
+import { zstdDecompressSync } from 'zlib';
 import { v4 as uuid } from 'uuid';
 import type { Readable } from 'stream';
 import type {
@@ -19,20 +21,9 @@ const DEFAULT_DSH_PROFILE = 'headless';
 const LOCAL_AGENT_TYPE = 'local-openai' as AgentEventMetadata['agentType'];
 const TERMINATION_GRACE_MS = 2000;
 const MAX_PARTIAL_RECORD_LENGTH = 32_000;
-const AGENT_EVENT_TYPES = new Set<AgentEvent['type']>([
-  'thinking',
-  'tool_call',
-  'file_read',
-  'file_write',
-  'file_edit',
-  'command',
-  'command_output',
-  'output',
-  'test_result',
-  'error',
-  'complete',
-]);
-
+const SESSION_POLL_MS = 250;
+const SESSION_ASSOCIATION_SKEW_MS = 5_000;
+const ZSTD_MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
 interface LocalOpenAIConfig {
   launcherPath: string;
   dshHome: string;
@@ -181,77 +172,6 @@ function nestedRecord(record: Record<string, unknown>, keys: string[]): Record<s
   return null;
 }
 
-function stripHarnessPrefix(line: string): string {
-  const trimmed = line.trim();
-  const withoutAnsi = trimmed.replace(/\x1b\[[0-9;]*m/g, '');
-  if (withoutAnsi.startsWith('data:')) return withoutAnsi.slice('data:'.length).trim();
-  if (withoutAnsi.startsWith('[dsh]')) return withoutAnsi.slice('[dsh]'.length).trim();
-  if (withoutAnsi.startsWith('DSH:')) return withoutAnsi.slice('DSH:'.length).trim();
-  return withoutAnsi;
-}
-
-function parseJsonRecord(line: string): Record<string, unknown> | null {
-  const payload = stripHarnessPrefix(line);
-  if (!payload || payload === '[DONE]') return null;
-  if (!payload.startsWith('{') && !payload.startsWith('[')) return null;
-  try {
-    const parsed = JSON.parse(payload);
-    const record = asRecord(parsed);
-    if (record) return record;
-    if (Array.isArray(parsed) && parsed.length === 1) return asRecord(parsed[0]);
-  } catch {
-    return null;
-  }
-  return null;
-}
-
-function directEventType(value: string | undefined): AgentEvent['type'] | null {
-  if (!value) return null;
-  const normalized = value.toLowerCase().replace(/[-\s]/g, '_');
-  return AGENT_EVENT_TYPES.has(normalized as AgentEvent['type'])
-    ? normalized as AgentEvent['type']
-    : null;
-}
-
-function eventKind(record: Record<string, unknown>): string {
-  return [
-    stringField(record, ['type', 'event', 'kind', 'action', 'name', 'status']),
-    stringField(record, ['tool', 'toolName', 'tool_name', 'operation', 'currentOperation', 'current_operation']),
-  ].filter(Boolean).join(' ').toLowerCase();
-}
-
-function containsPrivateReasoning(record: Record<string, unknown>): boolean {
-  const kind = eventKind(record);
-  if (/\b(reasoning|thought|chain_of_thought|cot|analysis)\b/.test(kind)) return true;
-  return ['reasoning', 'thought', 'thoughts', 'analysis', 'chainOfThought', 'chain_of_thought']
-    .some((key) => typeof record[key] === 'string' && String(record[key]).trim().length > 0);
-}
-
-function withoutPrivateReasoning(record: Record<string, unknown>): Record<string, unknown> {
-  const filtered: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(record)) {
-    if (/^(reasoning|thoughts?|analysis|chainOfThought|chain_of_thought)$/i.test(key)) continue;
-    filtered[key] = value;
-  }
-  return filtered;
-}
-
-function operationContent(args: {
-  kind: string;
-  command?: string;
-  file?: string;
-  tool?: string;
-}): string {
-  if (args.command) return args.command;
-  if (args.file) {
-    if (/(read|open|view)/.test(args.kind)) return `Read ${args.file}`;
-    if (/(write|create|created|save)/.test(args.kind)) return `Wrote ${args.file}`;
-    if (/(edit|patch|modify|modified|update|updated)/.test(args.kind)) return `Edited ${args.file}`;
-    return args.file;
-  }
-  return args.tool ?? 'Harness activity';
-}
-
 function recordContent(record: Record<string, unknown>, fallback = ''): string {
   const nested = nestedRecord(record, ['data', 'payload', 'message', 'item', 'event']);
   const content = stringField(record, ['content', 'text', 'message', 'summary', 'description', 'output', 'result', 'title']);
@@ -261,6 +181,14 @@ function recordContent(record: Record<string, unknown>, fallback = ''): string {
     if (nestedContent) return nestedContent;
   }
   return fallback || JSON.stringify(record);
+}
+
+function numberField(record: Record<string, unknown>, keys: string[]): number | undefined {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+  }
+  return undefined;
 }
 
 function commandFromRecord(record: Record<string, unknown>): string | undefined {
@@ -287,121 +215,373 @@ function fileFromRecord(record: Record<string, unknown>): string | undefined {
   return undefined;
 }
 
-function classifyHarnessJson(record: Record<string, unknown>): Array<{ type: AgentEvent['type']; content: string; metadata?: AgentEventMetadata }> {
-  const nested = nestedRecord(record, ['data', 'payload', 'message', 'item', 'event']);
-  const source = nested ? { ...record, ...nested } : record;
-  const kind = eventKind(source);
-  const command = commandFromRecord(source);
-  const file = fileFromRecord(source);
-  const tool = stringField(source, ['tool', 'toolName', 'tool_name', 'name']);
-  const hasPrivateReasoning = containsPrivateReasoning(source);
-  const displaySource = hasPrivateReasoning ? withoutPrivateReasoning(source) : source;
-  const content = hasPrivateReasoning
-    ? operationContent({ kind, command, file, tool })
-    : recordContent(displaySource);
+type AgentEventMetadataWithDsh = AgentEventMetadata & {
+  callId?: string;
+  toolName?: string;
+  state?: 'running' | 'succeeded' | 'failed';
+  operation?: string;
+  finalOutput?: boolean;
+};
 
-  if (hasPrivateReasoning && !command && !file && !tool) return [];
+type NormalizedHarnessEvent = {
+  type: AgentEvent['type'];
+  content: string;
+  metadata?: AgentEventMetadataWithDsh;
+};
 
-  const directType = directEventType(stringField(source, ['agentEventType', 'agent_event_type', 'eventType', 'event_type']));
-  if (directType && directType !== 'thinking') {
-    return [{ type: directType, content, metadata: metadata({ command, file }) }];
+function parseArguments(value: unknown): Record<string, unknown> {
+  if (typeof value === 'string') {
+    try {
+      return asRecord(JSON.parse(value)) ?? {};
+    } catch {
+      return { raw: value };
+    }
+  }
+  return asRecord(value) ?? {};
+}
+
+function withoutPrivateFields(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(withoutPrivateFields);
+  const record = asRecord(value);
+  if (!record) return value;
+  const filtered: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(record)) {
+    if (/^(reasoning|thoughts?|analysis|chainOfThought|chain_of_thought|cot)$/i.test(key)) continue;
+    filtered[key] = withoutPrivateFields(entry);
+  }
+  return filtered;
+}
+
+function dshMetadata(extra?: AgentEventMetadataWithDsh): AgentEventMetadata {
+  return metadata(extra as AgentEventMetadata) as AgentEventMetadata;
+}
+
+export function dshProjectDirectoryName(cwd: string): string {
+  const normalized = path.resolve(cwd).replace(/\\/g, '/').replace(/^\/+/, '').replace(/\/+$/g, '');
+  return `--${normalized.replace(/\/+/g, '-')}--`;
+}
+
+function zstdMagicPositions(buffer: Buffer): number[] {
+  const positions: number[] = [];
+  for (let index = 0; index <= buffer.length - ZSTD_MAGIC.length; index++) {
+    if (
+      buffer[index] === ZSTD_MAGIC[0] &&
+      buffer[index + 1] === ZSTD_MAGIC[1] &&
+      buffer[index + 2] === ZSTD_MAGIC[2] &&
+      buffer[index + 3] === ZSTD_MAGIC[3]
+    ) {
+      positions.push(index);
+    }
+  }
+  return positions;
+}
+
+export function decodeDurableZstdFrames(buffer: Buffer): { text: string; bytesConsumed: number } {
+  const positions = zstdMagicPositions(buffer);
+  const chunks: string[] = [];
+  let positionIndex = 0;
+  let bytesConsumed = 0;
+
+  while (positionIndex < positions.length) {
+    const start = positions[positionIndex];
+    let decoded = false;
+    for (let nextIndex = positionIndex + 1; nextIndex <= positions.length; nextIndex++) {
+      const end = nextIndex < positions.length ? positions[nextIndex] : buffer.length;
+      try {
+        const decodedText = zstdDecompressSync(buffer.subarray(start, end)).toString('utf8');
+        if (!decodedText.endsWith('\n')) throw new Error('Incomplete DSH SessionEvent frame');
+        chunks.push(decodedText);
+        bytesConsumed = end;
+        positionIndex = nextIndex;
+        decoded = true;
+        break;
+      } catch {
+        // Appending sessions can expose a partial final frame. Apparent magic
+        // bytes inside compressed data are handled by trying later boundaries.
+      }
+    }
+    if (!decoded) break;
   }
 
-  if (/(test|pytest|vitest|playwright|validation|gate)/.test(`${kind} ${command ?? ''}`) && /\b(pass|passed|fail|failed|result|complete|completed|success|error)\b/.test(`${kind} ${content}`)) {
-    return [{ type: 'test_result', content, metadata: metadata({ command }) }];
+  return { text: chunks.join(''), bytesConsumed };
+}
+
+function extractText(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) return value.map(extractText).filter(Boolean).join('');
+  const record = asRecord(value);
+  if (!record) return '';
+  if (typeof record.text === 'string') return record.text;
+  if (typeof record.content === 'string') return record.content;
+  if (Array.isArray(record.content)) return extractText(record.content);
+  if (typeof record.message === 'string') return record.message;
+  return '';
+}
+
+function toolResultDetails(record: Record<string, unknown>): {
+  callId?: string;
+  output: string;
+  failed: boolean;
+  error?: string;
+} {
+  const data = asRecord(record.data) ?? record;
+  const message = asRecord(data.message);
+  const source = message ? asRecord(message.source) : null;
+  let callId = stringField(data, ['callId']);
+  if (!callId && source) callId = stringField(source, ['callId']);
+
+  const content = message?.content ?? data.message ?? data.content;
+  let failed = Boolean(data.error);
+  let output = extractText(content);
+  let resultCallId: string | undefined;
+
+  if (Array.isArray(content)) {
+    for (const item of content) {
+      const itemRecord = asRecord(item);
+      if (!itemRecord) continue;
+      resultCallId = resultCallId ?? stringField(itemRecord, ['toolCallId', 'callId']);
+      if (itemRecord.isError === true || typeof itemRecord.error === 'string') failed = true;
+    }
   }
 
-  if (/(read|open|view)/.test(kind) && file) {
-    return [{ type: 'file_read', content, metadata: metadata({ file }) }];
+  callId = callId ?? resultCallId;
+  const error = stringField(data, ['error']) ?? (failed ? stringField(data, ['message']) : undefined);
+  if (!output && error) output = error;
+  return { callId, output, failed, error };
+}
+
+function testLike(command: string | undefined, toolName: string): boolean {
+  return /\b(test|tests|pytest|vitest|playwright|jest|mocha|npm\s+(?:run\s+)?test|gate:required)\b/i
+    .test(`${toolName} ${command ?? ''}`);
+}
+
+function searchLike(command: string | undefined, toolName: string): boolean {
+  return /\b(grep|rg|ripgrep|search|find|glob|fd)\b/i.test(`${toolName} ${command ?? ''}`);
+}
+
+function searchCommandFromArgs(toolName: string, args: Record<string, unknown>, file?: string): string {
+  const query = stringField(args, ['pattern', 'query', 'needle', 'text', 'regex']);
+  return [toolName, query, file].filter(Boolean).join(' ');
+}
+
+function normalizeToolCall(record: Record<string, unknown>): NormalizedHarnessEvent[] {
+  const data = asRecord(record.data) ?? record;
+  const callId = stringField(data, ['callId']);
+  const toolName = stringField(data, ['name', 'tool', 'toolName', 'tool_name']) ?? 'tool';
+  const args = parseArguments(data.arguments ?? data.args);
+  let command = commandFromRecord({ ...data, arguments: args });
+  const file = fileFromRecord({ ...data, arguments: args });
+  if (!command && searchLike(undefined, toolName)) command = searchCommandFromArgs(toolName, args, file);
+  const operation = toolName.toLowerCase();
+  const base = dshMetadata({ callId, toolName, command, file, state: 'running', operation });
+
+  if (/^(bash|shell|exec|command)$/i.test(toolName) || command) {
+    const label = searchLike(command, toolName) && !/^(bash|shell)$/i.test(toolName) ? 'search' : toolName;
+    return [{ type: 'command', content: `${label}: ${JSON.stringify({ command: command ?? recordContent(args, toolName) })}`, metadata: base }];
   }
-  if (/(write|create|created|save)/.test(kind) && file) {
-    return [{ type: 'file_write', content, metadata: metadata({ file }) }];
+  if (/(read|open|view)/i.test(toolName) && file) {
+    return [{ type: 'file_read', content: `Read ${file}`, metadata: base }];
   }
-  if (/(edit|patch|modify|modified|update|updated)/.test(kind) && file) {
-    return [{ type: 'file_edit', content, metadata: metadata({ file }) }];
+  if (/(write|create|save)/i.test(toolName) && file) {
+    return [{ type: 'file_write', content: `Wrote ${file}`, metadata: base }];
   }
-  if (/(shell|bash|command|exec|run|running)/.test(kind) && command) {
-    return [{ type: 'command', content: `bash: ${JSON.stringify({ command, description: content === command ? undefined : content })}`, metadata: metadata({ command }) }];
+  if (/(edit|replace|patch|modify|update)/i.test(toolName) && file) {
+    return [{ type: 'file_edit', content: `Edited ${file}`, metadata: base }];
   }
-  if (/(search|grep|rg|find|glob|list)/.test(kind)) {
-    const searchCommand = command ?? content;
-    return [{ type: 'command', content: `search: ${JSON.stringify({ command: searchCommand })}`, metadata: metadata({ command: searchCommand }) }];
+  if (searchLike(command, toolName)) {
+    return [{ type: 'command', content: `search: ${JSON.stringify({ command: command ?? recordContent(args, toolName) })}`, metadata: base }];
   }
-  if (tool) {
-    return [{ type: 'tool_call', content: JSON.stringify(displaySource), metadata: metadata({ command: tool, file }) }];
+  return [{ type: 'tool_call', content: JSON.stringify({ name: toolName, arguments: withoutPrivateFields(args) }), metadata: base }];
+}
+
+function normalizeToolResult(record: Record<string, unknown>, calls: Map<string, { toolName: string; command?: string }>): NormalizedHarnessEvent[] {
+  const { callId, output, failed, error } = toolResultDetails(record);
+  const call = callId ? calls.get(callId) : undefined;
+  const toolName = call?.toolName ?? 'tool';
+  const command = call?.command;
+  const base = dshMetadata({
+    callId,
+    toolName,
+    command,
+    state: failed ? 'failed' : 'succeeded',
+    operation: toolName.toLowerCase(),
+    error: error ?? (failed ? output : undefined),
+  });
+  if (testLike(command, toolName)) {
+    return [
+      { type: 'command_output', content: output, metadata: base },
+      { type: 'test_result', content: output || (failed ? 'Test command failed.' : 'Test command completed.'), metadata: base },
+    ];
   }
+  return [{ type: 'command_output', content: output || (failed ? 'Tool failed.' : 'Tool completed.'), metadata: base }];
+}
+
+export function normalizeDshSessionEvent(
+  record: Record<string, unknown>,
+  calls: Map<string, { toolName: string; command?: string }> = new Map(),
+): NormalizedHarnessEvent[] {
+  const type = stringField(record, ['type']);
+  if (type === 'tool/call') {
+    const events = normalizeToolCall(record);
+    const event = events[0];
+    const callId = (event.metadata as AgentEventMetadataWithDsh | undefined)?.callId;
+    const toolName = (event.metadata as AgentEventMetadataWithDsh | undefined)?.toolName;
+    if (callId && toolName) calls.set(callId, { toolName, command: event.metadata?.command });
+    return events;
+  }
+  if (type === 'tool/result') return normalizeToolResult(record, calls);
   return [];
 }
 
-function classifyHarnessText(line: string): Array<{ type: AgentEvent['type']; content: string; metadata?: AgentEventMetadata }> {
-  const content = stripHarnessPrefix(line);
-  const fileRead = content.match(/^(?:read|reading|opened|viewed)(?:\s+file)?[:\s]+(.+)$/i);
-  if (fileRead) return [{ type: 'file_read', content, metadata: metadata({ file: fileRead[1].trim() }) }];
-  const fileWrite = content.match(/^(?:write|writing|wrote|created|saved)(?:\s+file)?[:\s]+(.+)$/i);
-  if (fileWrite) return [{ type: 'file_write', content, metadata: metadata({ file: fileWrite[1].trim() }) }];
-  const fileEdit = content.match(/^(?:edit|editing|edited|modified|patched|applying patch to)(?:\s+file)?[:\s]+(.+)$/i);
-  if (fileEdit) return [{ type: 'file_edit', content, metadata: metadata({ file: fileEdit[1].trim() }) }];
-  const command = content.match(/^(?:running|run|executing|execute)(?:\s+command)?[:\s]+(.+)$/i) ?? content.match(/^\$\s+(.+)$/);
-  if (command) return [{ type: 'command', content: `bash: ${JSON.stringify({ command: command[1].trim() })}`, metadata: metadata({ command: command[1].trim() }) }];
-  const search = content.match(/^(?:searching|search|grep|rg|finding|find)(?::|\s+for)?\s+(.+)$/i);
-  if (search) return [{ type: 'command', content: `search: ${JSON.stringify({ command: search[1].trim() })}`, metadata: metadata({ command: search[1].trim() }) }];
-  if (/\b(?:tests?|validation|gate)\b.*\b(?:passed|failed|complete|completed|succeeded|errored)\b/i.test(content)) {
-    return [{ type: 'test_result', content, metadata: metadata() }];
-  }
-  return [];
-}
-
-function emitHarnessRecord(config: AgentSessionConfig, stream: 'stdout' | 'stderr', line: string): void {
-  const json = parseJsonRecord(line);
-  const events = json ? classifyHarnessJson(json) : classifyHarnessText(line);
-  if (events.length > 0) {
-    for (const event of events) emit(config, event.type, event.content, event.metadata);
-    return;
-  }
-  emit(config, stream === 'stdout' ? 'output' : 'command_output', line.endsWith('\n') ? line : `${line}\n`, metadata({
-    command: stream === 'stdout' ? 'dsh stdout' : 'dsh stderr',
-  }));
-}
-
-class HarnessOutputStream {
-  private buffered = '';
+class DshSessionEventMonitor {
+  private sessionFile: string | null = null;
+  private offset = 0;
+  private partial = '';
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private warnedAmbiguous = false;
+  private readonly emittedSeqs = new Set<string>();
+  private readonly emittedCalls = new Set<string>();
+  private readonly emittedResults = new Set<string>();
+  private readonly calls = new Map<string, { toolName: string; command?: string }>();
 
   constructor(
     private readonly config: AgentSessionConfig,
-    private readonly stream: 'stdout' | 'stderr',
+    private readonly dshHome: string,
+    private readonly launchTime: number,
   ) {}
+
+  start(): void {
+    void this.poll();
+    this.timer = setInterval(() => void this.poll(), SESSION_POLL_MS);
+  }
+
+  stop(): void {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+    void this.poll();
+  }
+
+  private async poll(): Promise<void> {
+    if (!this.sessionFile) this.sessionFile = this.findSessionFile();
+    if (!this.sessionFile) return;
+    let buffer: Buffer;
+    try {
+      buffer = readFileSync(this.sessionFile);
+    } catch {
+      return;
+    }
+    if (buffer.length <= this.offset) return;
+    const { text, bytesConsumed } = decodeDurableZstdFrames(buffer.subarray(this.offset));
+    if (bytesConsumed <= 0) return;
+    this.offset += bytesConsumed;
+    this.consumeText(text);
+  }
+
+  private findSessionFile(): string | null {
+    const projectDir = path.join(this.dshHome, 'sessions', dshProjectDirectoryName(this.config.workingDirectory));
+    if (!existsSync(projectDir)) return null;
+    let sessionDirs: string[];
+    try {
+      sessionDirs = readdirSync(projectDir);
+    } catch {
+      return null;
+    }
+
+    const matches: string[] = [];
+    for (const sessionDir of sessionDirs) {
+      const sessionFile = path.join(projectDir, sessionDir, 'session.jsonl.zstd');
+      if (!existsSync(sessionFile)) continue;
+      let stat;
+      try {
+        stat = statSync(sessionFile);
+      } catch {
+        continue;
+      }
+      if (stat.mtimeMs + SESSION_ASSOCIATION_SKEW_MS < this.launchTime) continue;
+      if (this.sessionCwd(sessionFile) === path.resolve(this.config.workingDirectory)) matches.push(sessionFile);
+    }
+
+    if (matches.length === 1) return matches[0];
+    if (matches.length > 1 && !this.warnedAmbiguous) {
+      this.warnedAmbiguous = true;
+      emit(this.config, 'error', 'DeepSeek Harness session association is ambiguous; live DSH operational events are disabled for this run.', {
+        agentType: LOCAL_AGENT_TYPE,
+        command: 'dsh session monitor',
+      });
+    }
+    return null;
+  }
+
+  private sessionCwd(sessionFile: string): string | null {
+    try {
+      const { text } = decodeDurableZstdFrames(readFileSync(sessionFile));
+      const firstLine = text.split(/\r?\n/, 1)[0]?.trim();
+      if (!firstLine) return null;
+      const record = asRecord(JSON.parse(firstLine));
+      const cwd = record ? stringField(record, ['cwd']) : undefined;
+      return cwd ? path.resolve(cwd) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private consumeText(text: string): void {
+    this.partial += text;
+    const lines = this.partial.split(/\r?\n/);
+    this.partial = lines.pop() ?? '';
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      this.consumeLine(line);
+    }
+  }
+
+  private consumeLine(line: string): void {
+    let record: Record<string, unknown> | null = null;
+    try {
+      record = asRecord(JSON.parse(line));
+    } catch {
+      return;
+    }
+    if (!record) return;
+    const type = stringField(record, ['type']);
+    if (type !== 'tool/call' && type !== 'tool/result') return;
+    const data = asRecord(record.data) ?? record;
+    const callId = stringField(data, ['callId']) ?? toolResultDetails(record).callId;
+    const seq = numberField(record, ['seq']) ?? numberField(record, ['seq0']);
+    const seqKey = seq === undefined ? undefined : `${type}:${seq}`;
+    if (seqKey && this.emittedSeqs.has(seqKey)) return;
+    if (type === 'tool/call' && callId && this.emittedCalls.has(callId)) return;
+    if (type === 'tool/result' && callId && this.emittedResults.has(callId)) return;
+
+    const events = normalizeDshSessionEvent(record, this.calls);
+    if (!events.length) return;
+    if (seqKey) this.emittedSeqs.add(seqKey);
+    if (type === 'tool/call' && callId) this.emittedCalls.add(callId);
+    if (type === 'tool/result' && callId) this.emittedResults.add(callId);
+    for (const event of events) emit(this.config, event.type, event.content, event.metadata);
+  }
+}
+
+class StdoutFinalOutput {
+  private buffered = '';
+
+  constructor(private readonly config: AgentSessionConfig) {}
 
   write(chunk: Buffer | string): void {
     this.buffered += chunk.toString();
-    let separatorIndex = this.nextSeparatorIndex();
-    while (separatorIndex >= 0) {
-      const record = this.buffered.slice(0, separatorIndex);
-      const separatorLength = this.buffered[separatorIndex] === '\r' && this.buffered[separatorIndex + 1] === '\n' ? 2 : 1;
-      this.buffered = this.buffered.slice(separatorIndex + separatorLength);
-      if (record.trim()) emitHarnessRecord(this.config, this.stream, record);
-      separatorIndex = this.nextSeparatorIndex();
-    }
     if (this.buffered.length > MAX_PARTIAL_RECORD_LENGTH) {
-      emitHarnessRecord(this.config, this.stream, this.buffered);
-      this.buffered = '';
+      this.buffered = this.buffered.slice(-MAX_PARTIAL_RECORD_LENGTH);
     }
   }
 
   flush(): void {
-    if (!this.buffered.trim()) {
-      this.buffered = '';
-      return;
-    }
-    emitHarnessRecord(this.config, this.stream, this.buffered);
+    const content = this.buffered.trim();
     this.buffered = '';
-  }
-
-  private nextSeparatorIndex(): number {
-    const newline = this.buffered.indexOf('\n');
-    const carriage = this.buffered.indexOf('\r');
-    if (newline < 0) return carriage;
-    if (carriage < 0) return newline;
-    return Math.min(newline, carriage);
+    if (!content) return;
+    emit(this.config, 'output', content.endsWith('\n') ? content : `${content}\n`, dshMetadata({
+      command: 'dsh stdout',
+      finalOutput: true,
+    }));
   }
 }
 
@@ -504,6 +684,8 @@ class LocalOpenAISession implements AgentSession {
   }
 
   private async runHeadless(taskText: string): Promise<AgentResult> {
+    const launchTime = Date.now();
+    const monitor = new DshSessionEventMonitor(this.sessionConfig, this.localConfig.dshHome, launchTime);
     const child = this.spawnCommand('node', [
       this.localConfig.launcherPath,
       '--profile',
@@ -520,21 +702,26 @@ class LocalOpenAISession implements AgentSession {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     this.child = child;
-    const stdout = new HarnessOutputStream(this.sessionConfig, 'stdout');
-    const stderr = new HarnessOutputStream(this.sessionConfig, 'stderr');
+    const stdout = new StdoutFinalOutput(this.sessionConfig);
+    monitor.start();
 
     child.stdout?.on('data', (chunk: Buffer | string) => {
       stdout.write(chunk);
     });
-    child.stderr?.on('data', (chunk: Buffer | string) => {
-      stderr.write(chunk);
-    });
 
     return await new Promise<AgentResult>((resolve) => {
       let settled = false;
+      let cleanedUp = false;
+      const cleanup = () => {
+        if (cleanedUp) return;
+        cleanedUp = true;
+        monitor.stop();
+        stdout.flush();
+      };
       const settle = (result: AgentResult) => {
         if (settled) return;
         settled = true;
+        cleanup();
         resolve(result);
       };
 
@@ -543,8 +730,6 @@ class LocalOpenAISession implements AgentSession {
       });
 
       child.once('close', (code: number | null, signal: NodeJS.Signals | null) => {
-        stdout.flush();
-        stderr.flush();
         if (this.aborted) {
           settle({ status: 'failed', error: 'DeepSeek Harness execution was cancelled.' });
           return;

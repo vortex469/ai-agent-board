@@ -212,6 +212,10 @@ export interface AgentEvent {
     command?: string;
     diff?: string;
     agentType?: AgentType;
+    callId?: string;
+    toolName?: string;
+    state?: 'running' | 'succeeded' | 'failed';
+    operation?: string;
     duration?: number;
     error?: string;
     /** Persisted, complete assistant prose used by service integrations. */

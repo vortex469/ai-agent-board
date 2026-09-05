@@ -50,7 +50,6 @@ export function migrateSqliteDatabase(db: Database.Database): void {
     db.exec(`ALTER TABLE projects ADD COLUMN repo_url TEXT`);
   }
   if (!projectColNames.has('aliases')) db.exec(`ALTER TABLE projects ADD COLUMN aliases TEXT NOT NULL DEFAULT '[]'`);
-  if (!projectColNames.has('auto_run_enabled')) db.exec(`ALTER TABLE projects ADD COLUMN auto_run_enabled INTEGER NOT NULL DEFAULT 0`);
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS tasks (
@@ -478,7 +477,6 @@ export async function initPostgresDatabase(pool: Pool): Promise<void> {
   await addProjectCol('auto_run_enabled', 'BOOLEAN NOT NULL DEFAULT FALSE');
   await addProjectCol('repo_url', 'TEXT');
   await addProjectCol('aliases', "TEXT NOT NULL DEFAULT '[]'");
-  await addProjectCol('auto_run_enabled', 'BOOLEAN NOT NULL DEFAULT FALSE');
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS tasks (

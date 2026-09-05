@@ -670,6 +670,16 @@ export function AgentPanel({ task, onClose, onRun, onStop, onCreatePR, onMergeLo
     return [...files.entries()].map(([path, info]) => ({ path, ...info }));
   }, [events]);
 
+  const actionEvents = useMemo(() => events.filter((event) =>
+    event.type === 'command' ||
+    event.type === 'command_output' ||
+    event.type === 'tool_call' ||
+    event.type === 'file_read' ||
+    event.type === 'file_write' ||
+    event.type === 'file_edit' ||
+    event.type === 'test_result'
+  ), [events]);
+
   const failedWithoutDetails = task?.agentStatus === 'failed' && !latestError;
 
   const handleCopyResult = () => {
@@ -1059,7 +1069,7 @@ export function AgentPanel({ task, onClose, onRun, onStop, onCreatePR, onMergeLo
                   : 'text-muted-foreground hover:text-foreground'
               )}
             >
-              Actions{fileChanges.length > 0 ? ` (${fileChanges.length})` : ''}
+              Actions{actionEvents.length > 0 ? ` (${actionEvents.length})` : ''}
             </button>
             </div>
             <div className="flex shrink-0 items-center gap-1">
@@ -1133,7 +1143,7 @@ export function AgentPanel({ task, onClose, onRun, onStop, onCreatePR, onMergeLo
           {/* Changes list */}
           {activeTab === 'changes' && (
             <div className="min-h-32 flex-1 overflow-y-auto p-2 space-y-1 lg:min-h-0">
-              {fileChanges.length === 0 && (
+              {actionEvents.length === 0 && (
                 <div className="flex h-full items-center justify-center">
                   <div className="text-center">
                     <FileCode2 className="mx-auto h-10 w-10 text-muted-foreground/20" />
@@ -1141,18 +1151,25 @@ export function AgentPanel({ task, onClose, onRun, onStop, onCreatePR, onMergeLo
                   </div>
                 </div>
               )}
-              {fileChanges.map((file) => (
-                <details key={file.path} className="group rounded-lg border border-border bg-card">
-                  <summary className="flex min-h-11 cursor-pointer items-center gap-2 px-3 py-2 text-sm hover:bg-accent/50 lg:min-h-0">
-                    <span>{file.type === 'created' ? '🟢' : file.type === 'modified' ? '🟡' : '📖'}</span>
-                    <span className="flex-1 font-mono text-xs text-foreground truncate" title={file.path}>{file.path}</span>
-                    <span className="text-[10px] text-muted-foreground capitalize">{file.type}</span>
-                  </summary>
-                  <div className="border-t border-border px-3 py-2 overflow-x-auto">
-                    <pre className="text-xs font-mono text-muted-foreground whitespace-pre-wrap">{file.diff || file.content}</pre>
-                  </div>
-                </details>
-              ))}
+              {actionEvents.map((event) => {
+                const state = typeof event.metadata?.state === 'string' ? event.metadata.state : undefined;
+                const pathLabel = event.metadata?.file;
+                const commandLabel = event.metadata?.command;
+                const title = pathLabel ?? commandLabel ?? compactToolSummary(event.content) ?? eventLabelMap[event.type];
+                const typeLabel = state ?? eventLabelMap[event.type];
+                const file = pathLabel ? fileChanges.find((change) => change.path === pathLabel) : undefined;
+                return (
+                  <details key={event.id} className="group rounded-lg border border-border bg-card">
+                    <summary className="flex min-h-11 cursor-pointer items-center gap-2 px-3 py-2 text-sm hover:bg-accent/50 lg:min-h-0">
+                      <span className="flex-1 font-mono text-xs text-foreground truncate" title={title}>{title}</span>
+                      <span className="text-[10px] text-muted-foreground capitalize">{typeLabel}</span>
+                    </summary>
+                    <div className="border-t border-border px-3 py-2 overflow-x-auto">
+                      <pre className="text-xs font-mono text-muted-foreground whitespace-pre-wrap">{file?.diff || event.content}</pre>
+                    </div>
+                  </details>
+                );
+              })}
             </div>
           )}
 

@@ -1,4 +1,4 @@
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type Page, type Route } from '@playwright/test';
 import { API, fillLocalPath, waitForBoard } from './helpers';
 
 // Helper to open the create task dialog
@@ -225,6 +225,112 @@ test.describe('Task CRUD', () => {
       'None.',
     ].join('\n'));
     expect(copiedText).not.toContain(eventNoise);
+  });
+
+  test('mocked DSH operational events render in Events, Terminal, and Actions', async ({ page }) => {
+    const taskTitle = `DSH Events Task ${Date.now()}`;
+    const taskId = `dsh-events-${Date.now()}`;
+    const task = {
+      id: taskId,
+      projectId: 'default',
+      title: taskTitle,
+      description: 'Task with mocked DSH operational SessionEvents',
+      priority: 'medium',
+      columnId: 'in-progress',
+      agentStatus: 'executing',
+      agentType: 'local-openai',
+      createdAt: Date.now(),
+      repoPath: '/tmp/repo',
+    };
+    const events = [
+      {
+        id: 'dsh-command',
+        taskId,
+        type: 'command',
+        content: 'bash: {"command":"npm run build:server"}',
+        timestamp: Date.now(),
+        metadata: { agentType: 'local-openai', callId: 'call-1', toolName: 'bash', command: 'npm run build:server', state: 'running' },
+      },
+      {
+        id: 'dsh-output',
+        taskId,
+        type: 'command_output',
+        content: 'server build passed\n',
+        timestamp: Date.now() + 1,
+        metadata: { agentType: 'local-openai', callId: 'call-1', toolName: 'bash', command: 'npm run build:server', state: 'succeeded' },
+      },
+      {
+        id: 'dsh-read',
+        taskId,
+        type: 'file_read',
+        content: 'Read packages/server/src/index.ts',
+        timestamp: Date.now() + 2,
+        metadata: { agentType: 'local-openai', callId: 'call-2', toolName: 'read_file', file: 'packages/server/src/index.ts', state: 'running' },
+      },
+      {
+        id: 'dsh-edit',
+        taskId,
+        type: 'file_edit',
+        content: 'Edited packages/server/src/services/local-openai-provider.ts',
+        timestamp: Date.now() + 3,
+        metadata: { agentType: 'local-openai', callId: 'call-3', toolName: 'edit_file', file: 'packages/server/src/services/local-openai-provider.ts', state: 'succeeded' },
+      },
+      {
+        id: 'dsh-test',
+        taskId,
+        type: 'test_result',
+        content: 'Focused tests passed: local DSH event projection',
+        timestamp: Date.now() + 4,
+        metadata: { agentType: 'local-openai', callId: 'call-4', toolName: 'bash', command: 'npm test', state: 'succeeded' },
+      },
+    ];
+
+    await page.route('**/api/projects', (route) => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify([{ id: 'default', name: 'Default', isDefault: true, createdAt: 1, updatedAt: 1 }]),
+    }));
+    await page.route('**/api/projects/config', (route) => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ cloneRoot: '/tmp' }),
+    }));
+    const fulfillTasks = (route: Route) => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify([task]),
+    });
+    await page.route('**/api/tasks', fulfillTasks);
+    await page.route('**/api/tasks?*', fulfillTasks);
+    await page.route(`**/api/tasks/${taskId}/events`, (route) => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(events),
+    }));
+    await page.route(`**/api/tasks/${taskId}/git-info`, (route) => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ hasRemote: false, mergeReady: true }),
+    }));
+
+    await page.goto('/');
+    await waitForBoard(page);
+    await page.getByRole('heading', { name: taskTitle }).click();
+
+    await expect(page.getByText('npm run build:server').first()).toBeVisible({ timeout: 3_000 });
+    await expect(page.getByText('local-openai-provider.ts').first()).toBeVisible();
+    await expect(page.getByText('Focused tests passed: local DSH event projection')).toBeVisible();
+    await expect(page.getByText(/private reasoning|chain-of-thought/i)).toHaveCount(0);
+
+    await page.getByRole('button', { name: 'Terminal' }).click();
+    await expect(page.getByText('$ npm run build:server')).toBeVisible({ timeout: 3_000 });
+    await expect(page.getByText('server build passed')).toBeVisible();
+    await expect(page.getByText('packages/server/src/index.ts')).toBeVisible();
+
+    await page.getByRole('button', { name: /^Actions/ }).click();
+    await expect(page.getByText('npm run build:server').first()).toBeVisible();
+    await expect(page.getByText('packages/server/src/services/local-openai-provider.ts').first()).toBeVisible();
+    await expect(page.getByText('Focused tests passed: local DSH event projection')).toBeVisible();
   });
 
   test('Summary tab is hidden for in-progress tasks', async ({ page }) => {

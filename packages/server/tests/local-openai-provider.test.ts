@@ -1,15 +1,18 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
-import { setImmediate as tick } from 'node:timers/promises';
+import { setImmediate as tick, setTimeout as delay } from 'node:timers/promises';
+import { zstdCompressSync } from 'node:zlib';
 import type { AgentEvent } from '@codewithdan/agent-sdk-core';
 import { isValidAgentType } from '@ai-agent-board/shared/constants.js';
 import {
+  decodeDurableZstdFrames,
   detectLocalOpenAIAgent,
+  dshProjectDirectoryName,
   getLocalOpenAIConfig,
   LocalOpenAIProvider,
   sanitizeOutput,
@@ -53,6 +56,41 @@ function makeLauncher(dir: string): string {
   writeFileSync(launcher, '#!/usr/bin/env node\n');
   chmodSync(launcher, 0o755);
   return launcher;
+}
+
+function makeDshSession(dshHome: string, cwd: string, session = 'session-test'): string {
+  const sessionDir = path.join(dshHome, 'sessions', dshProjectDirectoryName(cwd), session);
+  mkdirSync(sessionDir, { recursive: true });
+  const file = path.join(sessionDir, 'session.jsonl.zstd');
+  appendDshEvents(file, [{ type: 'session', version: 0, id: session, createdAt: Date.now(), cwd }]);
+  return file;
+}
+
+function appendDshEvents(file: string, records: Array<Record<string, unknown>>): void {
+  for (const record of records) {
+    appendFileSync(file, zstdCompressSync(Buffer.from(`${JSON.stringify(record)}\n`, 'utf8')));
+  }
+}
+
+function toolCall(seq: number, callId: string, name: string, args: Record<string, unknown>) {
+  return { type: 'tool/call', seq, time: Date.now(), data: { turn: 1, step: 1, callId, name, arguments: JSON.stringify(args) } };
+}
+
+function toolResult(seq: number, callId: string, text: string, isError = false) {
+  return {
+    type: 'tool/result',
+    seq,
+    time: Date.now(),
+    data: {
+      turn: 1,
+      step: 1,
+      message: {
+        source: { kind: 'tool', callId },
+        content: [{ type: 'tool-result', toolCallId: callId, isError, content: [{ type: 'text', text }] }],
+        role: 'user',
+      },
+    },
+  };
 }
 
 function makeSession(args: {
@@ -161,7 +199,7 @@ test('local AI DSH session passes worktree cwd, DSH env, profile, and one-shot p
   assert.deepEqual(calls[0].options.stdio, ['ignore', 'pipe', 'pipe']);
 });
 
-test('local AI DSH stdout and stderr are surfaced with credential redaction', async (t) => {
+test('local AI DSH stdout is surfaced with credential redaction and stderr is ignored', async (t) => {
   const { dir, cleanup } = tempDir('dsh-output');
   t.after(cleanup);
   const launcher = makeLauncher(dir);
@@ -186,12 +224,13 @@ test('local AI DSH stdout and stderr are surfaced with credential redaction', as
   const contents = events.map((event) => event.content).join('\n');
   assert.match(contents, /created file/);
   assert.match(contents, /\[redacted\]/);
-  assert.match(contents, /\[DSH credentials file\]/);
+  assert.doesNotMatch(contents, /\[DSH credentials file\]/);
+  assert.doesNotMatch(contents, /debug/);
   assert.doesNotMatch(contents, /sk-test-secret-value/);
 });
 
-test('local AI DSH activity records are normalized before process completion', async (t) => {
-  const { dir, cleanup } = tempDir('dsh-live-activity');
+test('local AI DSH stderr reasoning is ignored and stdout is only final output', async (t) => {
+  const { dir, cleanup } = tempDir('dsh-private-streams');
   t.after(cleanup);
   const launcher = makeLauncher(dir);
   const events: AgentEvent[] = [];
@@ -199,14 +238,53 @@ test('local AI DSH activity records are normalized before process completion', a
   const { session: sessionPromise } = makeSession({ dir, launcherPath: launcher, child, events });
   const session = await sessionPromise;
 
-  const resultPromise = session.execute('stream activity while working');
-  child.stdout.write('data: {"event":"tool_start","tool":"read_file","args":{"path":"packages/server/src/index.ts"},"message":"Reading server entry"}\n');
-  child.stdout.write('{"event":"command_start","command":"npm run build:server","message":"Running server build"}\n');
-  child.stdout.write('{"event":"tool_start","tool":"edit_file","args":{"path":"safe.ts"},"reasoning":"private chain of thought"}\n');
-  child.stdout.write('Edited file: packages/server/src/services/local-openai-provider.ts\n');
-  child.stderr.write('harness debug still raw\n');
-  child.stdout.write('Focused tests passed: representative DSH stream\n');
+  const resultPromise = session.execute('emit private stderr');
+  child.stderr.write('private chain-of-thought token fragment\n');
+  child.stdout.write('Final visible answer\n');
   await tick();
+  assert.doesNotMatch(events.map((event) => event.content).join('\n'), /private chain-of-thought/);
+
+  child.close(0);
+  const result = await resultPromise;
+
+  assert.equal(result.status, 'complete');
+  assert.ok(events.some((event) => event.type === 'output' && event.content.includes('Final visible answer')));
+  assert.ok(!events.some((event) => event.type === 'command_output' && event.content.includes('private chain-of-thought')));
+});
+
+test('local AI DSH persisted SessionEvents are normalized before process completion', async (t) => {
+  const { dir, cleanup } = tempDir('dsh-live-activity');
+  t.after(cleanup);
+  const dshHome = path.join(dir, 'dsh-home');
+  const launcher = makeLauncher(dir);
+  const events: AgentEvent[] = [];
+  const child = new FakeChild();
+  const { session: sessionPromise } = makeSession({
+    dir,
+    launcherPath: launcher,
+    child,
+    events,
+    env: { DSH_HOME: dshHome },
+  });
+  const session = await sessionPromise;
+
+  const resultPromise = session.execute('stream activity while working');
+  const sessionFile = makeDshSession(dshHome, dir);
+  appendDshEvents(sessionFile, [
+    toolCall(1, 'read-1', 'read_file', { path: 'packages/server/src/index.ts' }),
+    toolCall(2, 'write-1', 'write_file', { path: 'created.ts' }),
+    toolCall(3, 'edit-1', 'edit_file', { path: 'safe.ts' }),
+    toolCall(4, 'search-1', 'grep', { pattern: 'LocalOpenAIProvider', path: 'packages/server/src' }),
+    toolCall(5, 'bash-1', 'bash', { command: 'npm run build:server' }),
+    toolResult(6, 'bash-1', 'Focused tests passed: representative DSH stream'),
+    toolCall(7, 'test-1', 'bash', { command: 'npm test -- --runInBand' }),
+    toolResult(8, 'test-1', '1 test failed', true),
+    toolCall(9, 'unknown-1', 'custom_safe_tool', { value: 'safe', reasoning: 'hidden tool thought' }),
+    { type: 'assistant/chunk', seq: 10, data: { chunk: { type: 'reasoning-delta', text: 'private chain of thought' } } },
+    { type: 'reasoning-chunks', seq0: 11, data: { texts: ['private reasoning'] } },
+  ]);
+  child.stderr.write('harness private stderr reasoning\n');
+  await delay(400);
 
   assert.equal(child.killed, false);
   assert.ok(events.some((event) =>
@@ -219,27 +297,140 @@ test('local AI DSH activity records are normalized before process completion', a
     event.metadata?.command === 'npm run build:server'
   ));
   assert.ok(events.some((event) =>
-    event.type === 'file_edit' &&
-    event.metadata?.file === 'packages/server/src/services/local-openai-provider.ts'
+    event.type === 'file_write' &&
+    event.metadata?.file === 'created.ts'
   ));
   assert.ok(events.some((event) =>
     event.type === 'file_edit' &&
     event.metadata?.file === 'safe.ts' &&
     event.content === 'Edited safe.ts'
   ));
-  assert.doesNotMatch(events.map((event) => event.content).join('\n'), /private chain of thought/);
   assert.ok(events.some((event) =>
-    event.type === 'command_output' &&
-    event.content.includes('harness debug still raw')
+    event.type === 'command' &&
+    event.metadata?.command?.includes('LocalOpenAIProvider')
   ));
   assert.ok(events.some((event) =>
     event.type === 'test_result' &&
-    event.content.includes('Focused tests passed')
+    event.content.includes('1 test failed')
   ));
+  assert.ok(events.some((event) =>
+    event.type === 'tool_call' &&
+    event.content.includes('custom_safe_tool')
+  ));
+  const contents = events.map((event) => event.content).join('\n');
+  assert.doesNotMatch(contents, /private chain of thought|private reasoning|harness private stderr|hidden tool thought/);
 
   child.close(0);
   const result = await resultPromise;
   assert.equal(result.status, 'complete');
+});
+
+test('local AI DSH suppresses duplicate SessionEvents by callId', async (t) => {
+  const { dir, cleanup } = tempDir('dsh-duplicates');
+  t.after(cleanup);
+  const dshHome = path.join(dir, 'dsh-home');
+  const launcher = makeLauncher(dir);
+  const events: AgentEvent[] = [];
+  const child = new FakeChild();
+  const { session: sessionPromise } = makeSession({
+    dir,
+    launcherPath: launcher,
+    child,
+    events,
+    env: { DSH_HOME: dshHome },
+  });
+  const session = await sessionPromise;
+
+  const resultPromise = session.execute('duplicates');
+  const sessionFile = makeDshSession(dshHome, dir);
+  appendDshEvents(sessionFile, [
+    toolCall(1, 'dup-1', 'bash', { command: 'npm test' }),
+    toolCall(2, 'dup-1', 'bash', { command: 'npm test' }),
+    toolResult(3, 'dup-1', 'ok'),
+    toolResult(4, 'dup-1', 'ok'),
+  ]);
+  await delay(400);
+  child.close(0);
+  await resultPromise;
+
+  assert.equal(events.filter((event) => event.type === 'command' && event.metadata?.command === 'npm test').length, 1);
+  assert.equal(events.filter((event) => event.type === 'command_output' && event.content === 'ok').length, 1);
+  assert.equal(events.filter((event) => event.type === 'test_result' && event.content === 'ok').length, 1);
+});
+
+test('local AI DSH incremental zstd decoding leaves incomplete appended frames unread', () => {
+  const first = zstdCompressSync(Buffer.from('{"type":"session","cwd":"/tmp/repo"}\n'));
+  const second = zstdCompressSync(Buffer.from('{"type":"tool/call","seq":1}\n'));
+  const incomplete = second.subarray(0, Math.max(1, Math.floor(second.length / 2)));
+  const decoded = decodeDurableZstdFrames(Buffer.concat([first, incomplete]));
+
+  assert.equal(decoded.text, '{"type":"session","cwd":"/tmp/repo"}\n');
+  assert.equal(decoded.bytesConsumed, first.length);
+});
+
+test('local AI DSH rejects ambiguous or unrelated session association', async (t) => {
+  const { dir, cleanup } = tempDir('dsh-ambiguous');
+  t.after(cleanup);
+  const dshHome = path.join(dir, 'dsh-home');
+  const launcher = makeLauncher(dir);
+  const events: AgentEvent[] = [];
+  const child = new FakeChild();
+  const { session: sessionPromise } = makeSession({
+    dir,
+    launcherPath: launcher,
+    child,
+    events,
+    env: { DSH_HOME: dshHome },
+  });
+  const session = await sessionPromise;
+
+  const resultPromise = session.execute('ambiguous');
+  const first = makeDshSession(dshHome, dir, 'session-one');
+  const second = makeDshSession(dshHome, dir, 'session-two');
+  appendDshEvents(first, [toolCall(1, 'first', 'bash', { command: 'echo first' })]);
+  appendDshEvents(second, [toolCall(2, 'second', 'bash', { command: 'echo second' })]);
+  const unrelated = makeDshSession(dshHome, path.join(dir, 'other'), 'session-unrelated');
+  appendDshEvents(unrelated, [toolCall(3, 'unrelated', 'bash', { command: 'echo unrelated' })]);
+  await delay(400);
+  child.close(0);
+  await resultPromise;
+
+  assert.ok(events.some((event) => event.type === 'error' && event.content.includes('ambiguous')));
+  assert.ok(!events.some((event) => event.metadata?.command === 'echo first'));
+  assert.ok(!events.some((event) => event.metadata?.command === 'echo second'));
+  assert.ok(!events.some((event) => event.metadata?.command === 'echo unrelated'));
+});
+
+test('local AI DSH SessionEvent output uses existing secret sanitization', async (t) => {
+  const { dir, cleanup } = tempDir('dsh-secret-session');
+  t.after(cleanup);
+  const dshHome = path.join(dir, 'dsh-home');
+  const launcher = makeLauncher(dir);
+  const events: AgentEvent[] = [];
+  const child = new FakeChild();
+  const { session: sessionPromise } = makeSession({
+    dir,
+    launcherPath: launcher,
+    child,
+    events,
+    env: { DSH_HOME: dshHome, OPENAI_API_KEY: 'sk-test-secret-value' },
+  });
+  const session = await sessionPromise;
+
+  const resultPromise = session.execute('secret');
+  const sessionFile = makeDshSession(dshHome, dir);
+  appendDshEvents(sessionFile, [
+    toolCall(1, 'secret-call', 'bash', { command: 'echo token' }),
+    toolResult(2, 'secret-call', 'api_key: sk-test-secret-value from /root/.dsh/.credentials.yaml'),
+  ]);
+  await delay(400);
+  child.close(0);
+  await resultPromise;
+
+  const contents = events.map((event) => event.content).join('\n');
+  assert.match(contents, /\[redacted\]/);
+  assert.match(contents, /\[DSH credentials file\]/);
+  assert.doesNotMatch(contents, /sk-test-secret-value/);
 });
 
 test('local AI DSH non-zero exit fails with a clear error', async (t) => {
