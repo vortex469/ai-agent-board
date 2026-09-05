@@ -9,6 +9,7 @@ import type { AgentProvider, AgentSession, AgentInfo, AgentAttachment } from '@c
 import type { AgentEvent as CoreAgentEvent } from '@codewithdan/agent-sdk-core';
 import { CopilotProvider, ClaudeProvider, CodexProvider, OpenCodeProvider, HermesProvider, OpenClawProvider, GrokProvider } from '@codewithdan/agent-sdk-core';
 import { broadcast } from '../websocket.js';
+import { getLocalOpenAIConfig, LocalOpenAIProvider } from './local-openai-provider.js';
 import {
   cleanupTaskWorktree,
   inspectTaskWorktree,
@@ -223,6 +224,9 @@ export class AgentManager {
     }));
     this.providers.set('openclaw', new OpenClawProvider());
     this.providers.set('grok', new GrokProvider());
+    if (getLocalOpenAIConfig()) {
+      this.providers.set('local-openai', new LocalOpenAIProvider() as AgentProvider);
+    }
 
     // Detect which agents are actually available on this system
     this.availableAgents = await detectAvailableAgents();

@@ -9,6 +9,7 @@ const AGENT_LABELS: Record<string, string> = {
   hermes: 'Hermes',
   openclaw: 'OpenClaw',
   grok: 'Grok',
+  'local-openai': 'Local AI',
 };
 
 const AGENT_LABEL_ORDER = Object.values(AGENT_LABELS);

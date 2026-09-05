@@ -4,6 +4,7 @@ import path from 'path';
 import { promisify } from 'util';
 import type { AgentInfo } from '@codewithdan/agent-sdk-core';
 import { detectAgents as detectCoreAgents } from '@codewithdan/agent-sdk-core';
+import { detectLocalOpenAIAgent } from './local-openai-provider.js';
 
 type ExecCommand = (
   file: string,
@@ -15,6 +16,7 @@ interface DetectAvailableAgentsOptions {
   detectAgents?: () => Promise<AgentInfo[]>;
   env?: NodeJS.ProcessEnv;
   execCommand?: ExecCommand;
+  fetchImpl?: typeof fetch;
   platform?: NodeJS.Platform;
 }
 
@@ -282,7 +284,12 @@ async function normalizeWindowsCopilotAvailability(
 }
 
 export async function detectAvailableAgents(options: DetectAvailableAgentsOptions = {}): Promise<AgentInfo[]> {
-  const agents = await (options.detectAgents ?? detectCoreAgents)();
+  const sdkAgents = await (options.detectAgents ?? detectCoreAgents)();
+  const localOpenAI = await detectLocalOpenAIAgent({ env: options.env ? { ...process.env, ...options.env } : process.env, fetchImpl: options.fetchImpl });
+  const agents = [
+    ...sdkAgents.filter(agent => agent.name !== ('local-openai' as AgentInfo['name'])),
+    localOpenAI as AgentInfo,
+  ];
   const platform = options.platform ?? process.platform;
 
   const env = options.env ? { ...process.env, ...options.env } : process.env;

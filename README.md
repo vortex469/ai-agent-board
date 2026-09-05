@@ -173,6 +173,11 @@ projects. `API_KEY` remains the legacy full-access credential for the UI.
 | `COPILOT_MODEL` | `claude-opus-4-20250514` | Model for Copilot SDK sessions |
 | `CLAUDE_MODEL` | `claude-opus-4-20250514` | Model for Claude Code sessions |
 | `CODEX_MODEL` | `gpt-5.2-codex` | Model for OpenAI Codex sessions |
+| `LOCAL_OPENAI_BASE_URL` | _(unset)_ | Base URL for an OpenAI-compatible local coding endpoint, e.g. `http://localhost:1234/v1`; requires `/models` and `/chat/completions` |
+| `LOCAL_OPENAI_MODEL` | _(unset)_ | Model name sent to the local OpenAI-compatible endpoint |
+| `LOCAL_OPENAI_API_KEY` | _(unset)_ | Optional Bearer token for the local endpoint; no auth header is sent when unset |
+| `LOCAL_OPENAI_DISPLAY_NAME` | `Local AI` | Display name for the local provider in the agent selector |
+| `LOCAL_OPENAI_MAX_TOKENS` | `4096` | Optional max output token limit for local coding sessions |
 | `HERMES_COMMAND` | `hermes` | Hermes CLI command or absolute path used to start the ACP server |
 | `HERMES_MODEL` | `configured default` | Display/configured model label for Hermes sessions; Hermes ACP uses its own active config |
 | `HERMES_ACCEPT_HOOKS` | _(unset)_ | Set to `true` to auto-approve Hermes startup hook prompts in headless ACP sessions |

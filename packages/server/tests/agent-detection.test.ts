@@ -238,6 +238,26 @@ test('non-Windows detection uses SDK results without Windows probes', async () =
   assert.equal(copilot?.reason, 'Copilot CLI not found in PATH');
 });
 
+test('detection appends local OpenAI provider as unavailable when unconfigured', async () => {
+  const agents = await detectAvailableAgents({
+    detectAgents: async () => agentsWithCopilot(),
+    env: {
+      LOCAL_OPENAI_BASE_URL: '',
+      LOCAL_OPENAI_MODEL: '',
+      LOCAL_OPENAI_DISPLAY_NAME: '',
+    },
+    platform: 'linux',
+    execCommand: async (file) => {
+      throw new Error(`unexpected probe: ${file}`);
+    },
+  });
+
+  const local = agents.find(agent => agent.name === ('local-openai' as AgentInfo['name']));
+  assert.equal(local?.displayName, 'Local AI');
+  assert.equal(local?.available, false);
+  assert.match(local?.reason ?? '', /LOCAL_OPENAI_BASE_URL/);
+});
+
 test('configured Hermes command is the detection authority', async () => {
   const calls: Array<{ file: string; args: string[] }> = [];
   const agents = await detectAvailableAgents({
