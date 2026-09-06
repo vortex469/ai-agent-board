@@ -990,6 +990,34 @@ function extractEnvironmentProgressionError(evidence: string): string | undefine
   return undefined;
 }
 
+function isTestLikeCommand(command: string | undefined): boolean {
+  return /\b(test|tests|pytest|vitest|playwright|jest|mocha|tap|node\s+--test|npm\s+(?:run\s+)?test|pnpm\s+(?:run\s+)?test|yarn\s+(?:run\s+)?test|bun\s+test|gate:required)\b/i
+    .test(command ?? '');
+}
+
+function hasFailureEvidence(event: AgentEvent): boolean {
+  if (event.metadata?.state === 'failed') return true;
+  const content = event.content.replace(/\b(?:0|no)\s+(?:failed|failures?|errors?)\b/gi, '');
+  return /\b(?:failed|failing|failure|error|errors|exited\s+with\s+(?:code\s+)?[1-9]\d*|exit\s+(?:code\s+)?[1-9]\d*|[1-9]\d*\s+(?:failed|failures?|errors?))\b/i.test(content);
+}
+
+function hasExplicitPassEvidence(event: AgentEvent): boolean {
+  if (event.metadata?.state === 'succeeded') return true;
+  return /\b(?:pass(?:ed|es)?|passing|success(?:ful)?|succeeded|ok|green|0\s+failed|all\s+tests\s+passed)\b/i.test(event.content);
+}
+
+function isPassingFocusedTestEvent(event: AgentEvent): boolean {
+  if (!['command', 'command_output', 'output', 'test_result'].includes(event.type)) return false;
+  if (hasFailureEvidence(event)) return false;
+
+  const command = event.metadata?.command;
+  if (event.type === 'test_result') {
+    return event.metadata?.state === 'succeeded' || hasExplicitPassEvidence(event);
+  }
+
+  return isTestLikeCommand(command) && event.metadata?.state === 'succeeded';
+}
+
 async function evaluateCardProgressionGate(
   repo: TaskRepository,
   task: Task,
@@ -1003,8 +1031,21 @@ async function evaluateCardProgressionGate(
   const environmentError = extractEnvironmentProgressionError(evidence);
   if (environmentError) return { passed: false, reason: environmentError };
 
-  const focusedTestsIndex = passedGateIndex(evidence, 'Focused tests');
-  const hostileReviewIndex = passedGateIndex(evidence, 'Hostile review');
+  const textFocusedTestsIndex = passedGateIndex(evidence, 'Focused tests');
+  const textHostileReviewIndex = passedGateIndex(evidence, 'Hostile review');
+  const eventOffset = evidence.length + 1;
+  const focusedTestEventIndex = events.findIndex(isPassingFocusedTestEvent);
+  const hostileReviewEventIndex = events.findIndex((event) => (
+    ['output', 'complete'].includes(event.type) && passedGateIndex(event.content, 'Hostile review') >= 0
+  ));
+  const focusedTestsIndex = textFocusedTestsIndex >= 0
+    ? textFocusedTestsIndex
+    : focusedTestEventIndex >= 0 ? eventOffset + focusedTestEventIndex : -1;
+  const hostileReviewIndex = textHostileReviewIndex >= 0 && textFocusedTestsIndex < 0 && focusedTestEventIndex >= 0
+    ? eventOffset + events.length
+    : textHostileReviewIndex >= 0
+      ? textHostileReviewIndex
+      : hostileReviewEventIndex >= 0 ? eventOffset + hostileReviewEventIndex : -1;
   const focusedTestsPassed = focusedTestsIndex >= 0;
   const hostileReviewPassed = hostileReviewIndex >= 0;
   if (focusedTestsPassed && hostileReviewPassed && focusedTestsIndex < hostileReviewIndex) return { passed: true };

@@ -7,7 +7,7 @@ import {
   triggerAutomaticBacklogProgression,
   triggerAutomaticDependentProgression,
 } from '../src/routes/helpers.js';
-import type { Task } from '../src/types.js';
+import type { AgentEvent, Task } from '../src/types.js';
 import type { AgentManager } from '../src/services/agent-manager.js';
 
 function makeDb() {
@@ -62,6 +62,16 @@ function manager(started: string[] = [], overrides: Partial<AgentManager> = {}):
     removeWorktree: () => ({ status: 'removed' }),
     ...overrides,
   } as unknown as AgentManager;
+}
+
+let eventSeq = 0;
+async function insertEvent(repo: SqliteTaskRepository, taskId: string, event: Partial<AgentEvent> & Pick<AgentEvent, 'type' | 'content'>): Promise<void> {
+  await repo.insertEvent({
+    id: `${taskId}-${event.type}-${eventSeq += 1}`,
+    taskId,
+    timestamp: Date.now(),
+    ...event,
+  });
 }
 
 test('auto run on admits the first eligible backlog card', async () => {
@@ -186,5 +196,241 @@ test('successful task progression still moves through review to done', async () 
     assert.equal(done?.columnId, 'done');
     assert.equal(done?.agentStatus, 'complete');
     assert.equal(done?.worktreePath, undefined);
+  } finally { db.close(); }
+});
+
+test('Local AI passing focused test evidence plus hostile review allows Done', async () => {
+  const db = makeDb();
+  const repo = new SqliteTaskRepository(db);
+  try {
+    await repo.create(task('local-valid', {
+      columnId: 'in-progress',
+      agentStatus: 'executing',
+      agentType: 'local-openai',
+      worktreePath: '/tmp/agentboard-test-worktree',
+    }));
+    await insertEvent(repo, 'local-valid', {
+      type: 'command',
+      content: 'bash: {"command":"npm run test -- tests/local-ai.test.ts"}',
+      metadata: { agentType: 'local-openai', command: 'npm run test -- tests/local-ai.test.ts', state: 'running' },
+    });
+    await insertEvent(repo, 'local-valid', {
+      type: 'test_result',
+      content: '1 test passed',
+      metadata: { agentType: 'local-openai', command: 'npm run test -- tests/local-ai.test.ts', state: 'succeeded' },
+    });
+    await insertEvent(repo, 'local-valid', {
+      type: 'output',
+      content: 'Hostile review passed: checked regressions, edge cases, security issues, and missing tests.',
+      metadata: { agentType: 'local-openai' },
+    });
+
+    const done = await autoProgressCompletedTask(repo, 'local-valid', manager());
+
+    assert.equal(done?.columnId, 'done');
+    assert.equal(done?.agentStatus, 'complete');
+  } finally { db.close(); }
+});
+
+test('Local AI passing tests without hostile review remains in Review', async () => {
+  const db = makeDb();
+  const repo = new SqliteTaskRepository(db);
+  let merges = 0;
+  try {
+    await repo.create(task('no-review', {
+      columnId: 'in-progress',
+      agentStatus: 'executing',
+      agentType: 'local-openai',
+      worktreePath: '/tmp/agentboard-test-worktree',
+    }));
+    await insertEvent(repo, 'no-review', {
+      type: 'test_result',
+      content: 'ok',
+      metadata: { agentType: 'local-openai', command: 'pnpm test packages/server/tests/auto-run-backlog.test.ts', state: 'succeeded' },
+    });
+
+    const reviewed = await autoProgressCompletedTask(repo, 'no-review', manager([], {
+      mergeLocal: async () => { merges += 1; return { baseBranch: 'main' }; },
+    }));
+
+    assert.equal(merges, 0);
+    assert.equal(reviewed?.columnId, 'review');
+    assert.match(
+      [...(await repo.getEventsByTaskId('no-review'))].reverse().find((event) => event.type === 'error')?.content ?? '',
+      /missing passing hostile review evidence/i,
+    );
+  } finally { db.close(); }
+});
+
+test('Local AI hostile review with failing tests remains in Review', async () => {
+  const db = makeDb();
+  const repo = new SqliteTaskRepository(db);
+  let merges = 0;
+  try {
+    await repo.create(task('failing-tests', {
+      columnId: 'in-progress',
+      agentStatus: 'executing',
+      agentType: 'local-openai',
+      worktreePath: '/tmp/agentboard-test-worktree',
+    }));
+    await insertEvent(repo, 'failing-tests', {
+      type: 'test_result',
+      content: '1 failed, 3 passed',
+      metadata: { agentType: 'local-openai', command: 'node --test tests/focused.test.ts', state: 'failed' },
+    });
+    await insertEvent(repo, 'failing-tests', {
+      type: 'output',
+      content: 'Hostile review passed: no additional regressions found.',
+      metadata: { agentType: 'local-openai' },
+    });
+
+    const reviewed = await autoProgressCompletedTask(repo, 'failing-tests', manager([], {
+      mergeLocal: async () => { merges += 1; return { baseBranch: 'main' }; },
+    }));
+
+    assert.equal(merges, 0);
+    assert.equal(reviewed?.columnId, 'review');
+    assert.match(
+      [...(await repo.getEventsByTaskId('failing-tests'))].reverse().find((event) => event.type === 'error')?.content ?? '',
+      /missing passing focused tests evidence/i,
+    );
+  } finally { db.close(); }
+});
+
+test('vague tests-passed prose without structured evidence remains blocked', async () => {
+  const db = makeDb();
+  const repo = new SqliteTaskRepository(db);
+  try {
+    await repo.create(task('vague-prose', {
+      columnId: 'in-progress',
+      agentStatus: 'executing',
+      agentType: 'local-openai',
+      worktreePath: '/tmp/agentboard-test-worktree',
+    }));
+    await insertEvent(repo, 'vague-prose', {
+      type: 'output',
+      content: 'The tests passed and I reviewed the change.',
+      metadata: { agentType: 'local-openai' },
+    });
+    await insertEvent(repo, 'vague-prose', {
+      type: 'output',
+      content: 'Hostile review passed: looked for regressions.',
+      metadata: { agentType: 'local-openai' },
+    });
+
+    const reviewed = await autoProgressCompletedTask(repo, 'vague-prose', manager());
+
+    assert.equal(reviewed?.columnId, 'review');
+    assert.match(
+      [...(await repo.getEventsByTaskId('vague-prose'))].reverse().find((event) => event.type === 'error')?.content ?? '',
+      /missing passing focused tests evidence/i,
+    );
+  } finally { db.close(); }
+});
+
+test('normalized command output test evidence is accepted', async () => {
+  const db = makeDb();
+  const repo = new SqliteTaskRepository(db);
+  try {
+    await repo.create(task('command-output', {
+      columnId: 'in-progress',
+      agentStatus: 'executing',
+      agentType: 'local-openai',
+      worktreePath: '/tmp/agentboard-test-worktree',
+    }));
+    await insertEvent(repo, 'command-output', {
+      type: 'command_output',
+      content: '10 passed, 0 failed, 0 errors',
+      metadata: { agentType: 'local-openai', command: 'pytest tests/test_workbench.py', state: 'succeeded' },
+    });
+    await insertEvent(repo, 'command-output', {
+      type: 'output',
+      content: 'Hostile review passed: no regressions found.',
+      metadata: { agentType: 'local-openai' },
+    });
+
+    const done = await autoProgressCompletedTask(repo, 'command-output', manager());
+
+    assert.equal(done?.columnId, 'done');
+  } finally { db.close(); }
+});
+
+test('duplicate normalized evidence is handled safely', async () => {
+  const db = makeDb();
+  const repo = new SqliteTaskRepository(db);
+  let merges = 0;
+  try {
+    await repo.create(task('duplicate-events', {
+      columnId: 'in-progress',
+      agentStatus: 'executing',
+      agentType: 'local-openai',
+      worktreePath: '/tmp/agentboard-test-worktree',
+    }));
+    const event: Partial<AgentEvent> & Pick<AgentEvent, 'type' | 'content'> = {
+      type: 'test_result',
+      content: 'ok',
+      metadata: { agentType: 'local-openai', command: 'npm test', state: 'succeeded', callId: 'dup-1' },
+    };
+    await insertEvent(repo, 'duplicate-events', event);
+    await insertEvent(repo, 'duplicate-events', event);
+    await insertEvent(repo, 'duplicate-events', {
+      type: 'output',
+      content: 'Hostile review passed: no issues found.',
+      metadata: { agentType: 'local-openai' },
+    });
+    await insertEvent(repo, 'duplicate-events', {
+      type: 'output',
+      content: 'Hostile review passed: no issues found.',
+      metadata: { agentType: 'local-openai' },
+    });
+
+    const done = await autoProgressCompletedTask(repo, 'duplicate-events', manager([], {
+      mergeLocal: async () => { merges += 1; return { baseBranch: 'main' }; },
+    }));
+
+    assert.equal(done?.columnId, 'done');
+    assert.equal(merges, 1);
+  } finally { db.close(); }
+});
+
+test('DeepSeek Qwen style normalized events can move Review to Done with redacted output intact', async () => {
+  const db = makeDb();
+  const repo = new SqliteTaskRepository(db);
+  try {
+    await repo.create(task('deepseek-qwen', {
+      columnId: 'in-progress',
+      agentStatus: 'executing',
+      agentType: 'local-openai',
+      worktreePath: '/tmp/agentboard-test-worktree',
+      summary: '## Completed\nImplemented the requested change.\n## Comments\nHostile review passed: verified regressions, edge cases, security issues, and missing tests.',
+    }));
+    await insertEvent(repo, 'deepseek-qwen', {
+      type: 'command',
+      content: 'bash: {"command":"npm run test -w @ai-agent-board/server -- tests/task-relationships.test.ts"}',
+      metadata: {
+        agentType: 'local-openai',
+        command: 'npm run test -w @ai-agent-board/server -- tests/task-relationships.test.ts',
+        state: 'running',
+        toolName: 'bash',
+        callId: 'qwen-test',
+      },
+    });
+    await insertEvent(repo, 'deepseek-qwen', {
+      type: 'test_result',
+      content: 'Focused server test passed with token=[redacted]',
+      metadata: {
+        agentType: 'local-openai',
+        command: 'npm run test -w @ai-agent-board/server -- tests/task-relationships.test.ts',
+        state: 'succeeded',
+        toolName: 'bash',
+        callId: 'qwen-test',
+      },
+    });
+    const done = await autoProgressCompletedTask(repo, 'deepseek-qwen', manager());
+    const contents = (await repo.getEventsByTaskId('deepseek-qwen')).map((event) => event.content).join('\n');
+
+    assert.equal(done?.columnId, 'done');
+    assert.match(contents, /\[redacted\]/);
+    assert.doesNotMatch(contents, /sk-test|secret-token|api_key:\s*\w/i);
   } finally { db.close(); }
 });
