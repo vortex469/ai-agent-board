@@ -24,6 +24,43 @@ test('agent system prompt repeats that detailed source text wins title conflicts
   assert.match(systemPrompt, /follow the detailed description\/source item/i);
 });
 
+test('agent system prompt gives coding worktree tasks an explicit repository mutation contract', () => {
+  const systemPrompt = buildAgentSystemPrompt({
+    workingDirectory: '/tmp/agentboard-task-worktree',
+    taskTitle: 'Implement local harness prompt contract',
+    repoPath: '/tmp/source-repo',
+    worktreePath: '/tmp/agentboard-task-worktree',
+    hasGit: true,
+  });
+
+  assert.match(systemPrompt, /Task mode: Coding task/);
+  assert.match(systemPrompt, /Implementation must occur inside the managed task worktree: \/tmp\/agentboard-task-worktree/);
+  assert.match(systemPrompt, /Coding tasks are repository-mutation tasks/);
+  assert.match(systemPrompt, /different from analysis\/read-only tasks/);
+  assert.match(systemPrompt, /Do not report coding completion based only on analysis, planning, proposed code/);
+  assert.match(systemPrompt, /verify there is a non-empty git diff or a task-owned commit/);
+  assert.match(systemPrompt, /requested implementation already exists, report that condition explicitly/);
+  assert.match(systemPrompt, /blocked by permissions, sandboxing, missing dependencies, or external validation/);
+});
+
+test('agent system prompt does not impose mutation requirements on read-only tasks', () => {
+  const systemPrompt = buildAgentSystemPrompt({
+    workingDirectory: '/tmp/repo',
+    taskTitle: 'Analyze current auth flow',
+    repoPath: '/tmp/repo',
+    hasGit: true,
+    taskMode: 'read-only',
+  });
+
+  assert.match(systemPrompt, /Task mode: Analysis\/read-only task/);
+  assert.match(systemPrompt, /without applying repository-mutation completion requirements/);
+  assert.doesNotMatch(systemPrompt, /Implementation must occur inside the managed task worktree/);
+  assert.doesNotMatch(systemPrompt, /verify there is a non-empty git diff or a task-owned commit/);
+  assert.doesNotMatch(systemPrompt, /make precise edits/);
+  assert.doesNotMatch(systemPrompt, /hostile review of your own diff/);
+  assert.doesNotMatch(systemPrompt, /Run `git init` first before making any changes/);
+});
+
 test('agent system prompt records selected Python interpreter and forbids global package installs', () => {
   const systemPrompt = buildAgentSystemPrompt({
     workingDirectory: '/tmp/worktree',

@@ -76,6 +76,7 @@ class FakeChild extends EventEmitter {
 function registerDshProvider(
   manager: AgentManager,
   execute: (workingDirectory: string, child: FakeChild) => void,
+  capturePrompt?: (prompt: string) => void,
 ): void {
   const launcher = path.join(os.tmpdir(), `agentboard-dsh-launcher-${randomUUID()}.js`);
   writeFileSync(launcher, '#!/usr/bin/env node\n');
@@ -87,7 +88,8 @@ function registerDshProvider(
       LOCAL_OPENAI_DISPLAY_NAME: 'Fake Local AI',
       LOCAL_OPENAI_MODEL: 'Qwen R9700',
     },
-    spawnCommand: (_command, _args, options) => {
+    spawnCommand: (_command, args, options) => {
+      capturePrompt?.(args[3]);
       const child = new FakeChild();
       queueMicrotask(() => execute(options.cwd, child));
       return child;
@@ -98,6 +100,72 @@ function registerDshProvider(
     { name: 'local-openai', displayName: 'Fake Local AI', available: true },
   ];
 }
+
+test('managed local AI coding run receives repository mutation contract in final prompt', async () => {
+  const f = fixture();
+  const manager = new AgentManager();
+  const events: AgentEvent[] = [];
+  manager.initEventPersistence({
+    insertEvent: async (event: AgentEvent) => { events.push(event); },
+    getEventsByTaskId: async (taskId: string) => events.filter((event) => event.taskId === taskId),
+    update: async () => undefined,
+  } as unknown as Parameters<AgentManager['initEventPersistence']>[0]);
+  let finalPrompt = '';
+  registerDshProvider(
+    manager,
+    (workingDirectory, child) => {
+      writeFileSync(path.join(workingDirectory, 'prompt-contract.txt'), 'contract verified\n');
+      child.stdout.write('<task-summary>\n## Completed\nFocused tests passed: fake prompt capture.\nHostile review passed: fake review.\n</task-summary>\n');
+      child.close(0);
+    },
+    (prompt) => { finalPrompt = prompt; },
+  );
+
+  const t = {
+    ...task(f.repoPath, 'smoke/dsh-prompt-contract'),
+    title: '3. v0.4 Strengthen Local AI coding harness prompt contract',
+    description: [
+      'Task details (authoritative; follow this when it conflicts with the display title):',
+      'Update the Local AI/DeepSeek-compatible coding harness prompt so coding tasks receive an explicit repository-mutation contract before execution.',
+      '',
+      'Validation:',
+      '- Capture the final prompt supplied to a mocked Local AI coding run.',
+      '- Verify the repository-mutation contract is present.',
+      '- Confirm existing task description and validation instructions remain intact.',
+    ].join('\n'),
+  };
+  try {
+    const finalStatus = await new Promise<Task['agentStatus']>((resolve) => {
+      manager.startAgent(
+        t,
+        (status) => {
+          t.agentStatus = status;
+          if (status === 'complete' || status === 'failed') resolve(status);
+        },
+        (worktreePath) => { t.worktreePath = worktreePath; },
+      );
+    });
+
+    assert.equal(finalStatus, 'complete');
+    assert.ok(t.worktreePath);
+    assert.match(finalPrompt, /Task mode: Coding task/);
+    assert.match(finalPrompt, /Implementation must occur inside the managed task worktree:/);
+    assert.match(finalPrompt, /Coding tasks are repository-mutation tasks/);
+    assert.match(finalPrompt, /Do not report coding completion based only on analysis, planning, proposed code/);
+    assert.match(finalPrompt, /verify there is a non-empty git diff or a task-owned commit/);
+    assert.match(finalPrompt, /requested implementation already exists, report that condition explicitly/);
+    assert.match(finalPrompt, /blocked by permissions, sandboxing, missing dependencies, or external validation/);
+    assert.match(finalPrompt, /Update the Local AI\/DeepSeek-compatible coding harness prompt/);
+    assert.match(finalPrompt, /Capture the final prompt supplied to a mocked Local AI coding run/);
+    assert.match(finalPrompt, /Focused tests passed:/);
+    assert.match(finalPrompt, /Hostile review passed:/);
+    assert.match(finalPrompt, /Display title \(for board identification only\):\n3\. v0\.4 Strengthen Local AI coding harness prompt contract/);
+    assert.doesNotMatch(finalPrompt, /VoxelSurvival/);
+  } finally {
+    cleanupTaskWorktree(f.repoPath, t.worktreePath);
+    f.dispose();
+  }
+});
 
 test('managed local AI automatically retries once after no repository changes and completes when retry changes files', async () => {
   const f = fixture();

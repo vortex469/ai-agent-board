@@ -75,9 +75,31 @@ export function buildAgentSystemPrompt(args: {
   repoPath?: string;
   worktreePath?: string;
   hasGit: boolean;
+  taskMode?: 'coding' | 'read-only';
   pythonEnvironment?: PythonEnvironmentSelection | null;
 }): string {
   const safeTitle = sanitizeAgentPromptText(args.taskTitle);
+  const taskMode = args.taskMode ?? (args.worktreePath ? 'coding' : 'read-only');
+  const repositoryMutationContract = taskMode === 'coding'
+    ? `
+Task mode: Coding task.
+- Implementation must occur inside the managed task worktree: ${args.worktreePath ?? args.workingDirectory}.
+- Coding tasks are repository-mutation tasks. They are different from analysis/read-only tasks, which only inspect or explain existing code.
+- Do not report coding completion based only on analysis, planning, proposed code, or instructions for someone else to apply.
+- Before reporting coding completion, verify there is a non-empty git diff or a task-owned commit for the requested implementation.
+- If no repository change was necessary because the requested implementation already exists, report that condition explicitly instead of claiming a normal coding completion.
+- If blocked by permissions, sandboxing, missing dependencies, or external validation, report the blocker accurately instead of claiming completion.
+`
+    : `
+Task mode: Analysis/read-only task.
+- This task does not have a managed coding worktree. Inspect, explain, or validate as requested without applying repository-mutation completion requirements.
+- Do not claim implementation work was completed unless this task is rerun as a coding task with a managed worktree and repository changes are actually made.
+`;
+  const completionInstructions = taskMode === 'coding'
+    ? `Complete the task described in the user prompt. Be thorough — read relevant files,
+make precise edits, and verify your changes compile/pass tests when applicable.
+Before reporting completion, run the most focused relevant test or build check that proves the change. After tests pass, perform a hostile review of your own diff for regressions, edge cases, security issues, and missing tests. Only claim completion when both gates pass. In your final summary, include clear evidence using the phrases "Focused tests passed:" and "Hostile review passed:". If a required test cannot run because no suitable interpreter or runtime exists, report "Environment error:" with the missing interpreter/runtime and do not claim the validation gates passed.`
+    : `Complete the analysis/read-only task described in the user prompt. Be thorough — read relevant files and verify claims with the most focused applicable evidence. If blocked by permissions, sandboxing, missing dependencies, or external validation, report the blocker accurately.`;
   const pythonInstructions = args.pythonEnvironment
     ? `
 Python environment:
@@ -101,15 +123,14 @@ Python environment:
 `;
   return `
 <context>
-You are a coding agent working on a task in the project directory: ${args.workingDirectory}
+You are an AI agent working on a task in the project directory: ${args.workingDirectory}
 Task: ${safeTitle}
 The detailed task description/source item in the user prompt is authoritative. If it conflicts with this generated display title, follow the detailed description/source item.
 ${args.worktreePath ? `\nIMPORTANT: All file paths MUST be under ${args.worktreePath}. Do NOT reference or edit files at ${args.repoPath} directly.` : ''}
-${!args.hasGit ? `\nIMPORTANT: This directory is not a git repository. Run \`git init\` first before making any changes, so all work is tracked.` : ''}
+${!args.hasGit && taskMode === 'coding' ? `\nIMPORTANT: This directory is not a git repository. Run \`git init\` first before making any changes, so all work is tracked.` : ''}
+${repositoryMutationContract}
 ${pythonInstructions}
-Complete the task described in the user prompt. Be thorough — read relevant files,
-make precise edits, and verify your changes compile/pass tests when applicable.
-Before reporting completion, run the most focused relevant test or build check that proves the change. After tests pass, perform a hostile review of your own diff for regressions, edge cases, security issues, and missing tests. Only claim completion when both gates pass. In your final summary, include clear evidence using the phrases "Focused tests passed:" and "Hostile review passed:". If a required test cannot run because no suitable interpreter or runtime exists, report "Environment error:" with the missing interpreter/runtime and do not claim the validation gates passed.
+${completionInstructions}
 
 When you have finished, end your VERY LAST message with a task summary in EXACTLY this format (keep the tags on their own lines):
 <task-summary>
@@ -837,6 +858,7 @@ export class AgentManager {
           repoPath: task.repoPath,
           worktreePath,
           hasGit,
+          taskMode: worktreePath ? 'coding' : 'read-only',
           pythonEnvironment,
         });
 
