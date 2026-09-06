@@ -340,12 +340,37 @@ for (const vp of MOBILE_VIEWPORTS) {
       await page.getByRole('button', { name: 'Terminal' }).click();
       await expect(composer).toBeInViewport();
 
-      // Actions tab.
-      await page.getByRole('button', { name: /^Actions/ }).click();
+      // Changes tab.
+      await page.getByRole('button', { name: /^Changes/ }).click();
       await expect(composer).toBeInViewport();
     });
 
     test('completed branch metadata scrolls while composer and actions stay reachable', async ({ page }) => {
+      await page.route('**/api/tasks/*/git-info', (route) => route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          hasRemote: false,
+          mergeReady: true,
+          repositoryEvidence: {
+            available: true,
+            state: 'working_tree_changes',
+            worktreePath: '/tmp/agentboard-mobile-evidence-worktree',
+            taskBranch: 'mobile/completed-worktree-fixture',
+            baseBranch: 'main',
+            baseCommit: '4444444444444444444444444444444444444444',
+            baseShortCommit: '4444444',
+            changedFileCount: 2,
+            modifiedFileCount: 1,
+            untrackedFileCount: 1,
+            commitsAhead: 0,
+            changedFiles: [
+              { path: 'packages/client/src/components/AgentPanel.tsx', status: 'M' },
+              { path: 'packages/server/src/routes/git.ts', status: '??' },
+            ],
+          },
+        }),
+      }));
       await page.reload();
       await waitForBoard(page);
       await openTaskDrawer(page, COMPLETED_WORKTREE_TITLE);
@@ -372,6 +397,20 @@ for (const vp of MOBILE_VIEWPORTS) {
       await merge.scrollIntoViewIfNeeded();
       await expectTouchTarget(merge);
       await expect(composer).toBeInViewport();
+
+      await page.getByRole('button', { name: /^Changes/ }).click();
+      await expect(page.getByText('Working-tree changes present')).toBeInViewport();
+      await expect(page.getByText('/tmp/agentboard-mobile-evidence-worktree')).toBeVisible();
+      await expect(page.getByText('packages/client/src/components/AgentPanel.tsx')).toBeVisible();
+      await expect(composer).toBeInViewport();
+
+      const widthMetrics = await page.evaluate(() => ({
+        docScrollWidth: document.documentElement.scrollWidth,
+        innerWidth: window.innerWidth,
+        bodyScrollWidth: document.body.scrollWidth,
+      }));
+      expect(widthMetrics.docScrollWidth).toBeLessThanOrEqual(widthMetrics.innerWidth + 1);
+      expect(widthMetrics.bodyScrollWidth).toBeLessThanOrEqual(widthMetrics.innerWidth + 1);
     });
 
 

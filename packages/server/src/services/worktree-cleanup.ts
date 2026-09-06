@@ -14,6 +14,10 @@ export type WorktreeCleanupInspection =
   | { status: 'ready'; device: number; inode: number }
   | Exclude<WorktreeCleanupResult, { status: 'removed' }>;
 
+export type WorktreeIdentityInspection =
+  | { status: 'ready' }
+  | Exclude<WorktreeCleanupResult, { status: 'removed' }>;
+
 export interface WorktreeReconciliationReport {
   removed: string[];
   missing: string[];
@@ -345,6 +349,48 @@ export function inspectTaskWorktree(task: Task): WorktreeCleanupInspection {
     return { status: 'blocked', reason: 'Refusing to remove a path outside the Board-managed worktree path.' };
   }
   return inspectRegisteredPath(task.repoPath, task.worktreePath, task.branchName);
+}
+
+export function inspectTaskWorktreeIdentity(task: Task): WorktreeIdentityInspection {
+  if (!task.worktreePath || !task.repoPath) return { status: 'missing' };
+  if (!task.branchName) return { status: 'blocked', reason: 'Task has no branch to verify.' };
+  if (!managedPathForTask(task)) {
+    return { status: 'blocked', reason: 'Refusing to inspect a path outside the Board-managed worktree path.' };
+  }
+
+  const resolvedRepo = path.resolve(task.repoPath);
+  const resolvedWorktree = path.resolve(task.worktreePath);
+  if (normalizedPath(resolvedRepo) === normalizedPath(resolvedWorktree)) {
+    return { status: 'blocked', reason: 'Refusing to inspect the main repository checkout.' };
+  }
+  if (!fs.existsSync(resolvedWorktree)) return { status: 'missing' };
+  if (fs.lstatSync(resolvedWorktree).isSymbolicLink()) {
+    return { status: 'blocked', reason: 'Refusing to inspect a symbolic-link worktree path.' };
+  }
+
+  try {
+    const registered = listRegisteredWorktrees(resolvedRepo);
+    const matches = registered.filter((entry) => normalizedPath(entry.path) === normalizedPath(resolvedWorktree));
+    if (matches.length === 0) return { status: 'blocked', reason: 'The directory is not registered as a worktree for this repository.' };
+    if (matches.length !== 1 || matches[0]?.branch !== task.branchName) {
+      return { status: 'blocked', reason: 'The registered worktree branch does not match the task branch.' };
+    }
+
+    const stat = fs.lstatSync(resolvedWorktree);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) return { status: 'blocked', reason: 'Worktree path is not a directory.' };
+    const topLevel = execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd: resolvedWorktree, stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim();
+    const worktreeCommon = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: resolvedWorktree, stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim();
+    const repoCommon = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: resolvedRepo, stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim();
+    const branch = execFileSync('git', ['symbolic-ref', 'HEAD'], { cwd: resolvedWorktree, stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim();
+    if (normalizedPath(topLevel) !== normalizedPath(fs.realpathSync(resolvedWorktree))
+      || normalizedPath(worktreeCommon) !== normalizedPath(repoCommon)
+      || branch !== `refs/heads/${task.branchName}`) {
+      return { status: 'blocked', reason: 'Worktree identity does not match the task repository and branch.' };
+    }
+    return { status: 'ready' };
+  } catch {
+    return { status: 'blocked', reason: 'Could not verify the worktree against its repository.' };
+  }
 }
 
 export async function cleanupPersistedTaskWorktree(

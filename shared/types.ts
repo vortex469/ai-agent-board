@@ -164,6 +164,43 @@ export interface ProjectPathValidation {
   warning?: string;
 }
 
+export type RepositoryEvidenceState =
+  | 'no_changes'
+  | 'working_tree_changes'
+  | 'task_commit_present'
+  | 'clean_after_commit'
+  | 'unavailable';
+
+export interface RepositoryEvidenceFile {
+  path: string;
+  status: string;
+}
+
+export interface RepositoryEvidenceCommit {
+  sha: string;
+  shortSha: string;
+  subject: string;
+  authorName: string;
+  authorDate: string;
+}
+
+export interface RepositoryEvidence {
+  available: boolean;
+  state: RepositoryEvidenceState;
+  worktreePath?: string;
+  taskBranch?: string;
+  baseBranch?: string;
+  baseCommit?: string;
+  baseShortCommit?: string;
+  changedFileCount: number;
+  modifiedFileCount: number;
+  untrackedFileCount: number;
+  commitsAhead: number;
+  changedFiles: RepositoryEvidenceFile[];
+  latestTaskCommit?: RepositoryEvidenceCommit;
+  error?: string;
+}
+
 export interface RoadmapProposedTask {
   order: number;
   title: string;

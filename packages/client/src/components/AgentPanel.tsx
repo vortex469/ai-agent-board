@@ -24,7 +24,7 @@ import {
   Download,
   Paperclip,
 } from 'lucide-react';
-import type { Task, AgentEvent, AgentEventType } from '@/types';
+import type { Task, AgentEvent, AgentEventType, RepositoryEvidence } from '@/types';
 import { getAgentDisplay } from '@/lib/agent-config';
 import { TerminalView } from './TerminalView';
 import { api, connectWS } from '@/lib/api';
@@ -260,6 +260,35 @@ function formatTaskStatus(task: Task): string {
   return `${columnLabel} / ${agentStatusLabel}`;
 }
 
+const repositoryStateLabel: Record<string, string> = {
+  no_changes: 'No changes yet',
+  working_tree_changes: 'Working-tree changes present',
+  task_commit_present: 'Task commit present',
+  clean_after_commit: 'Clean after commit',
+  unavailable: 'Repository evidence unavailable',
+};
+
+function formatRepositoryEvidenceForCopy(evidence: RepositoryEvidence): string {
+  const lines = [
+    `Repository state: ${repositoryStateLabel[evidence.state] ?? evidence.state}`,
+    `Worktree path: ${evidence.worktreePath ?? 'Not recorded'}`,
+    `Task branch: ${evidence.taskBranch ?? 'Not recorded'}`,
+    `Base: ${evidence.baseBranch ?? 'Not recorded'}${evidence.baseShortCommit ? ` @ ${evidence.baseShortCommit}` : ''}`,
+    `Changed files: ${evidence.changedFileCount} (${evidence.modifiedFileCount} modified, ${evidence.untrackedFileCount} untracked)`,
+    `Commits ahead: ${evidence.commitsAhead}`,
+  ];
+  if (evidence.latestTaskCommit) {
+    lines.push(`Latest task commit: ${evidence.latestTaskCommit.shortSha} ${evidence.latestTaskCommit.subject}`);
+  }
+  if (evidence.changedFiles.length > 0) {
+    lines.push('', 'Changed file list:');
+    for (const file of evidence.changedFiles) {
+      lines.push(`${file.status} ${file.path}`);
+    }
+  }
+  return lines.join('\n');
+}
+
 function formatTaskResultForCopy(task: Task, summary: string): string {
   const completed = cleanSummarySection(getMarkdownSection(summary, 'Completed'));
   const comments = cleanSummarySection(getMarkdownSection(summary, 'Comments'));
@@ -293,7 +322,7 @@ interface AgentPanelProps {
   theme?: 'dark' | 'light';
 }
 
-function CopyButton({ text }: { text: string }) {
+function CopyButton({ text, label = 'Copy' }: { text: string; label?: string }) {
   const [copied, setCopied] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => { clearTimeout(timerRef.current); }, []);
@@ -309,6 +338,8 @@ function CopyButton({ text }: { text: string }) {
   return (
     <button
       onClick={handleCopy}
+      aria-label={label}
+      title={label}
       className="flex h-11 w-11 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground lg:h-6 lg:w-6"
     >
       {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
@@ -538,6 +569,7 @@ export function AgentPanel({ task, onClose, onRun, onStop, onCreatePR, onMergeLo
   const [hasRemote, setHasRemote] = useState<boolean | null>(null);
   const [mergeReady, setMergeReady] = useState<boolean | null>(null);
   const [mergeBlockedReason, setMergeBlockedReason] = useState<string | null>(null);
+  const [repositoryEvidence, setRepositoryEvidence] = useState<RepositoryEvidence | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const taskId = task?.id ?? null;
@@ -566,6 +598,7 @@ export function AgentPanel({ task, onClose, onRun, onStop, onCreatePR, onMergeLo
     setHasRemote(null);
     setMergeReady(null);
     setMergeBlockedReason(null);
+    setRepositoryEvidence(null);
     setFollowUpMessage('');
     setSending(false);
     setFollowUpImages([]);
@@ -616,18 +649,30 @@ export function AgentPanel({ task, onClose, onRun, onStop, onCreatePR, onMergeLo
 
   useEffect(() => {
     if (!taskId) return;
-    setHasRemote(null);
-    setMergeReady(null);
-    setMergeBlockedReason(null);
-    api.getGitInfo(taskId).then((info) => {
+    let cancelled = false;
+    const refreshGitInfo = () => api.getGitInfo(taskId).then((info) => {
+      if (cancelled) return;
       setHasRemote(info.hasRemote);
       setMergeReady(info.mergeReady ?? true);
       setMergeBlockedReason(info.mergeBlockedReason ?? null);
+      setRepositoryEvidence(info.repositoryEvidence ?? null);
     }).catch(() => {
+      if (cancelled) return;
       setHasRemote(false);
       setMergeReady(null);
       setMergeBlockedReason(null);
+      setRepositoryEvidence(null);
     });
+    setHasRemote(null);
+    setMergeReady(null);
+    setMergeBlockedReason(null);
+    refreshGitInfo();
+    const isTaskActive = task?.agentStatus === 'executing' || task?.agentStatus === 'planning';
+    const interval = isTaskActive ? window.setInterval(refreshGitInfo, 5_000) : undefined;
+    return () => {
+      cancelled = true;
+      if (interval) window.clearInterval(interval);
+    };
   }, [taskId, task?.branchName, task?.repoPath, task?.worktreePath, task?.agentStatus]);
 
   // Fix #4: Sync streaming state with agentStatus (avoids stale closure on [taskId] effect)
@@ -1102,7 +1147,7 @@ export function AgentPanel({ task, onClose, onRun, onStop, onCreatePR, onMergeLo
                   : 'text-muted-foreground hover:text-foreground'
               )}
             >
-              Actions{actionEvents.length > 0 ? ` (${actionEvents.length})` : ''}
+              Changes{repositoryEvidence && repositoryEvidence.changedFileCount > 0 ? ` (${repositoryEvidence.changedFileCount})` : ''}
             </button>
             </div>
             <div className="flex shrink-0 items-center gap-1">
@@ -1175,34 +1220,32 @@ export function AgentPanel({ task, onClose, onRun, onStop, onCreatePR, onMergeLo
 
           {/* Changes list */}
           {activeTab === 'changes' && (
-            <div className="min-h-32 flex-1 overflow-y-auto p-2 space-y-1 lg:min-h-0">
-              {actionEvents.length === 0 && (
-                <div className="flex h-full items-center justify-center">
-                  <div className="text-center">
-                    <FileCode2 className="mx-auto h-10 w-10 text-muted-foreground/20" />
-                    <p className="mt-3 text-sm text-muted-foreground/50">No actions yet</p>
-                  </div>
+            <div className="min-h-32 flex-1 overflow-y-auto p-2 space-y-2 lg:min-h-0">
+              <RepositoryEvidenceView evidence={repositoryEvidence} />
+              {actionEvents.length > 0 && (
+                <div className="space-y-1">
+                  <p className="px-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Agent actions</p>
+                  {actionEvents.map((event) => {
+                    const state = typeof event.metadata?.state === 'string' ? event.metadata.state : undefined;
+                    const pathLabel = event.metadata?.file;
+                    const commandLabel = event.metadata?.command;
+                    const title = pathLabel ?? commandLabel ?? compactToolSummary(event.content) ?? eventLabelMap[event.type];
+                    const typeLabel = state ?? eventLabelMap[event.type];
+                    const file = pathLabel ? fileChanges.find((change) => change.path === pathLabel) : undefined;
+                    return (
+                      <details key={event.id} className="group rounded-lg border border-border bg-card">
+                        <summary className="flex min-h-11 cursor-pointer items-center gap-2 px-3 py-2 text-sm hover:bg-accent/50 lg:min-h-0">
+                          <span className="flex-1 font-mono text-xs text-foreground truncate" title={title}>{title}</span>
+                          <span className="text-[10px] text-muted-foreground capitalize">{typeLabel}</span>
+                        </summary>
+                        <div className="border-t border-border px-3 py-2 overflow-x-auto">
+                          <pre className="text-xs font-mono text-muted-foreground whitespace-pre-wrap">{file?.diff || event.content}</pre>
+                        </div>
+                      </details>
+                    );
+                  })}
                 </div>
               )}
-              {actionEvents.map((event) => {
-                const state = typeof event.metadata?.state === 'string' ? event.metadata.state : undefined;
-                const pathLabel = event.metadata?.file;
-                const commandLabel = event.metadata?.command;
-                const title = pathLabel ?? commandLabel ?? compactToolSummary(event.content) ?? eventLabelMap[event.type];
-                const typeLabel = state ?? eventLabelMap[event.type];
-                const file = pathLabel ? fileChanges.find((change) => change.path === pathLabel) : undefined;
-                return (
-                  <details key={event.id} className="group rounded-lg border border-border bg-card">
-                    <summary className="flex min-h-11 cursor-pointer items-center gap-2 px-3 py-2 text-sm hover:bg-accent/50 lg:min-h-0">
-                      <span className="flex-1 font-mono text-xs text-foreground truncate" title={title}>{title}</span>
-                      <span className="text-[10px] text-muted-foreground capitalize">{typeLabel}</span>
-                    </summary>
-                    <div className="border-t border-border px-3 py-2 overflow-x-auto">
-                      <pre className="text-xs font-mono text-muted-foreground whitespace-pre-wrap">{file?.diff || event.content}</pre>
-                    </div>
-                  </details>
-                );
-              })}
             </div>
           )}
 
@@ -1349,6 +1392,107 @@ export function AgentPanel({ task, onClose, onRun, onStop, onCreatePR, onMergeLo
         </>
       )}
     </AnimatePresence>
+  );
+}
+
+function RepositoryEvidenceView({ evidence }: { evidence: RepositoryEvidence | null }) {
+  if (!evidence) {
+    return (
+      <div className="rounded-lg border border-border bg-muted/30 p-4 text-center">
+        <FileCode2 className="mx-auto h-10 w-10 text-muted-foreground/20" />
+        <p className="mt-3 text-sm text-muted-foreground/60">Repository evidence is loading</p>
+      </div>
+    );
+  }
+
+  const stateLabel = repositoryStateLabel[evidence.state] ?? evidence.state;
+  const stateClass = evidence.state === 'unavailable'
+    ? 'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300'
+    : evidence.state === 'no_changes'
+      ? 'border-border bg-muted/30 text-muted-foreground'
+      : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300';
+
+  return (
+    <div className="space-y-2">
+      <div className={cn('rounded-lg border p-3', stateClass)}>
+        <div className="flex items-start gap-2">
+          <FileCode2 className="mt-0.5 h-4 w-4 shrink-0" />
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-semibold">{stateLabel}</p>
+            {evidence.error && (
+              <p className="mt-1 text-xs leading-relaxed opacity-80">{evidence.error}</p>
+            )}
+          </div>
+          <CopyButton text={formatRepositoryEvidenceForCopy(evidence)} label="Copy repository evidence" />
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        <EvidenceMetric label="Changed files" value={String(evidence.changedFileCount)} />
+        <EvidenceMetric label="Commits ahead" value={String(evidence.commitsAhead)} />
+        <EvidenceMetric label="Modified" value={String(evidence.modifiedFileCount)} />
+        <EvidenceMetric label="Untracked" value={String(evidence.untrackedFileCount)} />
+      </div>
+
+      <div className="rounded-lg border border-border bg-card">
+        <EvidenceRow label="Worktree path" value={evidence.worktreePath ?? 'Not recorded'} copyValue={evidence.worktreePath} copyLabel="Copy worktree path" />
+        <EvidenceRow label="Task branch" value={evidence.taskBranch ?? 'Not recorded'} />
+        <EvidenceRow
+          label="Base"
+          value={`${evidence.baseBranch ?? 'Not recorded'}${evidence.baseShortCommit ? ` @ ${evidence.baseShortCommit}` : ''}`}
+          title={evidence.baseCommit}
+        />
+        {evidence.latestTaskCommit && (
+          <EvidenceRow
+            label="Latest task commit"
+            value={`${evidence.latestTaskCommit.shortSha} ${evidence.latestTaskCommit.subject}`}
+            title={`${evidence.latestTaskCommit.sha} ${evidence.latestTaskCommit.authorName} ${evidence.latestTaskCommit.authorDate}`}
+          />
+        )}
+      </div>
+
+      <div className="rounded-lg border border-border bg-card">
+        <div className="flex min-h-11 items-center justify-between gap-2 border-b border-border px-3 py-2 lg:min-h-0">
+          <p className="text-xs font-semibold text-foreground">Changed file list</p>
+          <CopyButton text={evidence.changedFiles.map((file) => `${file.status} ${file.path}`).join('\n') || 'No changed files'} label="Copy changed file list" />
+        </div>
+        {evidence.changedFiles.length === 0 ? (
+          <p className="px-3 py-4 text-center text-sm text-muted-foreground/60">No repository changes</p>
+        ) : (
+          <div className="divide-y divide-border">
+            {evidence.changedFiles.map((file) => (
+              <div key={`${file.status}:${file.path}`} className="flex min-h-11 items-start gap-2 px-3 py-2 lg:min-h-0">
+                <span className="mt-0.5 shrink-0 rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+                  {file.status}
+                </span>
+                <span className="min-w-0 break-all font-mono text-xs text-foreground">{file.path}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function EvidenceMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-lg border border-border bg-card px-3 py-2">
+      <p className="text-[10px] text-muted-foreground">{label}</p>
+      <p className="mt-0.5 text-lg font-semibold text-foreground">{value}</p>
+    </div>
+  );
+}
+
+function EvidenceRow({ label, value, copyValue, copyLabel, title }: { label: string; value: string; copyValue?: string; copyLabel?: string; title?: string }) {
+  return (
+    <div className="flex min-h-11 items-start gap-2 border-b border-border px-3 py-2 last:border-b-0 lg:min-h-0">
+      <div className="min-w-0 flex-1">
+        <p className="text-[10px] text-muted-foreground">{label}</p>
+        <p className="break-all font-mono text-xs text-foreground" title={title}>{value}</p>
+      </div>
+      {copyValue && <CopyButton text={copyValue} label={copyLabel} />}
+    </div>
   );
 }
 

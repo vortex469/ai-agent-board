@@ -232,7 +232,7 @@ test.describe('Task CRUD', () => {
     { label: 'DeepSeek', agentType: 'local-openai' },
     { label: 'Qwen', agentType: 'local-openai' },
   ] as const) {
-    test(`mocked ${agentCase.label} command lifecycle renders in Events, Terminal, and Actions`, async ({ page }) => {
+    test(`mocked ${agentCase.label} command lifecycle renders in Events, Terminal, and Changes`, async ({ page }) => {
       const taskTitle = `${agentCase.label} Events Task ${Date.now()}`;
       const taskId = `${agentCase.label.toLowerCase()}-events-${Date.now()}`;
       const task = {
@@ -376,7 +376,7 @@ test.describe('Task CRUD', () => {
     await expect(page.getByText('server build failed')).toBeVisible();
     await expect(page.getByText('packages/server/src/index.ts')).toBeVisible();
 
-    await page.getByRole('button', { name: /^Actions/ }).click();
+    await page.getByRole('button', { name: /^Changes/ }).click();
     await expect(page.getByText('pytest tests/test_workbench.py').first()).toBeVisible();
     await expect(page.getByText('npm run build:server').first()).toBeVisible();
     await expect(page.getByText('rg AgentPanel packages/client/src/components').first()).toBeVisible();
@@ -387,6 +387,173 @@ test.describe('Task CRUD', () => {
     await expect(page.getByText(`Focused tests passed: ${agentCase.label} command lifecycle projection`)).toBeVisible();
   });
   }
+
+  test('repository evidence renders working-tree, committed, and no-change states', async ({ page }) => {
+    const now = Date.now();
+    const tasks = [
+      {
+        id: `repo-working-${now}`,
+        title: `Repo Evidence Working ${now}`,
+        description: 'Mocked task with managed worktree changes',
+        priority: 'medium',
+        columnId: 'in-progress',
+        agentStatus: 'executing',
+        agentType: 'codex',
+        createdAt: now,
+        projectId: 'default',
+        repoPath: '/tmp/repo',
+        worktreePath: '/tmp/agentboard-working-worktree',
+        branchName: 'task/repo-working',
+        baseBranch: 'main',
+      },
+      {
+        id: `repo-commit-${now}`,
+        title: `Repo Evidence Commit ${now}`,
+        description: 'Mocked task with committed work',
+        priority: 'medium',
+        columnId: 'review',
+        agentStatus: 'complete',
+        agentType: 'codex',
+        createdAt: now + 1,
+        projectId: 'default',
+        repoPath: '/tmp/repo',
+        worktreePath: '/tmp/agentboard-commit-worktree',
+        branchName: 'task/repo-commit',
+        baseBranch: 'develop',
+        summary: '## Completed\nCommitted work.\n',
+      },
+      {
+        id: `repo-clean-${now}`,
+        title: `Repo Evidence None ${now}`,
+        description: 'Mocked task with no changes',
+        priority: 'medium',
+        columnId: 'in-progress',
+        agentStatus: 'idle',
+        agentType: 'codex',
+        createdAt: now + 2,
+        projectId: 'default',
+        repoPath: '/tmp/repo',
+        worktreePath: '/tmp/agentboard-clean-worktree',
+        branchName: 'task/repo-clean',
+        baseBranch: 'main',
+      },
+    ];
+    const evidenceById: Record<string, any> = {
+      [tasks[0].id]: {
+        available: true,
+        state: 'working_tree_changes',
+        worktreePath: tasks[0].worktreePath,
+        taskBranch: tasks[0].branchName,
+        baseBranch: 'main',
+        baseCommit: '1111111111111111111111111111111111111111',
+        baseShortCommit: '1111111',
+        changedFileCount: 2,
+        modifiedFileCount: 1,
+        untrackedFileCount: 1,
+        commitsAhead: 0,
+        changedFiles: [
+          { path: 'packages/client/src/components/AgentPanel.tsx', status: 'M' },
+          { path: 'packages/server/src/routes/git.ts', status: '??' },
+        ],
+      },
+      [tasks[1].id]: {
+        available: true,
+        state: 'clean_after_commit',
+        worktreePath: tasks[1].worktreePath,
+        taskBranch: tasks[1].branchName,
+        baseBranch: 'develop',
+        baseCommit: '2222222222222222222222222222222222222222',
+        baseShortCommit: '2222222',
+        changedFileCount: 0,
+        modifiedFileCount: 0,
+        untrackedFileCount: 0,
+        commitsAhead: 1,
+        changedFiles: [],
+        latestTaskCommit: {
+          sha: 'abcdef1234567890abcdef1234567890abcdef12',
+          shortSha: 'abcdef1',
+          subject: 'Agent Board: repository evidence',
+          authorName: 'Agent',
+          authorDate: '2026-09-06T00:00:00Z',
+        },
+      },
+      [tasks[2].id]: {
+        available: true,
+        state: 'no_changes',
+        worktreePath: tasks[2].worktreePath,
+        taskBranch: tasks[2].branchName,
+        baseBranch: 'main',
+        baseCommit: '3333333333333333333333333333333333333333',
+        baseShortCommit: '3333333',
+        changedFileCount: 0,
+        modifiedFileCount: 0,
+        untrackedFileCount: 0,
+        commitsAhead: 0,
+        changedFiles: [],
+      },
+    };
+
+    await page.route('**/api/projects', (route) => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify([{ id: 'default', name: 'Default', isDefault: true, createdAt: 1, updatedAt: 1 }]),
+    }));
+    await page.route('**/api/projects/config', (route) => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ cloneRoot: '/tmp' }),
+    }));
+    const fulfillTasks = (route: Route) => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(tasks),
+    });
+    await page.route('**/api/tasks', fulfillTasks);
+    await page.route('**/api/tasks?*', fulfillTasks);
+    await page.route('**/api/tasks/*/events', (route) => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify([]),
+    }));
+    await page.route('**/api/tasks/*/git-info', (route) => {
+      const id = route.request().url().match(/\/api\/tasks\/([^/]+)\/git-info/)?.[1] ?? '';
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ hasRemote: false, mergeReady: true, repositoryEvidence: evidenceById[id] }),
+      });
+    });
+
+    await page.goto('/');
+    await waitForBoard(page);
+
+    await page.getByRole('heading', { name: tasks[0].title }).click();
+    await page.getByRole('button', { name: /^Changes/ }).click();
+    await expect(page.getByText('Working-tree changes present')).toBeVisible();
+    await expect(page.getByText('2').first()).toBeVisible();
+    await expect(page.getByText('/tmp/agentboard-working-worktree')).toBeVisible();
+    await expect(page.getByText('task/repo-working')).toBeVisible();
+    await expect(page.getByText('main @ 1111111')).toBeVisible();
+    await expect(page.getByText('packages/client/src/components/AgentPanel.tsx')).toBeVisible();
+    await page.getByRole('button', { name: 'Copy changed file list' }).click();
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('M packages/client/src/components/AgentPanel.tsx');
+    await page.getByRole('button', { name: 'Close panel (Esc)' }).click();
+
+    await page.getByRole('heading', { name: tasks[1].title }).click();
+    await page.getByRole('button', { name: /^Changes/ }).click();
+    await expect(page.getByText('Clean after commit')).toBeVisible();
+    await expect(page.getByText('develop @ 2222222')).toBeVisible();
+    await expect(page.getByText('abcdef1 Agent Board: repository evidence')).toBeVisible();
+    await expect(page.getByText('No repository changes')).toBeVisible();
+    await page.getByRole('button', { name: 'Close panel (Esc)' }).click();
+
+    await page.getByRole('heading', { name: tasks[2].title }).click();
+    await page.getByRole('button', { name: /^Changes/ }).click();
+    await expect(page.getByText('No changes yet')).toBeVisible();
+    await expect(page.getByText('Changed files')).toBeVisible();
+    await expect(page.getByText('Commits ahead')).toBeVisible();
+    await expect(page.getByText('No repository changes')).toBeVisible();
+  });
 
   test('Summary tab is hidden for in-progress tasks', async ({ page }) => {
     const taskTitle = `Progress Panel ${Date.now()}`;
