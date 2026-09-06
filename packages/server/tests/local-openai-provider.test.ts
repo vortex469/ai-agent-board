@@ -93,6 +93,10 @@ function toolResult(seq: number, callId: string, text: string, isError = false) 
   };
 }
 
+function toolOutput(seq: number, callId: string, text: string, stream: 'stdout' | 'stderr' = 'stdout') {
+  return { type: `tool/${stream}`, seq, time: Date.now(), data: { turn: 1, step: 1, callId, stream, text } };
+}
+
 function makeSession(args: {
   dir: string;
   launcherPath: string;
@@ -276,12 +280,14 @@ test('local AI DSH persisted SessionEvents are normalized before process complet
     toolCall(3, 'edit-1', 'edit_file', { path: 'safe.ts' }),
     toolCall(4, 'search-1', 'grep', { pattern: 'LocalOpenAIProvider', path: 'packages/server/src' }),
     toolCall(5, 'bash-1', 'bash', { command: 'npm run build:server' }),
-    toolResult(6, 'bash-1', 'Focused tests passed: representative DSH stream'),
-    toolCall(7, 'test-1', 'bash', { command: 'npm test -- --runInBand' }),
-    toolResult(8, 'test-1', '1 test failed', true),
-    toolCall(9, 'unknown-1', 'custom_safe_tool', { value: 'safe', reasoning: 'hidden tool thought' }),
-    { type: 'assistant/chunk', seq: 10, data: { chunk: { type: 'reasoning-delta', text: 'private chain of thought' } } },
-    { type: 'reasoning-chunks', seq0: 11, data: { texts: ['private reasoning'] } },
+    toolOutput(6, 'bash-1', '\x1b[32mserver stdout chunk\x1b[0m\n'),
+    toolOutput(7, 'bash-1', 'server stderr chunk\n', 'stderr'),
+    toolResult(8, 'bash-1', 'Focused tests passed: representative DSH stream'),
+    toolCall(9, 'test-1', 'bash', { command: 'npm test -- --runInBand' }),
+    toolResult(10, 'test-1', '1 test failed', true),
+    toolCall(11, 'unknown-1', 'custom_safe_tool', { value: 'safe', reasoning: 'hidden tool thought' }),
+    { type: 'assistant/chunk', seq: 12, data: { chunk: { type: 'reasoning-delta', text: 'private chain of thought' } } },
+    { type: 'reasoning-chunks', seq0: 13, data: { texts: ['private reasoning'] } },
   ]);
   child.stderr.write('harness private stderr reasoning\n');
   await delay(400);
@@ -294,7 +300,26 @@ test('local AI DSH persisted SessionEvents are normalized before process complet
   ));
   assert.ok(events.some((event) =>
     event.type === 'command' &&
-    event.metadata?.command === 'npm run build:server'
+    event.metadata?.command === 'npm run build:server' &&
+    event.metadata?.state === 'running'
+  ));
+  assert.ok(events.some((event) =>
+    event.type === 'command_output' &&
+    event.content.includes('\x1b[32mserver stdout chunk\x1b[0m') &&
+    event.metadata?.command === 'npm run build:server' &&
+    event.metadata?.state === 'running'
+  ));
+  assert.ok(events.some((event) =>
+    event.type === 'command_output' &&
+    event.content.includes('server stderr chunk') &&
+    event.metadata?.command === 'npm run build:server' &&
+    event.metadata?.state === 'running'
+  ));
+  assert.ok(events.some((event) =>
+    event.type === 'command_output' &&
+    event.content.includes('Focused tests passed') &&
+    event.metadata?.command === 'npm run build:server' &&
+    event.metadata?.state === 'succeeded'
   ));
   assert.ok(events.some((event) =>
     event.type === 'file_write' &&
@@ -311,8 +336,13 @@ test('local AI DSH persisted SessionEvents are normalized before process complet
   ));
   assert.ok(events.some((event) =>
     event.type === 'test_result' &&
-    event.content.includes('1 test failed')
+    event.content.includes('1 test failed') &&
+    event.metadata?.state === 'failed'
   ));
+  const buildCommandIndex = events.findIndex((event) => event.type === 'command' && event.metadata?.command === 'npm run build:server');
+  const firstBuildOutputIndex = events.findIndex((event) => event.type === 'command_output' && event.content.includes('server stdout chunk'));
+  const finalBuildOutputIndex = events.findIndex((event) => event.type === 'command_output' && event.content.includes('Focused tests passed'));
+  assert.ok(buildCommandIndex >= 0 && firstBuildOutputIndex > buildCommandIndex && finalBuildOutputIndex > firstBuildOutputIndex);
   assert.ok(events.some((event) =>
     event.type === 'tool_call' &&
     event.content.includes('custom_safe_tool')

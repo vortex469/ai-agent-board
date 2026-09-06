@@ -350,6 +350,22 @@ function toolResultDetails(record: Record<string, unknown>): {
   return { callId, output, failed, error };
 }
 
+function toolOutputDetails(record: Record<string, unknown>): {
+  callId?: string;
+  output: string;
+  stream?: string;
+} {
+  const data = asRecord(record.data) ?? record;
+  const callId = stringField(data, ['callId', 'toolCallId', 'tool_call_id']);
+  const stream = stringField(data, ['stream', 'fd', 'source', 'name']);
+  const nested = nestedRecord(data, ['chunk', 'delta', 'output', 'payload', 'message']);
+  const output =
+    stringField(data, ['text', 'content', 'output', 'stdout', 'stderr', 'delta']) ??
+    (nested ? stringField(nested, ['text', 'content', 'output', 'stdout', 'stderr', 'delta']) : undefined) ??
+    extractText(data.content ?? data.output ?? data.message);
+  return { callId, output: output ?? '', stream };
+}
+
 function testLike(command: string | undefined, toolName: string): boolean {
   return /\b(test|tests|pytest|vitest|playwright|jest|mocha|npm\s+(?:run\s+)?test|gate:required)\b/i
     .test(`${toolName} ${command ?? ''}`);
@@ -416,6 +432,34 @@ function normalizeToolResult(record: Record<string, unknown>, calls: Map<string,
   return [{ type: 'command_output', content: output || (failed ? 'Tool failed.' : 'Tool completed.'), metadata: base }];
 }
 
+function normalizeToolOutput(record: Record<string, unknown>, calls: Map<string, { toolName: string; command?: string }>): NormalizedHarnessEvent[] {
+  const { callId, output, stream } = toolOutputDetails(record);
+  if (!output) return [];
+  const call = callId ? calls.get(callId) : undefined;
+  const toolName = call?.toolName ?? stringField(asRecord(record.data) ?? record, ['name', 'tool', 'toolName', 'tool_name']) ?? 'tool';
+  const command = call?.command ?? commandFromRecord(asRecord(record.data) ?? record);
+  return [{
+    type: 'command_output',
+    content: output,
+    metadata: dshMetadata({
+      callId,
+      toolName,
+      command,
+      state: 'running',
+      operation: stream ? `${toolName.toLowerCase()}:${stream.toLowerCase()}` : toolName.toLowerCase(),
+    }),
+  }];
+}
+
+function isToolOutputType(type: string | undefined): boolean {
+  return type === 'tool/output' ||
+    type === 'tool/output_delta' ||
+    type === 'tool/output-delta' ||
+    type === 'tool/stream' ||
+    type === 'tool/stdout' ||
+    type === 'tool/stderr';
+}
+
 export function normalizeDshSessionEvent(
   record: Record<string, unknown>,
   calls: Map<string, { toolName: string; command?: string }> = new Map(),
@@ -429,6 +473,7 @@ export function normalizeDshSessionEvent(
     if (callId && toolName) calls.set(callId, { toolName, command: event.metadata?.command });
     return events;
   }
+  if (isToolOutputType(type)) return normalizeToolOutput(record, calls);
   if (type === 'tool/result') return normalizeToolResult(record, calls);
   return [];
 }
@@ -544,7 +589,7 @@ class DshSessionEventMonitor {
     }
     if (!record) return;
     const type = stringField(record, ['type']);
-    if (type !== 'tool/call' && type !== 'tool/result') return;
+    if (type !== 'tool/call' && type !== 'tool/result' && !isToolOutputType(type)) return;
     const data = asRecord(record.data) ?? record;
     const callId = stringField(data, ['callId']) ?? toolResultDetails(record).callId;
     const seq = numberField(record, ['seq']) ?? numberField(record, ['seq0']);
@@ -634,28 +679,31 @@ class LocalOpenAISession implements AgentSession {
       this.sessionConfig.systemPrompt.trim(),
       prompt,
     ].filter(Boolean).join('\n\n'), attachments);
-    emit(this.sessionConfig, 'command', `DeepSeek Harness headless started with profile ${this.localConfig.profile}.`, {
+    emit(this.sessionConfig, 'command', `DeepSeek Harness headless started with profile ${this.localConfig.profile}.`, dshMetadata({
       agentType: LOCAL_AGENT_TYPE,
       command: 'dsh headless',
-    });
+      state: 'running',
+    }));
 
     try {
       const result = await this.runHeadless(taskText);
       if (result.status === 'failed') {
-        emit(this.sessionConfig, 'error', result.error ?? 'DeepSeek Harness failed.', {
+        emit(this.sessionConfig, 'error', result.error ?? 'DeepSeek Harness failed.', dshMetadata({
           agentType: LOCAL_AGENT_TYPE,
           command: 'dsh headless',
+          state: 'failed',
           error: result.error,
-        });
+        }));
       }
       return result;
     } catch (err: unknown) {
       const message = sanitizeOutput(errorMessage(err));
-      emit(this.sessionConfig, 'error', message, {
+      emit(this.sessionConfig, 'error', message, dshMetadata({
         agentType: LOCAL_AGENT_TYPE,
         command: 'dsh headless',
+        state: 'failed',
         error: message,
-      });
+      }));
       return { status: 'failed', error: message };
     } finally {
       this.clearKillTimer();

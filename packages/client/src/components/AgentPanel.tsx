@@ -123,15 +123,10 @@ function coalesceEvents(events: AgentEvent[], streaming: boolean): CoalescedEven
 
     // Mergeable types: thinking, output, command_output
     if (event.type === 'thinking' || event.type === 'output' || event.type === 'command_output') {
-      // Check if last coalesced entry is the same type — merge
-      // Also merge command_output into output and vice versa
       const last = result[result.length - 1];
-      const mergeable = last && (last.type === event.type ||
-        (last.type === 'output' && event.type === 'command_output') ||
-        (last.type === 'command_output' && event.type === 'output'));
-      if (mergeable) {
+      if (canMergeTextEvents(last, event)) {
         // Concatenate directly — content already includes natural newlines
-        last.content += event.content;
+        last!.content += event.content;
         continue;
       }
     }
@@ -210,6 +205,26 @@ function compactToolSummary(content: string | undefined): string | null {
   if (!raw) return null;
   const oneLine = raw.replace(/\s+/g, ' ').trim();
   return oneLine.length > 80 ? oneLine.slice(0, 80) + '...' : oneLine;
+}
+
+function lifecycleLabel(event: AgentEvent): string | null {
+  const state = event.metadata?.state;
+  if (state === 'succeeded') return 'Succeeded';
+  if (state === 'failed') return 'Failed';
+  if (state === 'running') return event.type === 'command' ? 'Started' : 'Running';
+  return null;
+}
+
+function canMergeTextEvents(last: CoalescedEvent | undefined, event: AgentEvent): boolean {
+  if (!last) return false;
+  if (last.type === 'thinking' && event.type === 'thinking') return true;
+  if (last.type === 'output' && event.type === 'output') return true;
+  if (last.type === 'command_output' && event.type === 'command_output') {
+    return last.metadata?.callId === event.metadata?.callId &&
+      last.metadata?.command === event.metadata?.command &&
+      last.metadata?.state === event.metadata?.state;
+  }
+  return false;
 }
 
 function getMarkdownSection(markdown: string, heading: string): string {
@@ -312,6 +327,7 @@ function EventItem({ event }: { event: CoalescedEvent }) {
 
   const hasDiff = event.metadata?.diff;
   const hasFile = event.metadata?.file;
+  const lifecycle = lifecycleLabel(event);
 
   // tool_call / file_* events (common for ACP agents like Hermes/OpenClaw) have
   // no command-style parsing, so derive a readable detail + header summary.
@@ -353,6 +369,18 @@ function EventItem({ event }: { event: CoalescedEvent }) {
             <span className="text-xs font-medium text-foreground">
               {label}
             </span>
+            {lifecycle && (
+              <span className={cn(
+                'rounded px-1.5 py-0.5 text-[10px] font-medium',
+                event.metadata?.state === 'failed'
+                  ? 'bg-red-500/10 text-red-600 dark:text-red-400'
+                  : event.metadata?.state === 'succeeded'
+                    ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
+                    : 'bg-primary/10 text-primary'
+              )}>
+                {lifecycle}
+              </span>
+            )}
             {headerSummary && (
               <span className="truncate text-[10px] text-muted-foreground font-mono">
                 {headerSummary}
@@ -410,15 +438,20 @@ function EventItem({ event }: { event: CoalescedEvent }) {
 
               {/* Command — show parsed command cleanly */}
               {event.type === 'command' && !event.content.startsWith('You: ') && (
-                <div className="flex items-center gap-1 rounded-md px-2.5 py-1.5 font-mono text-xs" style={{ backgroundColor: 'var(--code-bg)', color: 'var(--code-command)' }}>
-                  <span className="text-muted-foreground select-none">$</span>
-                  <span className="flex-1">{event.toolArgs || event.content}</span>
-                  <CopyButton text={event.toolArgs || event.content} />
+                <div className="space-y-1">
+                  {event.metadata?.state === 'running' && (
+                    <div className="text-[10px] font-medium text-primary">Running</div>
+                  )}
+                  <div className="flex items-center gap-1 rounded-md px-2.5 py-1.5 font-mono text-xs" style={{ backgroundColor: 'var(--code-bg)', color: 'var(--code-command)' }}>
+                    <span className="text-muted-foreground select-none">$</span>
+                    <span className="flex-1">{event.toolArgs || event.metadata?.command || event.content}</span>
+                    <CopyButton text={event.toolArgs || event.metadata?.command || event.content} />
+                  </div>
                 </div>
               )}
 
               {/* Output — render as prose if it's natural language, code block if it looks like code */}
-              {event.type === 'output' && (
+              {(event.type === 'output' || event.type === 'command_output' || event.type === 'test_result') && (
                 looksLikeCode(event.content) ? (
                   <div className="rounded-md px-2.5 py-1.5 font-mono text-xs whitespace-pre-wrap" style={{ backgroundColor: 'var(--code-bg)', color: 'var(--code-text)' }}>
                     {event.content}

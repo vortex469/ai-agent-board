@@ -227,63 +227,101 @@ test.describe('Task CRUD', () => {
     expect(copiedText).not.toContain(eventNoise);
   });
 
-  test('mocked DSH operational events render in Events, Terminal, and Actions', async ({ page }) => {
-    const taskTitle = `DSH Events Task ${Date.now()}`;
-    const taskId = `dsh-events-${Date.now()}`;
-    const task = {
-      id: taskId,
-      projectId: 'default',
-      title: taskTitle,
-      description: 'Task with mocked DSH operational SessionEvents',
-      priority: 'medium',
-      columnId: 'in-progress',
-      agentStatus: 'executing',
-      agentType: 'local-openai',
-      createdAt: Date.now(),
-      repoPath: '/tmp/repo',
-    };
-    const events = [
-      {
-        id: 'dsh-command',
-        taskId,
-        type: 'command',
-        content: 'bash: {"command":"npm run build:server"}',
-        timestamp: Date.now(),
-        metadata: { agentType: 'local-openai', callId: 'call-1', toolName: 'bash', command: 'npm run build:server', state: 'running' },
-      },
-      {
-        id: 'dsh-output',
-        taskId,
-        type: 'command_output',
-        content: 'server build passed\n',
-        timestamp: Date.now() + 1,
-        metadata: { agentType: 'local-openai', callId: 'call-1', toolName: 'bash', command: 'npm run build:server', state: 'succeeded' },
-      },
-      {
-        id: 'dsh-read',
-        taskId,
-        type: 'file_read',
-        content: 'Read packages/server/src/index.ts',
-        timestamp: Date.now() + 2,
-        metadata: { agentType: 'local-openai', callId: 'call-2', toolName: 'read_file', file: 'packages/server/src/index.ts', state: 'running' },
-      },
-      {
-        id: 'dsh-edit',
-        taskId,
-        type: 'file_edit',
-        content: 'Edited packages/server/src/services/local-openai-provider.ts',
-        timestamp: Date.now() + 3,
-        metadata: { agentType: 'local-openai', callId: 'call-3', toolName: 'edit_file', file: 'packages/server/src/services/local-openai-provider.ts', state: 'succeeded' },
-      },
-      {
-        id: 'dsh-test',
-        taskId,
-        type: 'test_result',
-        content: 'Focused tests passed: local DSH event projection',
-        timestamp: Date.now() + 4,
-        metadata: { agentType: 'local-openai', callId: 'call-4', toolName: 'bash', command: 'npm test', state: 'succeeded' },
-      },
-    ];
+  for (const agentCase of [
+    { label: 'Codex', agentType: 'codex' },
+    { label: 'DeepSeek', agentType: 'local-openai' },
+    { label: 'Qwen', agentType: 'local-openai' },
+  ] as const) {
+    test(`mocked ${agentCase.label} command lifecycle renders in Events, Terminal, and Actions`, async ({ page }) => {
+      const taskTitle = `${agentCase.label} Events Task ${Date.now()}`;
+      const taskId = `${agentCase.label.toLowerCase()}-events-${Date.now()}`;
+      const task = {
+        id: taskId,
+        projectId: 'default',
+        title: taskTitle,
+        description: `Task with mocked ${agentCase.label} normalized operational events`,
+        priority: 'medium',
+        columnId: 'in-progress',
+        agentStatus: 'executing',
+        agentType: agentCase.agentType,
+        createdAt: Date.now(),
+        repoPath: '/tmp/repo',
+      };
+      const now = Date.now();
+      const events = [
+        {
+          id: `${agentCase.label}-command-test`,
+          taskId,
+          type: 'command',
+          content: 'bash: {"command":"pytest tests/test_workbench.py"}',
+          timestamp: now,
+          metadata: { agentType: agentCase.agentType, callId: 'call-1', toolName: 'bash', command: 'pytest tests/test_workbench.py', state: 'running' },
+        },
+        {
+          id: `${agentCase.label}-output-running`,
+          taskId,
+          type: 'command_output',
+          content: '\x1b[32mcollected 3 items\x1b[0m\n',
+          timestamp: now + 1,
+          metadata: { agentType: agentCase.agentType, callId: 'call-1', toolName: 'bash', command: 'pytest tests/test_workbench.py', state: 'running' },
+        },
+        {
+          id: `${agentCase.label}-output-succeeded`,
+          taskId,
+          type: 'command_output',
+          content: '3 passed\n',
+          timestamp: now + 2,
+          metadata: { agentType: agentCase.agentType, callId: 'call-1', toolName: 'bash', command: 'pytest tests/test_workbench.py', state: 'succeeded' },
+        },
+        {
+          id: `${agentCase.label}-command-build`,
+          taskId,
+          type: 'command',
+          content: 'bash: {"command":"npm run build:server"}',
+          timestamp: now + 3,
+          metadata: { agentType: agentCase.agentType, callId: 'call-2', toolName: 'bash', command: 'npm run build:server', state: 'running' },
+        },
+        {
+          id: `${agentCase.label}-output-failed`,
+          taskId,
+          type: 'command_output',
+          content: 'server build failed\n',
+          timestamp: now + 4,
+          metadata: { agentType: agentCase.agentType, callId: 'call-2', toolName: 'bash', command: 'npm run build:server', state: 'failed' },
+        },
+        {
+          id: `${agentCase.label}-read`,
+          taskId,
+          type: 'file_read',
+          content: 'Read packages/server/src/index.ts',
+          timestamp: now + 5,
+          metadata: { agentType: agentCase.agentType, callId: 'call-3', toolName: 'read_file', file: 'packages/server/src/index.ts', state: 'running' },
+        },
+        {
+          id: `${agentCase.label}-search`,
+          taskId,
+          type: 'command',
+          content: 'search: {"command":"rg AgentPanel packages/client/src/components"}',
+          timestamp: now + 6,
+          metadata: { agentType: agentCase.agentType, callId: 'call-4', toolName: 'rg', command: 'rg AgentPanel packages/client/src/components', state: 'running' },
+        },
+        {
+          id: `${agentCase.label}-edit`,
+          taskId,
+          type: 'file_edit',
+          content: 'Edited packages/server/src/services/local-openai-provider.ts',
+          timestamp: now + 7,
+          metadata: { agentType: agentCase.agentType, callId: 'call-5', toolName: 'edit_file', file: 'packages/server/src/services/local-openai-provider.ts', state: 'succeeded' },
+        },
+        {
+          id: `${agentCase.label}-test`,
+          taskId,
+          type: 'test_result',
+          content: `Focused tests passed: ${agentCase.label} command lifecycle projection`,
+          timestamp: now + 8,
+          metadata: { agentType: agentCase.agentType, callId: 'call-1', toolName: 'bash', command: 'pytest tests/test_workbench.py', state: 'succeeded' },
+        },
+      ];
 
     await page.route('**/api/projects', (route) => route.fulfill({
       status: 200,
@@ -317,21 +355,38 @@ test.describe('Task CRUD', () => {
     await waitForBoard(page);
     await page.getByRole('heading', { name: taskTitle }).click();
 
+    await expect(page.getByText('Started').first()).toBeVisible({ timeout: 3_000 });
+    await expect(page.getByText('Running').first()).toBeVisible();
+    await expect(page.getByText('Succeeded').first()).toBeVisible();
+    await expect(page.getByText('Failed').first()).toBeVisible();
+    await expect(page.getByText('pytest tests/test_workbench.py').first()).toBeVisible();
+    await expect(page.getByText('collected 3 items')).toBeVisible();
+    await expect(page.getByText('3 passed')).toBeVisible();
+    await expect(page.getByText('server build failed')).toBeVisible();
     await expect(page.getByText('npm run build:server').first()).toBeVisible({ timeout: 3_000 });
     await expect(page.getByText('local-openai-provider.ts').first()).toBeVisible();
-    await expect(page.getByText('Focused tests passed: local DSH event projection')).toBeVisible();
+    await expect(page.getByText(`Focused tests passed: ${agentCase.label} command lifecycle projection`)).toBeVisible();
     await expect(page.getByText(/private reasoning|chain-of-thought/i)).toHaveCount(0);
 
     await page.getByRole('button', { name: 'Terminal' }).click();
+    await expect(page.getByText('$ pytest tests/test_workbench.py')).toBeVisible({ timeout: 3_000 });
+    await expect(page.getByText('collected 3 items')).toBeVisible();
+    await expect(page.getByText('3 passed')).toBeVisible();
     await expect(page.getByText('$ npm run build:server')).toBeVisible({ timeout: 3_000 });
-    await expect(page.getByText('server build passed')).toBeVisible();
+    await expect(page.getByText('server build failed')).toBeVisible();
     await expect(page.getByText('packages/server/src/index.ts')).toBeVisible();
 
     await page.getByRole('button', { name: /^Actions/ }).click();
+    await expect(page.getByText('pytest tests/test_workbench.py').first()).toBeVisible();
     await expect(page.getByText('npm run build:server').first()).toBeVisible();
+    await expect(page.getByText('rg AgentPanel packages/client/src/components').first()).toBeVisible();
     await expect(page.getByText('packages/server/src/services/local-openai-provider.ts').first()).toBeVisible();
-    await expect(page.getByText('Focused tests passed: local DSH event projection')).toBeVisible();
+    await expect(page.getByText('running').first()).toBeVisible();
+    await expect(page.getByText('succeeded').first()).toBeVisible();
+    await expect(page.getByText('failed').first()).toBeVisible();
+    await expect(page.getByText(`Focused tests passed: ${agentCase.label} command lifecycle projection`)).toBeVisible();
   });
+  }
 
   test('Summary tab is hidden for in-progress tasks', async ({ page }) => {
     const taskTitle = `Progress Panel ${Date.now()}`;
