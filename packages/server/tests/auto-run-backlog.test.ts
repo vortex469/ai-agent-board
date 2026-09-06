@@ -188,8 +188,13 @@ test('successful task progression still moves through review to done', async () 
       columnId: 'in-progress',
       agentStatus: 'executing',
       worktreePath: '/tmp/agentboard-test-worktree',
-      summary: 'Focused tests passed: node --test auto-run-backlog.test.ts\nHostile review passed: no regressions found.',
+      summary: 'Hostile review passed: no regressions found.',
     }));
+    await insertEvent(repo, 'successful', {
+      type: 'test_result',
+      content: 'node --test auto-run-backlog.test.ts passed',
+      metadata: { command: 'node --test auto-run-backlog.test.ts', state: 'succeeded' },
+    });
 
     const done = await autoProgressCompletedTask(repo, 'successful', manager());
 
@@ -292,12 +297,12 @@ test('Local AI hostile review with failing tests remains in Review', async () =>
     assert.equal(reviewed?.columnId, 'review');
     assert.match(
       [...(await repo.getEventsByTaskId('failing-tests'))].reverse().find((event) => event.type === 'error')?.content ?? '',
-      /missing passing focused tests evidence/i,
+      /focused tests evidence failed/i,
     );
   } finally { db.close(); }
 });
 
-test('vague tests-passed prose without structured evidence remains blocked', async () => {
+test('focused-tests summary prose without structured test event remains blocked', async () => {
   const db = makeDb();
   const repo = new SqliteTaskRepository(db);
   try {
@@ -306,6 +311,7 @@ test('vague tests-passed prose without structured evidence remains blocked', asy
       agentStatus: 'executing',
       agentType: 'local-openai',
       worktreePath: '/tmp/agentboard-test-worktree',
+      summary: 'Focused tests passed: npm test -- tests/focused.test.ts',
     }));
     await insertEvent(repo, 'vague-prose', {
       type: 'output',
@@ -324,6 +330,32 @@ test('vague tests-passed prose without structured evidence remains blocked', asy
     assert.match(
       [...(await repo.getEventsByTaskId('vague-prose'))].reverse().find((event) => event.type === 'error')?.content ?? '',
       /missing passing focused tests evidence/i,
+    );
+  } finally { db.close(); }
+});
+
+test('missing structured tests and hostile review reports both categories', async () => {
+  const db = makeDb();
+  const repo = new SqliteTaskRepository(db);
+  try {
+    await repo.create(task('missing-both', {
+      columnId: 'in-progress',
+      agentStatus: 'executing',
+      agentType: 'local-openai',
+      worktreePath: '/tmp/agentboard-test-worktree',
+    }));
+    await insertEvent(repo, 'missing-both', {
+      type: 'output',
+      content: 'Implemented the change and everything looks good.',
+      metadata: { agentType: 'local-openai' },
+    });
+
+    const reviewed = await autoProgressCompletedTask(repo, 'missing-both', manager());
+
+    assert.equal(reviewed?.columnId, 'review');
+    assert.match(
+      [...(await repo.getEventsByTaskId('missing-both'))].reverse().find((event) => event.type === 'error')?.content ?? '',
+      /missing passing focused tests and hostile review evidence/i,
     );
   } finally { db.close(); }
 });
@@ -353,6 +385,46 @@ test('normalized command output test evidence is accepted', async () => {
 
     assert.equal(done?.columnId, 'done');
   } finally { db.close(); }
+});
+
+test('Local AI wording variants normalize the same when structured test results exist', async () => {
+  const cases = [
+    { id: 'variant-a', content: 'Focused verification completed successfully.' },
+    { id: 'variant-b', content: 'Focused tests passed: custom provider wording.' },
+    { id: 'variant-c', content: 'All requested validation is green.' },
+  ];
+
+  for (const item of cases) {
+    const db = makeDb();
+    const repo = new SqliteTaskRepository(db);
+    try {
+      await repo.create(task(item.id, {
+        columnId: 'in-progress',
+        agentStatus: 'executing',
+        agentType: 'local-openai',
+        worktreePath: '/tmp/agentboard-test-worktree',
+      }));
+      await insertEvent(repo, item.id, {
+        type: 'test_result',
+        content: item.content,
+        metadata: {
+          agentType: 'local-openai',
+          command: 'npm run test -w @ai-agent-board/server -- tests/auto-run-backlog.test.ts',
+          state: 'succeeded',
+          callId: item.id,
+        },
+      });
+      await insertEvent(repo, item.id, {
+        type: 'output',
+        content: 'Hostile review passed: checked regressions, edge cases, security issues, and missing tests.',
+        metadata: { agentType: 'local-openai' },
+      });
+
+      const done = await autoProgressCompletedTask(repo, item.id, manager());
+
+      assert.equal(done?.columnId, 'done');
+    } finally { db.close(); }
+  }
 });
 
 test('duplicate normalized evidence is handled safely', async () => {

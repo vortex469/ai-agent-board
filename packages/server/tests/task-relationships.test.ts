@@ -563,7 +563,22 @@ test('auto progression requires focused test and hostile review evidence before 
       columnId: 'in-progress',
       agentStatus: 'executing',
       completedAt: undefined,
-      summary: '## Completed\nHostile review passed: no regressions found.\nFocused tests passed: node --test focused.spec.ts',
+      summary: '## Completed\nImplemented the change.',
+    });
+    await repo.insertEvent({
+      id: 'first-hostile-review-before-tests',
+      taskId: 'first',
+      type: 'output',
+      content: 'Hostile review passed: no regressions found.',
+      timestamp: 20,
+    });
+    await repo.insertEvent({
+      id: 'first-focused-tests-after-review',
+      taskId: 'first',
+      type: 'test_result',
+      content: 'node --test focused.spec.ts passed',
+      timestamp: 21,
+      metadata: { command: 'node --test focused.spec.ts', state: 'succeeded' },
     });
     await autoProgressCompletedTask(repo, 'first', manager);
 
@@ -580,6 +595,14 @@ test('auto progression requires focused test and hostile review evidence before 
       agentStatus: 'executing',
       completedAt: undefined,
       summary: '## Completed\nFocused tests passed: node --test focused.spec.ts\nHostile review passed: no regressions found.',
+    });
+    await repo.insertEvent({
+      id: 'first-focused-tests-pass',
+      taskId: 'first',
+      type: 'test_result',
+      content: 'node --test focused.spec.ts passed',
+      timestamp: 30,
+      metadata: { command: 'node --test focused.spec.ts', state: 'succeeded' },
     });
     await autoProgressCompletedTask(repo, 'first', manager);
 

@@ -982,6 +982,15 @@ function passedGateIndex(evidence: string, gateName: string): number {
   return Math.min(beforeColon.index, afterColon.index);
 }
 
+function failedGateIndex(evidence: string, gateName: string): number {
+  const escaped = gateName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const beforeColon = new RegExp(`${escaped}\\s*(?:failed|fail|failing|red|blocked)\\s*:`, 'i').exec(evidence);
+  const afterColon = new RegExp(`${escaped}\\s*:\\s*(?:failed|fail|failing|red|blocked)`, 'i').exec(evidence);
+  if (!beforeColon) return afterColon?.index ?? -1;
+  if (!afterColon) return beforeColon.index;
+  return Math.min(beforeColon.index, afterColon.index);
+}
+
 function extractEnvironmentProgressionError(evidence: string): string | undefined {
   const explicit = evidence.match(/environment error\s*:?\s*([^\n\r]+)/i)?.[1]?.trim();
   if (explicit) return `Automatic progression paused: environment error: ${explicit}`;
@@ -1006,16 +1015,58 @@ function hasExplicitPassEvidence(event: AgentEvent): boolean {
   return /\b(?:pass(?:ed|es)?|passing|success(?:ful)?|succeeded|ok|green|0\s+failed|all\s+tests\s+passed)\b/i.test(event.content);
 }
 
-function isPassingFocusedTestEvent(event: AgentEvent): boolean {
-  if (!['command', 'command_output', 'output', 'test_result'].includes(event.type)) return false;
-  if (hasFailureEvidence(event)) return false;
+type NormalizedProgressionEvidence = {
+  category: 'focused tests' | 'hostile review';
+  status: 'passed' | 'failed';
+  index: number;
+};
 
-  const command = event.metadata?.command;
-  if (event.type === 'test_result') {
-    return event.metadata?.state === 'succeeded' || hasExplicitPassEvidence(event);
+function normalizeFocusedTestEvidence(events: AgentEvent[]): NormalizedProgressionEvidence[] {
+  const records: NormalizedProgressionEvidence[] = [];
+  events.forEach((event, index) => {
+    if (event.type !== 'test_result' && event.type !== 'command_output') return;
+
+    const command = event.metadata?.command;
+    if (event.type === 'command_output' && !isTestLikeCommand(command)) return;
+
+    if (hasFailureEvidence(event)) {
+      records.push({ category: 'focused tests', status: 'failed', index });
+      return;
+    }
+    if (event.metadata?.state === 'succeeded' || (event.type === 'test_result' && hasExplicitPassEvidence(event))) {
+      records.push({ category: 'focused tests', status: 'passed', index });
+    }
+  });
+  return records;
+}
+
+function normalizeHostileReviewEvidence(events: AgentEvent[], task: Task, finalOutput: string): NormalizedProgressionEvidence[] {
+  const records: NormalizedProgressionEvidence[] = [];
+  const eventOffset = 0;
+  events.forEach((event, index) => {
+    if (!['output', 'complete'].includes(event.type)) return;
+    const failedIndex = failedGateIndex(event.content, 'Hostile review');
+    const passedIndex = passedGateIndex(event.content, 'Hostile review');
+    if (failedIndex >= 0 && (passedIndex < 0 || failedIndex <= passedIndex)) {
+      records.push({ category: 'hostile review', status: 'failed', index: eventOffset + index });
+    } else if (passedIndex >= 0) {
+      records.push({ category: 'hostile review', status: 'passed', index: eventOffset + index });
+    }
+  });
+
+  let textOffset = events.length + 1;
+  const textSources = [task.summary, finalOutput].filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
+  for (const text of textSources) {
+    const failedIndex = failedGateIndex(text, 'Hostile review');
+    const passedIndex = passedGateIndex(text, 'Hostile review');
+    if (failedIndex >= 0 && (passedIndex < 0 || failedIndex <= passedIndex)) {
+      records.push({ category: 'hostile review', status: 'failed', index: textOffset + failedIndex });
+    } else if (passedIndex >= 0) {
+      records.push({ category: 'hostile review', status: 'passed', index: textOffset + passedIndex });
+    }
+    textOffset += text.length + 1;
   }
-
-  return isTestLikeCommand(command) && event.metadata?.state === 'succeeded';
+  return records;
 }
 
 async function evaluateCardProgressionGate(
@@ -1031,28 +1082,36 @@ async function evaluateCardProgressionGate(
   const environmentError = extractEnvironmentProgressionError(evidence);
   if (environmentError) return { passed: false, reason: environmentError };
 
-  const textFocusedTestsIndex = passedGateIndex(evidence, 'Focused tests');
-  const textHostileReviewIndex = passedGateIndex(evidence, 'Hostile review');
-  const eventOffset = evidence.length + 1;
-  const focusedTestEventIndex = events.findIndex(isPassingFocusedTestEvent);
-  const hostileReviewEventIndex = events.findIndex((event) => (
-    ['output', 'complete'].includes(event.type) && passedGateIndex(event.content, 'Hostile review') >= 0
+  const focusedTests = normalizeFocusedTestEvidence(events);
+  const hostileReviews = normalizeHostileReviewEvidence(events, task, finalOutput);
+  const focusedTestsPass = focusedTests.find((record) => record.status === 'passed');
+  const hostileReviewPass = hostileReviews.find((record) => record.status === 'passed');
+  const focusedTestsFailure = focusedTests.find((record) => record.status === 'failed');
+  const hostileReviewFailure = hostileReviews.find((record) => record.status === 'failed');
+  const focusedTestsPassed = !!focusedTestsPass;
+  const hostileReviewPassed = !!hostileReviewPass;
+  const hasOrderedPassingEvidence = focusedTests.some((focused) => (
+    focused.status === 'passed'
+    && hostileReviews.some((review) => review.status === 'passed' && focused.index < review.index)
   ));
-  const focusedTestsIndex = textFocusedTestsIndex >= 0
-    ? textFocusedTestsIndex
-    : focusedTestEventIndex >= 0 ? eventOffset + focusedTestEventIndex : -1;
-  const hostileReviewIndex = textHostileReviewIndex >= 0 && textFocusedTestsIndex < 0 && focusedTestEventIndex >= 0
-    ? eventOffset + events.length
-    : textHostileReviewIndex >= 0
-      ? textHostileReviewIndex
-      : hostileReviewEventIndex >= 0 ? eventOffset + hostileReviewEventIndex : -1;
-  const focusedTestsPassed = focusedTestsIndex >= 0;
-  const hostileReviewPassed = hostileReviewIndex >= 0;
-  if (focusedTestsPassed && hostileReviewPassed && focusedTestsIndex < hostileReviewIndex) return { passed: true };
+  if (hasOrderedPassingEvidence) return { passed: true };
   if (focusedTestsPassed && hostileReviewPassed) {
     return {
       passed: false,
       reason: 'Automatic progression paused: hostile review evidence must follow passing focused test evidence. Keep the card in Review until validation and hostile review pass in order.',
+    };
+  }
+
+  if (focusedTestsFailure && !focusedTestsPassed) {
+    return {
+      passed: false,
+      reason: 'Automatic progression paused: focused tests evidence failed. Keep the card in Review until validation passes.',
+    };
+  }
+  if (hostileReviewFailure && !hostileReviewPassed) {
+    return {
+      passed: false,
+      reason: 'Automatic progression paused: hostile review evidence failed. Keep the card in Review until hostile review passes.',
     };
   }
 
