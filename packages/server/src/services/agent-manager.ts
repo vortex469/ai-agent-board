@@ -138,6 +138,7 @@ const STOPPED_TASK_TTL_MS = 30_000;
 // We only need the tail (the final <task-summary> block), so cap memory use.
 const MAX_SUMMARY_BUFFER = 64_000;
 const MAX_RESULT_BUFFER = 512 * 1024;
+const CODING_TASK_NO_REPOSITORY_CHANGES_REASON = 'Coding task completed without repository changes.';
 
 function extractFullAgentOutput(buffer: string): string | null {
   const summaryStart = buffer.lastIndexOf('<task-summary>');
@@ -506,6 +507,54 @@ export class AgentManager {
       }).toString().trim();
       return { committed: true, commit };
     }
+  }
+
+  private hasWorktreeChanges(task: Task): boolean {
+    const worktreePath = this.verifyTaskWorktree(task);
+    const status = execFileSync('git', ['status', '--porcelain=v1', '-z', '--untracked-files=all'], {
+      cwd: worktreePath,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).toString();
+    if (status.length > 0) return true;
+
+    try {
+      execFileSync('git', ['diff', '--quiet', '--exit-code'], {
+        cwd: worktreePath,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      execFileSync('git', ['diff', '--cached', '--quiet', '--exit-code'], {
+        cwd: worktreePath,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      return false;
+    } catch {
+      return true;
+    }
+  }
+
+  private hasTaskBranchCommitsAhead(task: Task): boolean {
+    if (!task.repoPath || !task.branchName) return false;
+    const baseBranch = task.baseBranch || 'main';
+    try {
+      const count = execFileSync('git', ['rev-list', '--count', `${baseBranch}..${task.branchName}`], {
+        cwd: task.repoPath,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }).toString().trim();
+      return Number.parseInt(count, 10) > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  private finalizeCodingTaskWorktreeChanges(task: Task): { committed: boolean; commit?: string } {
+    const hadWorktreeChanges = this.hasWorktreeChanges(task);
+    if (hadWorktreeChanges) {
+      const commit = this.commitWorktreeChanges(task);
+      if (commit.committed || this.hasTaskBranchCommitsAhead(task)) return commit;
+      throw new Error(CODING_TASK_NO_REPOSITORY_CHANGES_REASON);
+    }
+    if (this.hasTaskBranchCommitsAhead(task)) return { committed: false };
+    throw new Error(CODING_TASK_NO_REPOSITORY_CHANGES_REASON);
   }
 
   setupWorktree(task: Task): string | undefined {
@@ -1005,16 +1054,15 @@ export class AgentManager {
           if (result.status === 'complete') {
             try {
               if (worktreePath) {
-                const commit = this.commitWorktreeChanges(task);
-                if (!commit.committed) {
-                  throw new Error('Agent reported completion without repository changes. Coding tasks must modify and validate the managed worktree before they can complete.');
+                const commit = this.finalizeCodingTaskWorktreeChanges(task);
+                if (commit.committed) {
+                  this.emitEvent(task.id, {
+                    id: uuid(), taskId: task.id, type: 'output',
+                    content: `Committed worktree changes on ${task.branchName}: ${commit.commit}`,
+                    timestamp: Date.now(),
+                    metadata: { command: 'git commit' },
+                  });
                 }
-                this.emitEvent(task.id, {
-                  id: uuid(), taskId: task.id, type: 'output',
-                  content: `Committed worktree changes on ${task.branchName}: ${commit.commit}`,
-                  timestamp: Date.now(),
-                  metadata: { command: 'git commit' },
-                });
               }
               const summary = extractTaskSummary(summaryBuffer);
               await this.eventRepo?.update(task.id, { summary });
@@ -1028,7 +1076,7 @@ export class AgentManager {
             } catch (err) {
               console.error(`[agent-manager] failed to finalize result for task ${task.id}:`, errorMessage(err));
               result.status = 'failed';
-              result.error = `Worktree changes were not committed: ${errorMessage(err)}`;
+              result.error = errorMessage(err);
             }
           }
           terminateOnce(result.status, result.error);

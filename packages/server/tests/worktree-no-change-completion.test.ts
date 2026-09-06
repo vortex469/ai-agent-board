@@ -128,8 +128,99 @@ test('managed local AI DSH exit 0 fails when the agent made no repository change
     assert.equal(git(['rev-list', '--count', 'main..smoke/no-change-local-ai'], f.repoPath), '0');
     assert.ok(events.some((event) =>
       event.type === 'error' &&
-      event.content.includes('Agent reported completion without repository changes'),
+      event.content.includes('Coding task completed without repository changes.'),
     ));
+  } finally {
+    cleanupTaskWorktree(f.repoPath, t.worktreePath);
+    f.dispose();
+  }
+});
+
+test('managed worktree completion gate is provider-neutral', async () => {
+  const f = fixture();
+  const manager = new AgentManager();
+  const events: AgentEvent[] = [];
+  manager.initEventPersistence({
+    insertEvent: async (event: AgentEvent) => { events.push(event); },
+    getEventsByTaskId: async (taskId: string) => events.filter((event) => event.taskId === taskId),
+  } as Parameters<AgentManager['initEventPersistence']>[0]);
+  const provider = {
+    displayName: 'Fake Codex',
+    start: async () => {},
+    stop: async () => {},
+    createSession: async () => ({
+      execute: async () => ({ status: 'complete' as const }),
+      destroy: async () => {},
+      abort: async () => {},
+    }),
+  } as unknown as AgentProvider;
+  (manager as unknown as { providers: Map<string, AgentProvider> }).providers.set('codex', provider);
+  (manager as unknown as { availableAgents: Array<{ name: string; displayName: string; available: boolean }> }).availableAgents = [
+    { name: 'codex', displayName: 'Fake Codex', available: true },
+  ];
+
+  const t = { ...task(f.repoPath, 'smoke/no-change-codex'), agentType: 'codex' as const };
+  try {
+    const finalStatus = await new Promise<Task['agentStatus']>((resolve) => {
+      manager.startAgent(
+        t,
+        (status) => {
+          t.agentStatus = status;
+          if (status === 'complete' || status === 'failed') resolve(status);
+        },
+        (worktreePath) => { t.worktreePath = worktreePath; },
+      );
+    });
+
+    assert.equal(finalStatus, 'failed');
+    assert.ok(t.worktreePath);
+    assert.equal(git(['rev-list', '--count', 'main..smoke/no-change-codex'], f.repoPath), '0');
+    assert.ok(events.some((event) =>
+      event.type === 'error' &&
+      event.content.includes('Coding task completed without repository changes.'),
+    ));
+  } finally {
+    cleanupTaskWorktree(f.repoPath, t.worktreePath);
+    f.dispose();
+  }
+});
+
+test('managed local AI DSH exit 0 passes when the task branch already has a commit ahead of base', async () => {
+  const f = fixture();
+  const manager = new AgentManager();
+  const events: AgentEvent[] = [];
+  manager.initEventPersistence({
+    insertEvent: async (event: AgentEvent) => { events.push(event); },
+    getEventsByTaskId: async (taskId: string) => events.filter((event) => event.taskId === taskId),
+    update: async () => undefined,
+  } as unknown as Parameters<AgentManager['initEventPersistence']>[0]);
+  registerDshProvider(manager, (workingDirectory, child) => {
+    writeFileSync(path.join(workingDirectory, 'already-committed.txt'), 'committed by agent\n');
+    git(['add', 'already-committed.txt'], workingDirectory);
+    git(['commit', '-m', 'agent-owned commit'], workingDirectory);
+    child.stdout.write('<task-summary>\n## Completed\nFocused tests passed: fake DSH.\nHostile review passed: fake review.\n</task-summary>\n');
+    child.close(0);
+  });
+
+  const t = task(f.repoPath, 'smoke/dsh-precommitted-local-ai');
+  try {
+    const finalStatus = await new Promise<Task['agentStatus']>((resolve) => {
+      manager.startAgent(
+        t,
+        (status) => {
+          t.agentStatus = status;
+          if (status === 'complete' || status === 'failed') resolve(status);
+        },
+        (worktreePath) => { t.worktreePath = worktreePath; },
+      );
+    });
+
+    assert.equal(finalStatus, 'complete');
+    assert.ok(t.worktreePath);
+    assert.equal(git(['status', '--porcelain'], t.worktreePath), '');
+    assert.equal(git(['rev-list', '--count', 'main..smoke/dsh-precommitted-local-ai'], f.repoPath), '1');
+    assert.equal(git(['log', '-1', '--format=%s', 'smoke/dsh-precommitted-local-ai'], f.repoPath), 'agent-owned commit');
+    assert.equal(events.some((event) => event.content.includes('Coding task completed without repository changes.')), false);
   } finally {
     cleanupTaskWorktree(f.repoPath, t.worktreePath);
     f.dispose();
@@ -174,6 +265,43 @@ test('managed local AI DSH exit 0 commits worktree changes before completion', a
     ));
   } finally {
     cleanupTaskWorktree(f.repoPath, t.worktreePath);
+    f.dispose();
+  }
+});
+
+test('read-only task without a managed worktree is not rejected for lacking repository changes', async () => {
+  const f = fixture();
+  const manager = new AgentManager();
+  const events: AgentEvent[] = [];
+  manager.initEventPersistence({
+    insertEvent: async (event: AgentEvent) => { events.push(event); },
+    getEventsByTaskId: async (taskId: string) => events.filter((event) => event.taskId === taskId),
+    update: async () => undefined,
+  } as unknown as Parameters<AgentManager['initEventPersistence']>[0]);
+  registerDshProvider(manager, (_workingDirectory, child) => {
+    child.stdout.write('<task-summary>\n## Completed\nRead-only inspection completed.\n</task-summary>\n');
+    child.close(0);
+  });
+
+  const t = {
+    ...task(f.repoPath, 'smoke/read-only-local-ai'),
+    title: 'Read-only local task',
+    useWorktree: false,
+    branchName: undefined,
+    baseBranch: undefined,
+  };
+  try {
+    const finalStatus = await new Promise<Task['agentStatus']>((resolve) => {
+      manager.startAgent(t, (status) => {
+        t.agentStatus = status;
+        if (status === 'complete' || status === 'failed') resolve(status);
+      });
+    });
+
+    assert.equal(finalStatus, 'complete');
+    assert.equal(t.worktreePath, undefined);
+    assert.equal(events.some((event) => event.content.includes('Coding task completed without repository changes.')), false);
+  } finally {
     f.dispose();
   }
 });
