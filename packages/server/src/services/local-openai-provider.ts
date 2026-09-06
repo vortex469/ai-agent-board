@@ -1,5 +1,5 @@
 import { spawn } from 'child_process';
-import { existsSync, readdirSync, readFileSync, statSync } from 'fs';
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'fs';
 import path from 'path';
 import { zstdDecompressSync } from 'zlib';
 import { v4 as uuid } from 'uuid';
@@ -23,6 +23,7 @@ const TERMINATION_GRACE_MS = 2000;
 const MAX_PARTIAL_RECORD_LENGTH = 32_000;
 const SESSION_POLL_MS = 250;
 const SESSION_ASSOCIATION_SKEW_MS = 5_000;
+const SESSION_ASSOCIATION_WAIT_MS = 10_000;
 const ZSTD_MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
 interface LocalOpenAIConfig {
   launcherPath: string;
@@ -257,8 +258,24 @@ function dshMetadata(extra?: AgentEventMetadataWithDsh): AgentEventMetadata {
 }
 
 export function dshProjectDirectoryName(cwd: string): string {
-  const normalized = path.resolve(cwd).replace(/\\/g, '/').replace(/^\/+/, '').replace(/\/+$/g, '');
-  return `--${normalized.replace(/\/+/g, '-')}--`;
+  const resolved = path.resolve(cwd);
+  let readable = '';
+  let separatorRun = false;
+  for (let index = 0; index < resolved.length; index++) {
+    const code = resolved.charCodeAt(index);
+    const ch = String.fromCharCode(code);
+    if (ch === '/' || ch === '\\' || ch === ':') {
+      if (!separatorRun) readable += '-';
+      separatorRun = true;
+    } else if (ch !== '~' && /^[A-Za-z0-9._-]$/.test(ch)) {
+      readable += ch;
+      separatorRun = false;
+    } else {
+      readable += `~${code.toString(16).toUpperCase().padStart(4, '0')}`;
+      separatorRun = false;
+    }
+  }
+  return `--${(readable.replace(/^-+/, '') || 'root').slice(0, 251)}--`;
 }
 
 function zstdMagicPositions(buffer: Buffer): number[] {
@@ -304,6 +321,14 @@ export function decodeDurableZstdFrames(buffer: Buffer): { text: string; bytesCo
   }
 
   return { text: chunks.join(''), bytesConsumed };
+}
+
+function decodeSessionLog(buffer: Buffer, compressed: boolean): { text: string; bytesConsumed: number } {
+  if (compressed) return decodeDurableZstdFrames(buffer);
+  const text = buffer.toString('utf8');
+  const lastNewline = text.lastIndexOf('\n');
+  if (lastNewline < 0) return { text: '', bytesConsumed: 0 };
+  return { text: text.slice(0, lastNewline + 1), bytesConsumed: Buffer.byteLength(text.slice(0, lastNewline + 1), 'utf8') };
 }
 
 function extractText(value: unknown): string {
@@ -366,6 +391,20 @@ function toolOutputDetails(record: Record<string, unknown>): {
   return { callId, output: output ?? '', stream };
 }
 
+function commandDoneDetails(record: Record<string, unknown>): {
+  commandId?: string;
+  output: string;
+  failed: boolean;
+} {
+  const data = asRecord(record.data) ?? record;
+  const kind = stringField(data, ['kind']);
+  return {
+    commandId: stringField(data, ['commandId', 'id']),
+    output: stringField(data, ['text', 'output', 'stdout', 'stderr']) ?? '',
+    failed: kind === 'error' || stringField(data, ['error']) !== undefined,
+  };
+}
+
 function testLike(command: string | undefined, toolName: string): boolean {
   return /\b(test|tests|pytest|vitest|playwright|jest|mocha|npm\s+(?:run\s+)?test|gate:required)\b/i
     .test(`${toolName} ${command ?? ''}`);
@@ -408,6 +447,47 @@ function normalizeToolCall(record: Record<string, unknown>): NormalizedHarnessEv
     return [{ type: 'command', content: `search: ${JSON.stringify({ command: command ?? recordContent(args, toolName) })}`, metadata: base }];
   }
   return [{ type: 'tool_call', content: JSON.stringify({ name: toolName, arguments: withoutPrivateFields(args) }), metadata: base }];
+}
+
+function normalizeCommandRun(record: Record<string, unknown>): NormalizedHarnessEvent[] {
+  const data = asRecord(record.data) ?? record;
+  const commandId = stringField(data, ['commandId', 'id']);
+  const name = stringField(data, ['name', 'command']) ?? 'command';
+  const args = stringField(data, ['args', 'arguments']);
+  const command = args ? `${name} ${args}` : name;
+  return [{
+    type: 'command',
+    content: `${name}: ${JSON.stringify({ command })}`,
+    metadata: dshMetadata({
+      callId: commandId,
+      toolName: name,
+      command,
+      state: 'running',
+      operation: name.toLowerCase(),
+    }),
+  }];
+}
+
+function normalizeCommandDone(record: Record<string, unknown>, calls: Map<string, { toolName: string; command?: string }>): NormalizedHarnessEvent[] {
+  const { commandId, output, failed } = commandDoneDetails(record);
+  const call = commandId ? calls.get(commandId) : undefined;
+  const toolName = call?.toolName ?? 'command';
+  const command = call?.command;
+  const base = dshMetadata({
+    callId: commandId,
+    toolName,
+    command,
+    state: failed ? 'failed' : 'succeeded',
+    operation: toolName.toLowerCase(),
+    error: failed ? output : undefined,
+  });
+  if (testLike(command, toolName)) {
+    return [
+      { type: 'command_output', content: output, metadata: base },
+      { type: 'test_result', content: output || (failed ? 'Test command failed.' : 'Test command completed.'), metadata: base },
+    ];
+  }
+  return [{ type: 'command_output', content: output || (failed ? 'Command failed.' : 'Command completed.'), metadata: base }];
 }
 
 function normalizeToolResult(record: Record<string, unknown>, calls: Map<string, { toolName: string; command?: string }>): NormalizedHarnessEvent[] {
@@ -460,11 +540,17 @@ function isToolOutputType(type: string | undefined): boolean {
     type === 'tool/stderr';
 }
 
+function normalizedDshType(type: string | undefined): string | undefined {
+  if (!type) return undefined;
+  if (type.startsWith('chunkrow/')) return type.slice('chunkrow/'.length);
+  return type;
+}
+
 export function normalizeDshSessionEvent(
   record: Record<string, unknown>,
   calls: Map<string, { toolName: string; command?: string }> = new Map(),
 ): NormalizedHarnessEvent[] {
-  const type = stringField(record, ['type']);
+  const type = normalizedDshType(stringField(record, ['type']));
   if (type === 'tool/call') {
     const events = normalizeToolCall(record);
     const event = events[0];
@@ -475,27 +561,47 @@ export function normalizeDshSessionEvent(
   }
   if (isToolOutputType(type)) return normalizeToolOutput(record, calls);
   if (type === 'tool/result') return normalizeToolResult(record, calls);
+  if (type === 'command/run') {
+    const events = normalizeCommandRun(record);
+    const event = events[0];
+    const callId = (event.metadata as AgentEventMetadataWithDsh | undefined)?.callId;
+    const toolName = (event.metadata as AgentEventMetadataWithDsh | undefined)?.toolName;
+    if (callId && toolName) calls.set(callId, { toolName, command: event.metadata?.command });
+    return events;
+  }
+  if (type === 'command/done') return normalizeCommandDone(record, calls);
   return [];
 }
 
 class DshSessionEventMonitor {
-  private sessionFile: string | null = null;
+  private sessionLog: { path: string; compressed: boolean; sessionId?: string } | null = null;
   private offset = 0;
   private partial = '';
   private timer: ReturnType<typeof setInterval> | null = null;
   private warnedAmbiguous = false;
+  private warnedMissing = false;
+  private disabled = false;
+  private decodedRecordCount = 0;
+  private emittedEventCount = 0;
+  private lastDecodedOffset = 0;
   private readonly emittedSeqs = new Set<string>();
   private readonly emittedCalls = new Set<string>();
   private readonly emittedResults = new Set<string>();
   private readonly calls = new Map<string, { toolName: string; command?: string }>();
+  private readonly workingDirectory: string;
+  private readonly realWorkingDirectory: string | null;
 
   constructor(
     private readonly config: AgentSessionConfig,
     private readonly dshHome: string,
     private readonly launchTime: number,
-  ) {}
+  ) {
+    this.workingDirectory = path.resolve(config.workingDirectory);
+    this.realWorkingDirectory = this.resolveRealPath(this.workingDirectory);
+  }
 
   start(): void {
+    console.info(`[local-openai] DSH session watcher started for ${this.workingDirectory}`);
     void this.poll();
     this.timer = setInterval(() => void this.poll(), SESSION_POLL_MS);
   }
@@ -504,25 +610,31 @@ class DshSessionEventMonitor {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     void this.poll();
+    console.info(`[local-openai] DSH session watcher stopped for ${this.workingDirectory}; session=${this.sessionLog?.sessionId ?? 'none'} decodedRecords=${this.decodedRecordCount} emittedEvents=${this.emittedEventCount} offset=${this.lastDecodedOffset}`);
   }
 
   private async poll(): Promise<void> {
-    if (!this.sessionFile) this.sessionFile = this.findSessionFile();
-    if (!this.sessionFile) return;
+    if (this.disabled) return;
+    if (!this.sessionLog) this.sessionLog = this.findSessionLog();
+    if (!this.sessionLog) {
+      this.warnMissingAfterDeadline();
+      return;
+    }
     let buffer: Buffer;
     try {
-      buffer = readFileSync(this.sessionFile);
+      buffer = readFileSync(this.sessionLog.path);
     } catch {
       return;
     }
     if (buffer.length <= this.offset) return;
-    const { text, bytesConsumed } = decodeDurableZstdFrames(buffer.subarray(this.offset));
+    const { text, bytesConsumed } = decodeSessionLog(buffer.subarray(this.offset), this.sessionLog.compressed);
     if (bytesConsumed <= 0) return;
     this.offset += bytesConsumed;
+    this.lastDecodedOffset = this.offset;
     this.consumeText(text);
   }
 
-  private findSessionFile(): string | null {
+  private findSessionLog(): { path: string; compressed: boolean; sessionId?: string } | null {
     const projectDir = path.join(this.dshHome, 'sessions', dshProjectDirectoryName(this.config.workingDirectory));
     if (!existsSync(projectDir)) return null;
     let sessionDirs: string[];
@@ -532,23 +644,35 @@ class DshSessionEventMonitor {
       return null;
     }
 
-    const matches: string[] = [];
+    const matches: Array<{ path: string; compressed: boolean; sessionId?: string; createdAt?: number; mtimeMs: number }> = [];
     for (const sessionDir of sessionDirs) {
-      const sessionFile = path.join(projectDir, sessionDir, 'session.jsonl.zstd');
-      if (!existsSync(sessionFile)) continue;
-      let stat;
-      try {
-        stat = statSync(sessionFile);
-      } catch {
-        continue;
+      for (const candidate of [
+        { path: path.join(projectDir, sessionDir, 'session.jsonl.zstd'), compressed: true },
+        { path: path.join(projectDir, sessionDir, 'session.jsonl'), compressed: false },
+      ]) {
+        if (!existsSync(candidate.path)) continue;
+        let stat;
+        try {
+          stat = statSync(candidate.path);
+        } catch {
+          continue;
+        }
+        if (stat.mtimeMs + SESSION_ASSOCIATION_SKEW_MS < this.launchTime) continue;
+        const header = this.sessionHeader(candidate.path, candidate.compressed);
+        if (!this.cwdMatches(header.cwd)) continue;
+        if (header.createdAt !== undefined && header.createdAt + SESSION_ASSOCIATION_SKEW_MS < this.launchTime) continue;
+        matches.push({ ...candidate, sessionId: header.id ?? sessionDir, createdAt: header.createdAt, mtimeMs: stat.mtimeMs });
       }
-      if (stat.mtimeMs + SESSION_ASSOCIATION_SKEW_MS < this.launchTime) continue;
-      if (this.sessionCwd(sessionFile) === path.resolve(this.config.workingDirectory)) matches.push(sessionFile);
     }
 
-    if (matches.length === 1) return matches[0];
+    if (matches.length === 1) {
+      console.info(`[local-openai] DSH session watcher selected session=${matches[0].sessionId ?? 'unknown'} path=${matches[0].path}`);
+      return matches[0];
+    }
     if (matches.length > 1 && !this.warnedAmbiguous) {
       this.warnedAmbiguous = true;
+      this.disabled = true;
+      console.warn(`[local-openai] DSH session association is ambiguous for ${this.workingDirectory}; matches=${matches.map(match => match.sessionId ?? match.path).join(',')}`);
       emit(this.config, 'error', 'DeepSeek Harness session association is ambiguous; live DSH operational events are disabled for this run.', {
         agentType: LOCAL_AGENT_TYPE,
         command: 'dsh session monitor',
@@ -557,14 +681,46 @@ class DshSessionEventMonitor {
     return null;
   }
 
-  private sessionCwd(sessionFile: string): string | null {
+  private warnMissingAfterDeadline(): void {
+    if (this.warnedMissing || Date.now() - this.launchTime < SESSION_ASSOCIATION_WAIT_MS) return;
+    this.warnedMissing = true;
+    this.disabled = true;
+    console.warn(`[local-openai] no DSH session found for ${this.workingDirectory} after ${SESSION_ASSOCIATION_WAIT_MS}ms; live DSH operational events are disabled`);
+    emit(this.config, 'error', 'No DeepSeek Harness session was found for this task after a bounded wait; live DSH operational events are disabled for this run.', dshMetadata({
+      agentType: LOCAL_AGENT_TYPE,
+      command: 'dsh session monitor',
+      state: 'failed',
+    }));
+  }
+
+  private sessionHeader(sessionFile: string, compressed: boolean): { cwd: string | null; id?: string; createdAt?: number } {
     try {
-      const { text } = decodeDurableZstdFrames(readFileSync(sessionFile));
+      const { text } = decodeSessionLog(readFileSync(sessionFile), compressed);
       const firstLine = text.split(/\r?\n/, 1)[0]?.trim();
-      if (!firstLine) return null;
+      if (!firstLine) return { cwd: null };
       const record = asRecord(JSON.parse(firstLine));
       const cwd = record ? stringField(record, ['cwd']) : undefined;
-      return cwd ? path.resolve(cwd) : null;
+      return {
+        cwd: cwd ? path.resolve(cwd) : null,
+        id: record ? stringField(record, ['id']) : undefined,
+        createdAt: record ? numberField(record, ['createdAt']) : undefined,
+      };
+    } catch {
+      return { cwd: null };
+    }
+  }
+
+  private cwdMatches(cwd: string | null): boolean {
+    if (!cwd) return false;
+    const resolved = path.resolve(cwd);
+    if (resolved === this.workingDirectory) return true;
+    const real = this.resolveRealPath(resolved);
+    return real !== null && this.realWorkingDirectory !== null && real === this.realWorkingDirectory;
+  }
+
+  private resolveRealPath(value: string): string | null {
+    try {
+      return realpathSync.native(value);
     } catch {
       return null;
     }
@@ -588,22 +744,26 @@ class DshSessionEventMonitor {
       return;
     }
     if (!record) return;
-    const type = stringField(record, ['type']);
-    if (type !== 'tool/call' && type !== 'tool/result' && !isToolOutputType(type)) return;
+    this.decodedRecordCount++;
+    const type = normalizedDshType(stringField(record, ['type']));
+    if (type !== 'tool/call' && type !== 'tool/result' && type !== 'command/run' && type !== 'command/done' && !isToolOutputType(type)) return;
     const data = asRecord(record.data) ?? record;
-    const callId = stringField(data, ['callId']) ?? toolResultDetails(record).callId;
+    const callId = stringField(data, ['callId', 'commandId']) ?? toolResultDetails(record).callId ?? commandDoneDetails(record).commandId;
     const seq = numberField(record, ['seq']) ?? numberField(record, ['seq0']);
     const seqKey = seq === undefined ? undefined : `${type}:${seq}`;
     if (seqKey && this.emittedSeqs.has(seqKey)) return;
-    if (type === 'tool/call' && callId && this.emittedCalls.has(callId)) return;
-    if (type === 'tool/result' && callId && this.emittedResults.has(callId)) return;
+    if ((type === 'tool/call' || type === 'command/run') && callId && this.emittedCalls.has(callId)) return;
+    if ((type === 'tool/result' || type === 'command/done') && callId && this.emittedResults.has(callId)) return;
 
     const events = normalizeDshSessionEvent(record, this.calls);
     if (!events.length) return;
     if (seqKey) this.emittedSeqs.add(seqKey);
-    if (type === 'tool/call' && callId) this.emittedCalls.add(callId);
-    if (type === 'tool/result' && callId) this.emittedResults.add(callId);
-    for (const event of events) emit(this.config, event.type, event.content, event.metadata);
+    if ((type === 'tool/call' || type === 'command/run') && callId) this.emittedCalls.add(callId);
+    if ((type === 'tool/result' || type === 'command/done') && callId) this.emittedResults.add(callId);
+    for (const event of events) {
+      this.emittedEventCount++;
+      emit(this.config, event.type, event.content, event.metadata);
+    }
   }
 }
 

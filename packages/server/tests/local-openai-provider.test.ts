@@ -58,17 +58,18 @@ function makeLauncher(dir: string): string {
   return launcher;
 }
 
-function makeDshSession(dshHome: string, cwd: string, session = 'session-test'): string {
+function makeDshSession(dshHome: string, cwd: string, session = 'session-test', compressed = true): string {
   const sessionDir = path.join(dshHome, 'sessions', dshProjectDirectoryName(cwd), session);
   mkdirSync(sessionDir, { recursive: true });
-  const file = path.join(sessionDir, 'session.jsonl.zstd');
-  appendDshEvents(file, [{ type: 'session', version: 0, id: session, createdAt: Date.now(), cwd }]);
+  const file = path.join(sessionDir, compressed ? 'session.jsonl.zstd' : 'session.jsonl');
+  appendDshEvents(file, [{ type: 'session', version: 0, id: session, createdAt: Date.now(), cwd }], compressed);
   return file;
 }
 
-function appendDshEvents(file: string, records: Array<Record<string, unknown>>): void {
+function appendDshEvents(file: string, records: Array<Record<string, unknown>>, compressed = true): void {
   for (const record of records) {
-    appendFileSync(file, zstdCompressSync(Buffer.from(`${JSON.stringify(record)}\n`, 'utf8')));
+    const line = Buffer.from(`${JSON.stringify(record)}\n`, 'utf8');
+    appendFileSync(file, compressed ? zstdCompressSync(line) : line);
   }
 }
 
@@ -349,6 +350,90 @@ test('local AI DSH persisted SessionEvents are normalized before process complet
   ));
   const contents = events.map((event) => event.content).join('\n');
   assert.doesNotMatch(contents, /private chain of thought|private reasoning|harness private stderr|hidden tool thought/);
+
+  child.close(0);
+  const result = await resultPromise;
+  assert.equal(result.status, 'complete');
+});
+
+test('local AI DSH plaintext logs and command events stream before process completion', async (t) => {
+  const { dir, cleanup } = tempDir('dsh-live-command-events');
+  t.after(cleanup);
+  const dshHome = path.join(dir, 'dsh-home');
+  const launcher = makeLauncher(dir);
+  const events: AgentEvent[] = [];
+  const child = new FakeChild();
+  const { session: sessionPromise } = makeSession({
+    dir,
+    launcherPath: launcher,
+    child,
+    events,
+    env: { DSH_HOME: dshHome },
+  });
+  const session = await sessionPromise;
+
+  const resultPromise = session.execute('stream plaintext command events');
+  const sessionFile = makeDshSession(dshHome, dir, 'session-plaintext', false);
+  appendDshEvents(sessionFile, [
+    { type: 'command/run', seq: 1, time: Date.now(), data: { commandId: 'cmd-1', name: 'npm', args: 'test' } },
+    { type: 'command/done', seq: 2, time: Date.now(), data: { commandId: 'cmd-1', kind: 'success', text: 'plain log ok' } },
+  ], false);
+  await delay(400);
+
+  assert.equal(child.killed, false);
+  assert.ok(events.some((event) =>
+    event.type === 'command' &&
+    event.metadata?.command === 'npm test' &&
+    event.metadata?.state === 'running'
+  ));
+  assert.ok(events.some((event) =>
+    event.type === 'command_output' &&
+    event.content.includes('plain log ok') &&
+    event.metadata?.command === 'npm test' &&
+    event.metadata?.state === 'succeeded'
+  ));
+  assert.ok(events.some((event) =>
+    event.type === 'test_result' &&
+    event.content.includes('plain log ok') &&
+    event.metadata?.state === 'succeeded'
+  ));
+
+  child.close(0);
+  const result = await resultPromise;
+  assert.equal(result.status, 'complete');
+});
+
+test('local AI DSH project directory names match harness escaping and length limit', () => {
+  assert.equal(dshProjectDirectoryName('/tmp/dsh-r9700-smoke'), '--tmp-dsh-r9700-smoke--');
+  assert.equal(dshProjectDirectoryName('/tmp/project:with space/~tilde'), '--tmp-project-with~0020space-~007Etilde--');
+  assert.equal(dshProjectDirectoryName(`/${'a'.repeat(300)}`).length, 255);
+});
+
+test('local AI DSH warns and fails closed when no session is found after bounded wait', async (t) => {
+  const { dir, cleanup } = tempDir('dsh-no-session');
+  t.after(cleanup);
+  const dshHome = path.join(dir, 'dsh-home');
+  const launcher = makeLauncher(dir);
+  const events: AgentEvent[] = [];
+  const child = new FakeChild();
+  const { session: sessionPromise } = makeSession({
+    dir,
+    launcherPath: launcher,
+    child,
+    events,
+    env: { DSH_HOME: dshHome },
+  });
+  const session = await sessionPromise;
+
+  const resultPromise = session.execute('no session');
+  await delay(10_500);
+  const warnings = events.filter((event) => event.type === 'error' && event.content.includes('No DeepSeek Harness session was found'));
+  assert.equal(warnings.length, 1);
+
+  const unrelated = makeDshSession(dshHome, path.join(dir, 'other'));
+  appendDshEvents(unrelated, [toolCall(1, 'late', 'bash', { command: 'echo late' })]);
+  await delay(400);
+  assert.ok(!events.some((event) => event.metadata?.command === 'echo late'));
 
   child.close(0);
   const result = await resultPromise;
