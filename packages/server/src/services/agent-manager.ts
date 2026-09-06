@@ -159,6 +159,14 @@ const STOPPED_TASK_TTL_MS = 30_000;
 // We only need the tail (the final <task-summary> block), so cap memory use.
 const MAX_SUMMARY_BUFFER = 64_000;
 const MAX_RESULT_BUFFER = 512 * 1024;
+const APPROX_CHARS_PER_CONTEXT_TOKEN = 4;
+const DEFAULT_LOCAL_AI_CONTEXT_LIMIT_TOKENS = 128_000;
+const CONTEXT_COMPACT_UTILIZATION = 0.7;
+const CONTEXT_CONTINUATION_UTILIZATION = 0.85;
+const CONTEXT_EXHAUSTION_UTILIZATION = 0.92;
+const MAX_CONTEXT_SUMMARY_EVENTS = 80;
+const MAX_CONTEXT_SUMMARY_FILES = 12;
+const MAX_CONTEXT_SUMMARY_TEXT = 4_000;
 const CODING_TASK_NO_REPOSITORY_CHANGES_REASON = 'Coding task completed without repository changes.';
 const CODING_TASK_NO_REPOSITORY_CHANGES_RECOVERY_INSTRUCTION =
   'This is a coding task. You must implement the requested change in the managed worktree and leave a non-empty repository diff or task-owned commit. Do not report completion without repository changes. If implementation is blocked, report the blocker instead.';
@@ -197,6 +205,132 @@ function getErrorStderr(err: unknown): string {
     return stderr?.toString() ?? '';
   }
   return '';
+}
+
+function estimateContextTokens(value: string): number {
+  return Math.max(1, Math.ceil(value.length / APPROX_CHARS_PER_CONTEXT_TOKEN));
+}
+
+function configuredLocalAIContextLimit(): number {
+  const parsed = Number(process.env.LOCAL_AI_CONTEXT_LIMIT_TOKENS);
+  if (Number.isFinite(parsed) && parsed > 0) return Math.floor(parsed);
+  return DEFAULT_LOCAL_AI_CONTEXT_LIMIT_TOKENS;
+}
+
+function contextBudgetState(utilization: number): NonNullable<NonNullable<AgentEvent['metadata']>['contextBudget']>['state'] {
+  if (utilization >= CONTEXT_EXHAUSTION_UTILIZATION) return 'exhausted';
+  if (utilization >= CONTEXT_CONTINUATION_UTILIZATION) return 'continuation';
+  if (utilization >= CONTEXT_COMPACT_UTILIZATION) return 'compact';
+  return 'normal';
+}
+
+function buildContextBudgetSnapshot(args: {
+  promptText: string;
+  historicalText?: string;
+  maxContextTokens: number;
+}): NonNullable<AgentEvent['metadata']>['contextBudget'] {
+  const estimatedPromptTokens = estimateContextTokens(args.promptText);
+  const estimatedHistoricalTokens = args.historicalText ? estimateContextTokens(args.historicalText) : 0;
+  const estimatedContextTokens = estimatedPromptTokens + estimatedHistoricalTokens;
+  const utilization = estimatedContextTokens / args.maxContextTokens;
+  return {
+    estimatedPromptTokens,
+    estimatedContextTokens,
+    maxContextTokens: args.maxContextTokens,
+    utilization,
+    state: contextBudgetState(utilization),
+    refreshedAt: Date.now(),
+  };
+}
+
+function truncateContextLine(value: string, maxLength = 220): string {
+  const singleLine = value.replace(/\s+/g, ' ').trim();
+  if (singleLine.length <= maxLength) return singleLine;
+  return `${singleLine.slice(0, maxLength - 3).trimEnd()}...`;
+}
+
+function uniqueRecent(values: string[]): string[] {
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (let index = values.length - 1; index >= 0; index--) {
+    const value = values[index];
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    result.unshift(value);
+  }
+  return result;
+}
+
+function repositoryContinuationState(workingDirectory: string, baseBranch?: string, branchName?: string): string[] {
+  const lines: string[] = [];
+  try {
+    const status = execFileSync('git', ['status', '--porcelain'], {
+      cwd: workingDirectory,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).toString().trim();
+    lines.push(status ? `Current diff state: ${status.split(/\r?\n/).length} changed file(s).` : 'Current diff state: clean working tree.');
+  } catch {
+    lines.push('Current diff state: unavailable.');
+  }
+
+  if (baseBranch && branchName) {
+    try {
+      const ahead = execFileSync('git', ['rev-list', '--count', `${baseBranch}..${branchName}`], {
+        cwd: workingDirectory,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }).toString().trim();
+      lines.push(`Branch state: ${branchName} is ${ahead || '0'} commit(s) ahead of ${baseBranch}.`);
+    } catch {
+      lines.push(`Branch state: ${branchName} ahead count unavailable.`);
+    }
+  }
+  return lines;
+}
+
+function buildContinuationContext(args: {
+  task: Task;
+  events: AgentEvent[];
+  workingDirectory: string;
+}): string {
+  const recentEvents = args.events.slice(-MAX_CONTEXT_SUMMARY_EVENTS);
+  const files = uniqueRecent(recentEvents
+    .map((event) => event.metadata?.file)
+    .filter((file): file is string => typeof file === 'string' && file.trim().length > 0))
+    .slice(-MAX_CONTEXT_SUMMARY_FILES);
+  const tests = recentEvents
+    .filter((event) => event.type === 'test_result')
+    .map((event) => {
+      const state = event.metadata?.state ? ` (${event.metadata.state})` : '';
+      return `- ${truncateContextLine(event.content)}${state}`;
+    })
+    .slice(-4);
+  const blockers = recentEvents
+    .filter((event) => event.type === 'error')
+    .map((event) => `- ${truncateContextLine(event.content)}`)
+    .slice(-4);
+  const notableOutput = recentEvents
+    .filter((event) =>
+      (event.type === 'output' || event.type === 'complete') &&
+      !event.metadata?.finalOutput &&
+      /\b(Focused tests passed|Hostile review passed|Environment error|blocked|blocker|Automatic recovery retry|committed|merged)\b/i.test(event.content),
+    )
+    .map((event) => `- ${truncateContextLine(event.content)}`)
+    .slice(-6);
+
+  const sections = [
+    'Continuation context (compacted; prior tool output is intentionally summarized, not replayed):',
+    `Task scope: ${truncateContextLine(args.task.title)}.`,
+    ...repositoryContinuationState(args.workingDirectory, args.task.baseBranch, args.task.branchName),
+  ];
+
+  if (files.length) sections.push(`Relevant files touched/read: ${files.join(', ')}.`);
+  if (tests.length) sections.push('Recent test evidence:', ...tests);
+  if (blockers.length) sections.push('Recent blockers/errors:', ...blockers);
+  if (notableOutput.length) sections.push('Important prior findings:', ...notableOutput);
+
+  const summary = sections.join('\n');
+  if (summary.length <= MAX_CONTEXT_SUMMARY_TEXT) return summary;
+  return `${summary.slice(0, MAX_CONTEXT_SUMMARY_TEXT - 80).trimEnd()}\n[Continuation context truncated to stay within budget.]`;
 }
 
 interface GroupQueue {
@@ -933,6 +1067,55 @@ export class AgentManager {
           }
         }
 
+        const promptPieces = [
+          buildAgentExecutionPrompt(task),
+          ...(noChangeRecoveryRetryCount > 0
+            ? [
+                '',
+                buildContinuationContext({
+                  task,
+                  events: await this.getEvents(task.id),
+                  workingDirectory,
+                }),
+                '',
+                'Internal recovery instruction:',
+                CODING_TASK_NO_REPOSITORY_CHANGES_RECOVERY_INSTRUCTION,
+              ]
+            : []),
+        ];
+        const prompt = promptPieces.join('\n');
+
+        const localContextBudget = agentType === 'local-openai'
+          ? buildContextBudgetSnapshot({
+              promptText: [systemPrompt, prompt].join('\n\n'),
+              maxContextTokens: configuredLocalAIContextLimit(),
+            })
+          : undefined;
+
+        if (localContextBudget) {
+          const percent = Math.round(localContextBudget.utilization * 100);
+          this.emitEvent(task.id, {
+            id: uuid(), taskId: task.id, type: 'output',
+            content: `Local AI context budget: approximately ${localContextBudget.estimatedContextTokens.toLocaleString()} / ${localContextBudget.maxContextTokens.toLocaleString()} tokens (${percent}%).`,
+            timestamp: Date.now(),
+            metadata: { agentType, contextBudget: localContextBudget },
+          });
+
+          if (localContextBudget.state === 'exhausted') {
+            const contextError = 'Local AI context budget would exceed the safe launch threshold. Start a fresh task continuation with the compacted summary instead of growing this session to the model hard limit.';
+            this.emitEvent(task.id, {
+              id: uuid(), taskId: task.id, type: 'error',
+              content: contextError,
+              timestamp: Date.now(),
+              metadata: { agentType, contextBudget: localContextBudget, error: contextError },
+            });
+            const entry = this.sessions.get(task.id);
+            if (entry) this.sessions.delete(task.id);
+            terminateOnce('failed', contextError);
+            return;
+          }
+        }
+
         // Track file context across tool_execution_start → command_output pairs
         let lastFileEventFile: string | null = null;
         let lastFileEventType: string | null = null;
@@ -1051,14 +1234,6 @@ export class AgentManager {
 
         const entry = this.sessions.get(task.id);
         if (entry) entry.timeoutId = timeoutId;
-
-        // Build prompt and execute — each provider returns a typed AgentResult
-        const prompt = [
-          buildAgentExecutionPrompt(task),
-          ...(noChangeRecoveryRetryCount > 0
-            ? ['', 'Internal recovery instruction:', CODING_TASK_NO_REPOSITORY_CHANGES_RECOVERY_INSTRUCTION]
-            : []),
-        ].join('\n');
 
         // Load image attachments if available
         let agentAttachments: AgentAttachment[] | undefined;

@@ -24,6 +24,7 @@ export type {
   TaskTemplate,
   AgentEventType,
   AgentEvent,
+  ContextBudgetSnapshot,
   Column,
   WSMessage,
 } from '../../../../shared/types.js';

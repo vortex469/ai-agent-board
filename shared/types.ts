@@ -236,6 +236,15 @@ export type AgentEventType =
   | 'error'
   | 'complete';
 
+export interface ContextBudgetSnapshot {
+  estimatedPromptTokens: number;
+  estimatedContextTokens: number;
+  maxContextTokens: number;
+  utilization: number;
+  state: 'normal' | 'compact' | 'continuation' | 'exhausted';
+  refreshedAt: number;
+}
+
 export interface AgentEvent {
   id: string;
   taskId: string;
@@ -257,6 +266,8 @@ export interface AgentEvent {
     error?: string;
     /** Persisted, complete assistant prose used by service integrations. */
     finalOutput?: boolean;
+    /** Approximate prompt/context use for providers with local budget tracking. */
+    contextBudget?: ContextBudgetSnapshot;
   };
 }
 

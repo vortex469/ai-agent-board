@@ -178,15 +178,18 @@ test('managed local AI automatically retries once after no repository changes an
   } as unknown as Parameters<AgentManager['initEventPersistence']>[0]);
   let attempts = 0;
   const worktreePaths: string[] = [];
+  const prompts: string[] = [];
   registerDshProvider(manager, (workingDirectory, child) => {
     attempts += 1;
     worktreePaths.push(workingDirectory);
     if (attempts === 2) {
       writeFileSync(path.join(workingDirectory, 'recovered.txt'), 'changed on recovery\n');
       child.stdout.write('<task-summary>\n## Completed\nFocused tests passed: fake DSH recovery.\nHostile review passed: fake review.\n</task-summary>\n');
+    } else {
+      child.stdout.write('VERBOSE TOOL OUTPUT '.repeat(500));
     }
     child.close(0);
-  });
+  }, (prompt) => { prompts.push(prompt); });
 
   const t = task(f.repoPath, 'smoke/no-change-local-ai');
   try {
@@ -208,6 +211,12 @@ test('managed local AI automatically retries once after no repository changes an
     assert.deepEqual(statuses.filter((status) => status === 'complete' || status === 'failed'), ['complete']);
     assert.ok(t.worktreePath);
     assert.deepEqual(worktreePaths, [t.worktreePath, t.worktreePath]);
+    assert.equal(prompts.length, 2);
+    assert.doesNotMatch(prompts[0], /Continuation context/);
+    assert.match(prompts[1], /Continuation context \(compacted; prior tool output is intentionally summarized, not replayed\):/);
+    assert.match(prompts[1], /Current diff state:/);
+    assert.match(prompts[1], /Internal recovery instruction:/);
+    assert.doesNotMatch(prompts[1], /VERBOSE TOOL OUTPUT VERBOSE TOOL OUTPUT/);
     assert.equal(git(['status', '--porcelain'], t.worktreePath), '');
     assert.equal(git(['rev-list', '--count', 'main..smoke/no-change-local-ai'], f.repoPath), '1');
     assert.equal(git(['show', '--format=', '--name-only', 'smoke/no-change-local-ai'], f.repoPath), 'recovered.txt');
@@ -216,7 +225,61 @@ test('managed local AI automatically retries once after no repository changes an
       event.content.includes('Automatic recovery retry triggered') &&
       event.content.includes('empty repository result'),
     ));
+    const contextEvents = events.filter((event) => event.metadata?.contextBudget);
+    assert.equal(contextEvents.length, 2);
+    assert.ok(contextEvents.every((event) => event.metadata?.contextBudget?.maxContextTokens === 128_000));
   } finally {
+    cleanupTaskWorktree(f.repoPath, t.worktreePath);
+    f.dispose();
+  }
+});
+
+test('managed local AI fails safely before launch when prompt exceeds context budget threshold', async () => {
+  const f = fixture();
+  const manager = new AgentManager();
+  const events: AgentEvent[] = [];
+  manager.initEventPersistence({
+    insertEvent: async (event: AgentEvent) => { events.push(event); },
+    getEventsByTaskId: async (taskId: string) => events.filter((event) => event.taskId === taskId),
+    update: async () => undefined,
+  } as unknown as Parameters<AgentManager['initEventPersistence']>[0]);
+  let attempts = 0;
+  registerDshProvider(manager, (_workingDirectory, child) => {
+    attempts += 1;
+    child.close(0);
+  });
+
+  const previousLimit = process.env.LOCAL_AI_CONTEXT_LIMIT_TOKENS;
+  process.env.LOCAL_AI_CONTEXT_LIMIT_TOKENS = '100';
+  const t = {
+    ...task(f.repoPath, 'smoke/context-budget-local-ai'),
+    description: 'oversized prompt '.repeat(200),
+  };
+  try {
+    const finalStatus = await new Promise<Task['agentStatus']>((resolve) => {
+      manager.startAgent(
+        t,
+        (status) => {
+          t.agentStatus = status;
+          if (status === 'complete' || status === 'failed') resolve(status);
+        },
+        (worktreePath) => { t.worktreePath = worktreePath; },
+      );
+    });
+
+    assert.equal(finalStatus, 'failed');
+    assert.equal(attempts, 0);
+    assert.ok(events.some((event) =>
+      event.type === 'error' &&
+      event.content.includes('Local AI context budget would exceed the safe launch threshold') &&
+      event.metadata?.contextBudget?.state === 'exhausted',
+    ));
+  } finally {
+    if (previousLimit === undefined) {
+      delete process.env.LOCAL_AI_CONTEXT_LIMIT_TOKENS;
+    } else {
+      process.env.LOCAL_AI_CONTEXT_LIMIT_TOKENS = previousLimit;
+    }
     cleanupTaskWorktree(f.repoPath, t.worktreePath);
     f.dispose();
   }

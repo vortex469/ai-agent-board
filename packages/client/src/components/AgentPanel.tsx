@@ -23,8 +23,9 @@ import {
   RotateCw,
   Download,
   Paperclip,
+  Gauge,
 } from 'lucide-react';
-import type { Task, AgentEvent, AgentEventType, RepositoryEvidence } from '@/types';
+import type { Task, AgentEvent, AgentEventType, RepositoryEvidence, ContextBudgetSnapshot } from '@/types';
 import { getAgentDisplay } from '@/lib/agent-config';
 import { TerminalView } from './TerminalView';
 import { api, connectWS } from '@/lib/api';
@@ -141,6 +142,17 @@ function coalesceEvents(events: AgentEvent[], streaming: boolean): CoalescedEven
     result.push({ ...event });
   }
   return result;
+}
+
+function contextBudgetLabel(snapshot: ContextBudgetSnapshot): string {
+  return `${Math.round(snapshot.utilization * 100)}% context`;
+}
+
+function contextBudgetClass(snapshot: ContextBudgetSnapshot): string {
+  if (snapshot.state === 'exhausted') return 'text-red-600 dark:text-red-400';
+  if (snapshot.state === 'continuation') return 'text-amber-600 dark:text-amber-400';
+  if (snapshot.state === 'compact') return 'text-yellow-600 dark:text-yellow-400';
+  return 'text-muted-foreground';
 }
 
 /** Parse command event content like 'bash: {"command":"python3 hello.py","description":"Run hello"}' */
@@ -722,6 +734,13 @@ export function AgentPanel({ task, onClose, onRun, onStop, onCreatePR, onMergeLo
     () => coalesceEvents(events, streaming),
     [events, streaming]
   );
+  const latestContextBudget = useMemo(() => {
+    for (let index = events.length - 1; index >= 0; index--) {
+      const snapshot = events[index].metadata?.contextBudget;
+      if (snapshot) return snapshot;
+    }
+    return undefined;
+  }, [events]);
 
   // Derive file changes for the Changes tab
   const fileChanges = useMemo(() => {
@@ -880,6 +899,15 @@ export function AgentPanel({ task, onClose, onRun, onStop, onCreatePR, onMergeLo
                 <span className="text-[10px] text-muted-foreground">
                   {events.length} events
                 </span>
+                {latestContextBudget && (
+                  <span
+                    className={cn('flex items-center gap-1 text-[10px]', contextBudgetClass(latestContextBudget))}
+                    title={`${latestContextBudget.estimatedContextTokens.toLocaleString()} of ${latestContextBudget.maxContextTokens.toLocaleString()} estimated tokens`}
+                  >
+                    <Gauge className="h-3 w-3" />
+                    {contextBudgetLabel(latestContextBudget)}
+                  </span>
+                )}
               </div>
             </div>
             <div className="ml-3 flex items-center gap-1.5">
