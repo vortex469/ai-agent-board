@@ -139,6 +139,9 @@ const STOPPED_TASK_TTL_MS = 30_000;
 const MAX_SUMMARY_BUFFER = 64_000;
 const MAX_RESULT_BUFFER = 512 * 1024;
 const CODING_TASK_NO_REPOSITORY_CHANGES_REASON = 'Coding task completed without repository changes.';
+const CODING_TASK_NO_REPOSITORY_CHANGES_RECOVERY_INSTRUCTION =
+  'This is a coding task. You must implement the requested change in the managed worktree and leave a non-empty repository diff or task-owned commit. Do not report completion without repository changes. If implementation is blocked, report the blocker instead.';
+const MAX_NO_CHANGE_RECOVERY_RETRIES = 1;
 
 function extractFullAgentOutput(buffer: string): string | null {
   const summaryStart = buffer.lastIndexOf('<task-summary>');
@@ -203,6 +206,8 @@ export class AgentManager {
   private groupQueues = new Map<string, GroupQueue>();
   /** Per-repo mutex to serialize git operations (merge, checkout) */
   private repoLocks = new Map<string, Promise<void>>();
+  /** Automatic no-change recovery attempts for the current task execution cycle. */
+  private noChangeRecoveryRetries = new Map<string, number>();
 
   /** Call once at startup to enable event persistence. */
   initEventPersistence(repo: TaskRepository): void {
@@ -714,6 +719,7 @@ export class AgentManager {
 
     const agentType = task.agentType || 'copilot';
     const sessionStartTime = Date.now();
+    const noChangeRecoveryRetryCount = this.noChangeRecoveryRetries.get(task.id) ?? 0;
     let terminated = false;
 
     // Clear any prior run's summary so a rerun never displays a stale result
@@ -726,6 +732,7 @@ export class AgentManager {
       // If the task was stopped by the user, stopAgent already handled cleanup
       if (this.stoppedTasks.has(task.id)) { terminated = true; return; }
       terminated = true;
+      this.noChangeRecoveryRetries.delete(task.id);
       const entry = this.sessions.get(task.id);
       if (entry?.timeoutId) clearTimeout(entry.timeoutId);
       const duration = Date.now() - sessionStartTime;
@@ -1021,7 +1028,12 @@ export class AgentManager {
         if (entry) entry.timeoutId = timeoutId;
 
         // Build prompt and execute — each provider returns a typed AgentResult
-        const prompt = buildAgentExecutionPrompt(task);
+        const prompt = [
+          buildAgentExecutionPrompt(task),
+          ...(noChangeRecoveryRetryCount > 0
+            ? ['', 'Internal recovery instruction:', CODING_TASK_NO_REPOSITORY_CHANGES_RECOVERY_INSTRUCTION]
+            : []),
+        ].join('\n');
 
         // Load image attachments if available
         let agentAttachments: AgentAttachment[] | undefined;
@@ -1075,6 +1087,25 @@ export class AgentManager {
               }
             } catch (err) {
               console.error(`[agent-manager] failed to finalize result for task ${task.id}:`, errorMessage(err));
+              if (
+                worktreePath &&
+                errorMessage(err) === CODING_TASK_NO_REPOSITORY_CHANGES_REASON &&
+                noChangeRecoveryRetryCount < MAX_NO_CHANGE_RECOVERY_RETRIES
+              ) {
+                this.noChangeRecoveryRetries.set(task.id, noChangeRecoveryRetryCount + 1);
+                this.emitEvent(task.id, {
+                  id: uuid(), taskId: task.id, type: 'output',
+                  content: 'Automatic recovery retry triggered: coding task completed with an empty repository result. Retrying once in the same managed worktree.',
+                  timestamp: Date.now(),
+                  metadata: {
+                    agentType,
+                    error: CODING_TASK_NO_REPOSITORY_CHANGES_REASON,
+                  },
+                });
+                session.destroy().catch(() => {});
+                this.startAgent(task, onStatusChange, onWorktreeCreated);
+                return;
+              }
               result.status = 'failed';
               result.error = errorMessage(err);
             }
@@ -1150,6 +1181,7 @@ export class AgentManager {
     const duration = Date.now() - entry.startTime;
     const { agentType } = entry;
     this.sessions.delete(taskId);
+    this.noChangeRecoveryRetries.delete(taskId);
     // Mark as stopped so terminateOnce (from the catch block) won't double-broadcast
     this.stoppedTasks.add(taskId);
     setTimeout(() => this.stoppedTasks.delete(taskId), STOPPED_TASK_TTL_MS);

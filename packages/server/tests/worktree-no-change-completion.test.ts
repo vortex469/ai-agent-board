@@ -99,22 +99,35 @@ function registerDshProvider(
   ];
 }
 
-test('managed local AI DSH exit 0 fails when the agent made no repository changes', async () => {
+test('managed local AI automatically retries once after no repository changes and completes when retry changes files', async () => {
   const f = fixture();
   const manager = new AgentManager();
   const events: AgentEvent[] = [];
   manager.initEventPersistence({
     insertEvent: async (event: AgentEvent) => { events.push(event); },
     getEventsByTaskId: async (taskId: string) => events.filter((event) => event.taskId === taskId),
-  } as Parameters<AgentManager['initEventPersistence']>[0]);
-  registerDshProvider(manager, (_workingDirectory, child) => child.close(0));
+    update: async () => undefined,
+  } as unknown as Parameters<AgentManager['initEventPersistence']>[0]);
+  let attempts = 0;
+  const worktreePaths: string[] = [];
+  registerDshProvider(manager, (workingDirectory, child) => {
+    attempts += 1;
+    worktreePaths.push(workingDirectory);
+    if (attempts === 2) {
+      writeFileSync(path.join(workingDirectory, 'recovered.txt'), 'changed on recovery\n');
+      child.stdout.write('<task-summary>\n## Completed\nFocused tests passed: fake DSH recovery.\nHostile review passed: fake review.\n</task-summary>\n');
+    }
+    child.close(0);
+  });
 
   const t = task(f.repoPath, 'smoke/no-change-local-ai');
   try {
+    const statuses: Task['agentStatus'][] = [];
     const finalStatus = await new Promise<Task['agentStatus']>((resolve) => {
       manager.startAgent(
         t,
         (status) => {
+          statuses.push(status);
           t.agentStatus = status;
           if (status === 'complete' || status === 'failed') resolve(status);
         },
@@ -122,13 +135,18 @@ test('managed local AI DSH exit 0 fails when the agent made no repository change
       );
     });
 
-    assert.equal(finalStatus, 'failed');
+    assert.equal(finalStatus, 'complete');
+    assert.equal(attempts, 2);
+    assert.deepEqual(statuses.filter((status) => status === 'complete' || status === 'failed'), ['complete']);
     assert.ok(t.worktreePath);
+    assert.deepEqual(worktreePaths, [t.worktreePath, t.worktreePath]);
     assert.equal(git(['status', '--porcelain'], t.worktreePath), '');
-    assert.equal(git(['rev-list', '--count', 'main..smoke/no-change-local-ai'], f.repoPath), '0');
+    assert.equal(git(['rev-list', '--count', 'main..smoke/no-change-local-ai'], f.repoPath), '1');
+    assert.equal(git(['show', '--format=', '--name-only', 'smoke/no-change-local-ai'], f.repoPath), 'recovered.txt');
     assert.ok(events.some((event) =>
-      event.type === 'error' &&
-      event.content.includes('Coding task completed without repository changes.'),
+      event.type === 'output' &&
+      event.content.includes('Automatic recovery retry triggered') &&
+      event.content.includes('empty repository result'),
     ));
   } finally {
     cleanupTaskWorktree(f.repoPath, t.worktreePath);
@@ -136,7 +154,7 @@ test('managed local AI DSH exit 0 fails when the agent made no repository change
   }
 });
 
-test('managed worktree completion gate is provider-neutral', async () => {
+test('managed worktree completion gate stops after two consecutive no-change attempts', async () => {
   const f = fixture();
   const manager = new AgentManager();
   const events: AgentEvent[] = [];
@@ -144,12 +162,18 @@ test('managed worktree completion gate is provider-neutral', async () => {
     insertEvent: async (event: AgentEvent) => { events.push(event); },
     getEventsByTaskId: async (taskId: string) => events.filter((event) => event.taskId === taskId),
   } as Parameters<AgentManager['initEventPersistence']>[0]);
+  let attempts = 0;
+  const prompts: string[] = [];
   const provider = {
     displayName: 'Fake Codex',
     start: async () => {},
     stop: async () => {},
     createSession: async () => ({
-      execute: async () => ({ status: 'complete' as const }),
+      execute: async (prompt: string) => {
+        attempts += 1;
+        prompts.push(prompt);
+        return { status: 'complete' as const };
+      },
       destroy: async () => {},
       abort: async () => {},
     }),
@@ -173,8 +197,12 @@ test('managed worktree completion gate is provider-neutral', async () => {
     });
 
     assert.equal(finalStatus, 'failed');
+    assert.equal(attempts, 2);
     assert.ok(t.worktreePath);
     assert.equal(git(['rev-list', '--count', 'main..smoke/no-change-codex'], f.repoPath), '0');
+    assert.equal(prompts[0].includes('This is a coding task. You must implement the requested change'), false);
+    assert.equal(prompts[1].includes('This is a coding task. You must implement the requested change'), true);
+    assert.equal(events.filter((event) => event.content.includes('Automatic recovery retry triggered')).length, 1);
     assert.ok(events.some((event) =>
       event.type === 'error' &&
       event.content.includes('Coding task completed without repository changes.'),
