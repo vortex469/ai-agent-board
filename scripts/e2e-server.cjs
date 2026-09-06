@@ -6,6 +6,9 @@ const repoRoot = path.resolve(__dirname, '..');
 const isWindows = process.platform === 'win32';
 const dbPath = path.join(repoRoot, 'packages', 'e2e', 'test-results', 'agentboard-e2e.db');
 const agentboardHome = path.join(repoRoot, 'packages', 'e2e', 'test-results', 'agentboard-home');
+const dshHome = path.join(repoRoot, 'packages', 'e2e', 'test-results', 'mock-dsh-home');
+const dshState = path.join(repoRoot, 'packages', 'e2e', 'test-results', 'mock-dsh-state');
+const dshLauncher = path.join(repoRoot, 'scripts', 'e2e-local-openai-launcher.cjs');
 function portFromEnv(name, fallback) {
   const value = process.env[name] || fallback;
   if (!/^\d+$/.test(value)) {
@@ -25,7 +28,11 @@ const allowedRepoRoots = [
 mkdirSync(path.dirname(dbPath), { recursive: true });
 rmSync(dbPath, { force: true });
 rmSync(agentboardHome, { recursive: true, force: true });
+rmSync(dshHome, { recursive: true, force: true });
+rmSync(dshState, { recursive: true, force: true });
 mkdirSync(agentboardHome, { recursive: true });
+mkdirSync(dshHome, { recursive: true });
+mkdirSync(dshState, { recursive: true });
 
 const builtServer = path.join(repoRoot, 'packages', 'server', 'dist', 'index.js');
 const useBuiltServer = existsSync(builtServer);
@@ -43,6 +50,13 @@ const child = spawn(command, args, {
     ALLOWED_ORIGINS: `http://localhost:${clientPort}`,
     ALLOWED_REPO_ROOTS: allowedRepoRoots,
     AGENTBOARD_HOME: agentboardHome,
+    DSH_LAUNCHER_PATH: dshLauncher,
+    DSH_HOME: dshHome,
+    DSH_PROFILE: 'e2e-mock',
+    LOCAL_OPENAI_DISPLAY_NAME: 'Mock Local AI',
+    LOCAL_OPENAI_MODEL: 'E2E Mock',
+    AGENTBOARD_E2E_MOCK_LOCAL_OPENAI: '1',
+    AGENTBOARD_E2E_MOCK_STATE_DIR: dshState,
     // E2E never runs real agents; skip booting agent SDK clients so an
     // unauthenticated environment can't crash the server on startup.
     AGENTBOARD_DISABLE_AGENT_STARTUP: '1',

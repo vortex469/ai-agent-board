@@ -278,10 +278,13 @@ export class AgentManager {
       process.env.AGENTBOARD_DISABLE_AGENT_STARTUP === 'true';
     if (skipAgentStartup) {
       console.log('[agent-manager] AGENTBOARD_DISABLE_AGENT_STARTUP set — skipping provider start()');
+      const allowMockLocalOpenAI = process.env.AGENTBOARD_E2E_MOCK_LOCAL_OPENAI === '1' && getLocalOpenAIConfig() !== null;
       this.availableAgents = this.availableAgents.map(a => ({
         ...a,
-        available: false,
-        reason: 'Agent startup disabled (test environment)',
+        available: allowMockLocalOpenAI && String(a.name) === 'local-openai' ? true : false,
+        reason: allowMockLocalOpenAI && String(a.name) === 'local-openai'
+          ? undefined
+          : 'Agent startup disabled (test environment)',
       }));
       return;
     }
