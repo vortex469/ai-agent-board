@@ -1,3 +1,4 @@
+import { verifyGroupBaseline } from './group-baseline.js';
 import { v4 as uuid } from 'uuid';
 import { execFileSync } from 'child_process';
 import fs from 'fs';
@@ -543,10 +544,10 @@ export class AgentManager {
   }
 
   /** Clear stored events for a task without suppressing future events (used on re-run) */
-  resetEvents(taskId: string): void {
+  async resetEvents(taskId: string): Promise<void> {
     this.eventLogs.delete(taskId);
     if (this.eventRepo) {
-      this.eventRepo.deleteEventsByTaskId(taskId).catch((err: unknown) => {
+      await this.eventRepo.deleteEventsByTaskId(taskId).catch((err: unknown) => {
         console.error(`[agent-manager] failed to delete persisted events: ${errorMessage(err)}`);
       });
     }
@@ -697,7 +698,7 @@ export class AgentManager {
 
   private hasTaskBranchCommitsAhead(task: Task): boolean {
     if (!task.repoPath || !task.branchName) return false;
-    const baseBranch = task.baseBranch || 'main';
+    const baseBranch = task.repositoryBaseline?.startCommit || task.baseBranch || 'main';
     try {
       const count = execFileSync('git', ['rev-list', '--count', `${baseBranch}..${task.branchName}`], {
         cwd: task.repoPath,
@@ -725,6 +726,8 @@ export class AgentManager {
     if (!task.repoPath) throw new Error('Worktree tasks require repoPath');
     if (!task.branchName) throw new Error('Worktree tasks require branchName');
 
+    verifyGroupBaseline(task);
+
     // Reuse a valid worktree left over from a prior run (e.g. after a failed
     // attempt). Without this, a restart would mint a new temp dir and fail with
     // "branch already used by worktree", since the old worktree still holds the
@@ -748,7 +751,7 @@ export class AgentManager {
     }
 
     const worktreePath = fs.mkdtempSync(path.join(os.tmpdir(), `agentboard-${task.id}-`));
-    const baseBranch = task.baseBranch || 'main';
+    const baseBranch = task.repositoryBaseline?.startCommit || task.baseBranch || 'main';
 
     const branchExists = this.branchExists(task.repoPath, task.branchName);
 

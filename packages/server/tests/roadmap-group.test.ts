@@ -26,6 +26,7 @@ async function fixture() {
     getAvailableAgents: () => [{ name: 'hermes', available: true }],
     startAgent: (task: Task, cb: (status: Task['agentStatus']) => Promise<void>) => { started.push(task.id); callbacks.set(task.id, cb); },
     stopGroup: async () => {},
+    resetEvents: async (id: string) => { await taskRepo.deleteEventsByTaskId(id); },
   } as unknown as AgentManager;
   const router = createGroupsRouter(groupRepo, taskRepo, manager, projectRepo);
   const request = async (path: string, body: unknown, method = 'post') => {
@@ -118,7 +119,7 @@ async function passingCompletion(f: Awaited<ReturnType<typeof fixture>>, id: str
   await f.callbacks.get(id)!('complete');
 }
 
-test('full-roadmap completion admits persisted reordered next child only after merge gates, then completes group', async () => {
+test('full-roadmap blocks a legacy coding predecessor whose mocked merge has no recorded repository result', async () => {
   const f = await fixture();
   Object.assign(f.manager, { getMergeReadiness: () => ({ ready: true }), mergeLocal: async () => ({ baseBranch: 'main' }), removeWorktree: () => ({ status: 'removed' }) });
   try {
@@ -128,11 +129,9 @@ test('full-roadmap completion admits persisted reordered next child only after m
     assert.equal((await f.request(`/${group.id}/reorder`, { orderedTaskIds: [third.id, second.id] })).status, 200);
     await passingCompletion(f, first.id);
     assert.equal((await f.taskRepo.getById(first.id))?.columnId, 'done');
-    assert.deepEqual(f.started, [first.id, third.id]);
-    await passingCompletion(f, third.id);
-    assert.deepEqual(f.started, [first.id, third.id, second.id]);
-    await passingCompletion(f, second.id);
-    assert.equal((await f.groupRepo.getById(group.id))?.columnId, 'done');
+    assert.deepEqual(f.started, [first.id]);
+    assert.equal((await f.taskRepo.getById(third.id))?.columnId, 'backlog');
+    assert.match((await f.taskRepo.getEventsByTaskId(third.id)).map(event => event.content).join('\n'), /repository does not match|no recorded repository baseline/);
   } finally { await f.close(); }
 });
 
@@ -222,5 +221,37 @@ test('legacy group reorder API rejects changes and preserves legacy ordering', a
     const reordered = await f.request(`/${group.id}/reorder`, { orderedTaskIds: [...ids].reverse() });
     assert.equal(reordered.status, 400);
     assert.deepEqual((await f.groupRepo.getChildTasks(group.id)).map(child => child.id), ids);
+  } finally { await f.close(); }
+});
+
+test('explicit Run retries the failed first child while Auto Run remains stopped', async () => {
+  const { startOrderedGroupChild } = await import('../src/services/ordered-group.js');
+  const f = await fixture();
+  try {
+    const group = await (await f.request('', { title: 'Retry', roadmapExecutionMode: 'backlog', children: children.slice(0, 2) })).json();
+    const first = group.children[0];
+    await f.taskRepo.update(first.id, { agentStatus: 'failed', columnId: 'review' });
+    await f.taskRepo.insertEvent({ id: 'old-evidence', taskId: first.id, type: 'output', content: 'Focused tests passed: stale run', timestamp: 1 });
+    assert.equal(await startOrderedGroupChild(group.id, f.groupRepo, f.taskRepo, f.manager), undefined);
+    assert.equal((await startOrderedGroupChild(group.id, f.groupRepo, f.taskRepo, f.manager, false, f.projectRepo, first.id))?.id, first.id);
+    assert.deepEqual(f.started, [first.id]);
+    assert.deepEqual(await f.taskRepo.getEventsByTaskId(first.id), []);
+  } finally { await f.close(); }
+});
+
+test('central admission blocks restarting an earlier child while its successor runs', async () => {
+  const { startAgentForTask } = await import('../src/routes/helpers.js');
+  const { startOrderedGroupChild } = await import('../src/services/ordered-group.js');
+  const f = await fixture();
+  try {
+    const group = await (await f.request('', { title: 'Concurrent retry', roadmapExecutionMode: 'backlog', children: children.slice(0, 2) })).json();
+    const [first, second] = group.children;
+    await f.taskRepo.update(first.id, { agentStatus: 'complete', columnId: 'done' });
+    await startOrderedGroupChild(group.id, f.groupRepo, f.taskRepo, f.manager);
+    await f.taskRepo.update(first.id, { agentStatus: 'idle', columnId: 'in-progress' });
+    const requested = await f.taskRepo.requestRun(first.id, Date.now());
+    await startAgentForTask(requested!, f.taskRepo, f.manager);
+    assert.deepEqual(f.started, [second.id]);
+    assert.match((await f.taskRepo.getEventsByTaskId(first.id)).map(e => e.content).join('\n'), /Another ordered group child is running/);
   } finally { await f.close(); }
 });

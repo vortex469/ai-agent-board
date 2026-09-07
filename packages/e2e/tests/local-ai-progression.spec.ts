@@ -12,6 +12,13 @@ type Task = {
   columnId: string;
   agentStatus: string;
   worktreePath?: string;
+  branchName?: string;
+  repositoryBaseline?: {
+    startCommit: string;
+    predecessorTaskId?: string;
+    predecessorBranch?: string;
+    predecessorCommit?: string;
+  };
 };
 
 type AgentEvent = {
@@ -122,12 +129,17 @@ test.describe('Local AI Workbench progression regression', () => {
   const projectIds: string[] = [];
   const taskIds: string[] = [];
   const repoPaths: string[] = [];
+  const groupIds: string[] = [];
 
   test.afterEach(async ({ request }) => {
     const knownTasks: Task[] = [];
     for (const projectId of projectIds) {
       const res = await request.get(`${API}/api/tasks?projectId=${projectId}`).catch(() => undefined);
       if (res?.ok()) knownTasks.push(...await res.json() as Task[]);
+    }
+    for (const groupId of groupIds) {
+      const res = await request.get(`${API}/api/groups/${groupId}`).catch(() => undefined);
+      if (res?.ok()) knownTasks.push(...(await res.json() as { children: Task[] }).children);
     }
     for (const id of taskIds) {
       const task = knownTasks.find((item) => item.id === id);
@@ -139,6 +151,9 @@ test.describe('Local AI Workbench progression regression', () => {
       }
       await request.delete(`${API}/api/tasks/${id}`).catch(() => {});
     }
+    for (const id of groupIds) {
+      await request.delete(`${API}/api/groups/${id}`).catch(() => {});
+    }
     for (const id of projectIds) {
       await request.delete(`${API}/api/projects/${id}`).catch(() => {});
     }
@@ -149,6 +164,75 @@ test.describe('Local AI Workbench progression regression', () => {
     taskIds.length = 0;
     projectIds.length = 0;
     repoPaths.length = 0;
+    groupIds.length = 0;
+  });
+
+  test('Auto Run executes grouped P1 P2 P3 from each predecessor committed result in isolated worktrees', async ({ request }) => {
+    const stamp = `ordered-roadmap-${Date.now()}`;
+    const repoPath = prepareTestRepo(stamp, { clean: true });
+    repoPaths.push(repoPath);
+    const initialCommit = git(['rev-parse', 'main'], repoPath).trim();
+    const project = await createLocalAiProject(request, repoPath, stamp);
+    projectIds.push(project.id);
+    const response = await request.post(`${API}/api/groups`, {
+      data: {
+        projectId: project.id,
+        title: stamp,
+        roadmapExecutionMode: 'full-roadmap',
+        children: [1, 2, 3].map(step => ({
+          title: `E2E Ordered roadmap P${step} ${stamp}`,
+          description: 'Implement this coding task in an isolated worktree, preserving the committed results of all previous steps.',
+          agentType: 'local-openai',
+          useWorktree: true,
+        })),
+      },
+    });
+    expect(response.status()).toBe(201);
+    const group = await response.json() as { id: string; children: Task[] };
+    groupIds.push(group.id);
+    taskIds.push(...group.children.map(task => task.id));
+    const completed: Task[] = [];
+    for (const child of group.children) {
+      let finished: Task | undefined;
+      await expect.poll(async () => {
+        const current = await request.get(`${API}/api/groups/${group.id}`);
+        expect(current.status()).toBe(200);
+        finished = ((await current.json()) as { children: Task[] }).children.find(task => task.id === child.id);
+        return finished?.columnId === 'done' && finished.agentStatus === 'complete';
+      }, { timeout: 20_000, intervals: [250, 500, 1000] }).toBe(true);
+      completed.push(finished!);
+    }
+
+    const worktrees = new Set<string>();
+    for (let index = 0; index < completed.length; index++) {
+      const child = completed[index];
+      expect(child.branchName).toBeTruthy();
+      const branch = child.branchName!;
+      const output = JSON.parse(git(['show', `${branch}:src/ordered-p${index + 1}.json`], repoPath)) as {
+        baseline: string; worktree: string; branch: string;
+      };
+      const expectedBaseline = index === 0 ? initialCommit
+        : git(['rev-parse', completed[index - 1].branchName!], repoPath).trim();
+      expect(output.baseline).toBe(expectedBaseline);
+      expect(output.branch).toBe(branch);
+      expect(output.worktree).not.toBe(repoPath);
+      worktrees.add(output.worktree);
+      expect(child.repositoryBaseline?.startCommit).toBe(expectedBaseline);
+      if (index > 0) {
+        expect(child.repositoryBaseline).toMatchObject({
+          predecessorTaskId: completed[index - 1].id,
+          predecessorBranch: completed[index - 1].branchName,
+          predecessorCommit: expectedBaseline,
+        });
+      }
+      git(['merge-base', '--is-ancestor', expectedBaseline, branch], repoPath);
+      git(['merge-base', '--is-ancestor', branch, 'main'], repoPath);
+      const events = eventText(await getEvents(request, child.id));
+      expect(events).toContain(`Focused tests passed: P${index + 1} inherited all committed predecessors`);
+      expect(events).not.toMatch(/\bgit push\b|\bcreate-pr\b|\bdeploy\b/i);
+    }
+    expect(worktrees.size).toBe(3);
+    expect(completed[2].repositoryBaseline?.startCommit).not.toBe(git(['rev-parse', completed[0].branchName!], repoPath).trim());
   });
 
   test('retries one empty Local AI result, accepts validation evidence, and starts the next roadmap card after Done', async ({ request }) => {

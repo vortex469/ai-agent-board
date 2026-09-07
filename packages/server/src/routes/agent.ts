@@ -1,3 +1,4 @@
+import { startOrderedGroupChild } from '../services/ordered-group.js';
 import { Router, Request, Response } from 'express';
 import path from 'path';
 import type { Task } from '../types.js';
@@ -115,6 +116,17 @@ export function createAgentRouter(
     }
     if (agentManager.isRunning(task.id)) {
       res.status(409).json({ error: 'agent already running for this task' });
+      return;
+    }
+
+    const orderedGroup = task.groupId && groupRepo ? await groupRepo.getById(task.groupId) : undefined;
+    if (task.groupId && groupRepo && orderedGroup?.roadmapExecutionMode) {
+      const children = await groupRepo.getChildTasks(task.groupId);
+      const next = children.find(child => child.columnId !== 'done' || child.agentStatus !== 'complete');
+      if (next?.id !== task.id) { res.status(409).json({ error: 'Ordered group predecessor is not complete' }); return; }
+      const started = await startOrderedGroupChild(task.groupId, groupRepo, repo, agentManager, orderedGroup.roadmapExecutionMode === 'full-roadmap', projectRepo, task.id);
+      if (!started) { res.status(409).json({ error: 'Ordered group task is blocked; inspect predecessor status and repository baseline' }); return; }
+      res.json(started);
       return;
     }
 

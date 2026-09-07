@@ -151,6 +151,7 @@ export function migrateSqliteDatabase(db: Database.Database): void {
   if (!colNames.has('run_requested_at')) db.exec(`ALTER TABLE tasks ADD COLUMN run_requested_at INTEGER`);
   if (!colNames.has('run_claimed_at')) db.exec(`ALTER TABLE tasks ADD COLUMN run_claimed_at INTEGER`);
   if (!colNames.has('timeout_minutes')) db.exec(`ALTER TABLE tasks ADD COLUMN timeout_minutes INTEGER`);
+  if (!colNames.has('repository_baseline')) db.exec(`ALTER TABLE tasks ADD COLUMN repository_baseline TEXT`);
   if (!colNames.has('sort_order')) db.exec(`ALTER TABLE tasks ADD COLUMN sort_order INTEGER`);
   db.exec(`UPDATE tasks SET sort_order = created_at WHERE sort_order IS NULL`);
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_external_identity ON tasks(external_source, external_key) WHERE external_source IS NOT NULL AND external_key IS NOT NULL`);
@@ -392,6 +393,7 @@ function ensureSqliteProjectForeignKeys(db: Database.Database): void {
         run_claimed_at INTEGER,
         timeout_minutes INTEGER,
         sort_order INTEGER,
+        repository_baseline TEXT,
         FOREIGN KEY (project_id) REFERENCES projects(id),
         FOREIGN KEY (group_id) REFERENCES task_groups(id) ON DELETE CASCADE
       );
@@ -400,13 +402,13 @@ function ensureSqliteProjectForeignKeys(db: Database.Database): void {
         id, title, description, priority, column_id, agent_status, created_at,
         started_at, completed_at, repo_path, branch_name, base_branch, use_worktree,
         worktree_path, agent_type, archived, project_id, group_id, group_order, summary,
-        external_source, external_key, provenance, run_requested_at, run_claimed_at, timeout_minutes, sort_order
+        external_source, external_key, provenance, run_requested_at, run_claimed_at, timeout_minutes, sort_order, repository_baseline
       )
       SELECT
         id, title, description, priority, column_id, agent_status, created_at,
         started_at, completed_at, repo_path, branch_name, base_branch, use_worktree,
         worktree_path, agent_type, archived, project_id, group_id, group_order, summary,
-        external_source, external_key, provenance, run_requested_at, run_claimed_at, timeout_minutes, sort_order
+        external_source, external_key, provenance, run_requested_at, run_claimed_at, timeout_minutes, sort_order, repository_baseline
       FROM tasks;
 
       DROP TABLE tasks;
@@ -531,6 +533,7 @@ export async function initPostgresDatabase(pool: Pool): Promise<void> {
   await addCol('run_requested_at', 'BIGINT');
   await addCol('run_claimed_at', 'BIGINT');
   await addCol('timeout_minutes', 'INTEGER');
+  await addCol('repository_baseline', 'TEXT');
   await addCol('sort_order', 'BIGINT');
   await pool.query(`UPDATE tasks SET sort_order = created_at WHERE sort_order IS NULL`);
   await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_external_identity ON tasks(external_source, external_key) WHERE external_source IS NOT NULL AND external_key IS NOT NULL`);

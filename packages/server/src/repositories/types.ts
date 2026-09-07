@@ -14,6 +14,8 @@ export interface ContinuationEligibility {
 }
 
 export interface TaskRepository {
+  /** Persisted ordered children, or undefined for an independent group. */
+  getOrderedGroupTasks(groupId: string): Promise<Task[] | undefined>;
   getAll(includeArchived?: boolean, projectId?: string): Promise<Task[]>;
   getById(id: string): Promise<Task | undefined>;
   getByExternalIdentity(source: string, key: string): Promise<Task | undefined>;

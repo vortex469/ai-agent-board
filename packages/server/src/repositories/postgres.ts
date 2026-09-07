@@ -5,6 +5,7 @@ import { isValidPriority, isValidColumnId, isValidAgentStatus, isValidAgentType 
 import { errorMessage } from '../utils.js';
 
 interface TaskRow {
+  repository_baseline: string | null;
   id: string;
   title: string;
   description: string;
@@ -54,6 +55,7 @@ function rowToTask(row: TaskRow): Task {
   }
 
   return {
+    repositoryBaseline: row.repository_baseline ? JSON.parse(row.repository_baseline) : undefined,
     id: row.id,
     projectId: row.project_id,
     title: row.title,
@@ -104,6 +106,15 @@ export class PostgresTaskRepository implements TaskRepository {
     this.pool = pool;
   }
 
+  async getOrderedGroupTasks(groupId: string): Promise<Task[] | undefined> {
+    const group = await this.pool.query('SELECT roadmap_execution_mode, archived FROM task_groups WHERE id = $1', [groupId]);
+    if (!group.rows[0]) return [];
+    if (!group.rows[0].roadmap_execution_mode) return undefined;
+    if (group.rows[0].archived) return [];
+    const children = await this.pool.query<TaskRow>('SELECT * FROM tasks WHERE group_id = $1 ORDER BY group_order, created_at', [groupId]);
+    return children.rows.map(rowToTask);
+  }
+
   async getAll(includeArchived = false, projectId = 'default'): Promise<Task[]> {
     const query = includeArchived
       ? 'SELECT * FROM tasks WHERE project_id = $1 AND group_id IS NULL ORDER BY COALESCE(sort_order, created_at) ASC, created_at ASC'
@@ -136,8 +147,8 @@ export class PostgresTaskRepository implements TaskRepository {
     await this.pool.query(
       `INSERT INTO tasks (id, project_id, title, description, priority, column_id, agent_status, agent_type,
         created_at, started_at, completed_at, repo_path, branch_name, base_branch, use_worktree, worktree_path, archived,
-        group_id, group_order, summary, external_source, external_key, provenance, run_requested_at, run_claimed_at, timeout_minutes, sort_order)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)`,
+        group_id, group_order, summary, external_source, external_key, provenance, run_requested_at, run_claimed_at, timeout_minutes, sort_order, repository_baseline)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)`,
       [
         task.id,
         task.projectId,
@@ -158,7 +169,7 @@ export class PostgresTaskRepository implements TaskRepository {
         task.archived ?? false,
         task.groupId ?? null,
         task.groupOrder ?? null,
-        task.summary ?? null, task.externalSource ?? null, task.externalKey ?? null, task.provenance ? JSON.stringify(task.provenance) : null, task.runRequestedAt ?? null, task.runClaimedAt ?? null, task.timeoutMinutes ?? null, task.sortOrder ?? task.createdAt,
+        task.summary ?? null, task.externalSource ?? null, task.externalKey ?? null, task.provenance ? JSON.stringify(task.provenance) : null, task.runRequestedAt ?? null, task.runClaimedAt ?? null, task.timeoutMinutes ?? null, task.sortOrder ?? task.createdAt, task.repositoryBaseline ? JSON.stringify(task.repositoryBaseline) : null,
       ]
     );
     return task;
@@ -225,7 +236,7 @@ export class PostgresTaskRepository implements TaskRepository {
           agent_status = $5, agent_type = $6, started_at = $7, completed_at = $8,
           repo_path = $9, branch_name = $10, base_branch = $11, use_worktree = $12,
           worktree_path = $13, archived = $14, summary = $15, run_requested_at=$16, run_claimed_at=$17,
-          timeout_minutes=$18, sort_order=$19
+          timeout_minutes=$18, sort_order=$19, repository_baseline=$21
         WHERE id = $20`,
         [
           merged.title,
@@ -244,6 +255,7 @@ export class PostgresTaskRepository implements TaskRepository {
           merged.archived ?? false,
           merged.summary ?? null, merged.runRequestedAt ?? null, merged.runClaimedAt ?? null, merged.timeoutMinutes ?? null, merged.sortOrder ?? merged.createdAt,
           id,
+          merged.repositoryBaseline ? JSON.stringify(merged.repositoryBaseline) : null,
         ]
       );
       await client.query('COMMIT');
@@ -517,10 +529,10 @@ export class PostgresTaskRepository implements TaskRepository {
       const merged = { ...current, ...updates };
       const updated = await client.query<TaskRow>(`UPDATE tasks SET title=$1,description=$2,priority=$3,column_id=$4,agent_status=$5,agent_type=$6,
         started_at=$7,completed_at=$8,repo_path=$9,branch_name=$10,base_branch=$11,use_worktree=$12,worktree_path=$13,archived=$14,
-        summary=$15,run_requested_at=$16,run_claimed_at=$17,timeout_minutes=$18 WHERE id=$19 RETURNING *`, [merged.title,merged.description,
+        summary=$15,run_requested_at=$16,run_claimed_at=$17,timeout_minutes=$18,repository_baseline=$20 WHERE id=$19 RETURNING *`, [merged.title,merged.description,
         merged.priority,merged.columnId,merged.agentStatus,merged.agentType,merged.startedAt ?? null,merged.completedAt ?? null,merged.repoPath ?? null,
         merged.branchName ?? null,merged.baseBranch ?? null,merged.useWorktree ?? null,merged.worktreePath ?? null,merged.archived ?? false,
-        merged.summary ?? null,merged.runRequestedAt ?? null,merged.runClaimedAt ?? null,merged.timeoutMinutes ?? null,taskId]);
+        merged.summary ?? null,merged.runRequestedAt ?? null,merged.runClaimedAt ?? null,merged.timeoutMinutes ?? null,taskId,merged.repositoryBaseline ? JSON.stringify(merged.repositoryBaseline) : null]);
       if (!updated.rows[0]) throw new Error('failed to reset orchestration task');
       await client.query('COMMIT');
       return { task: rowToTask(updated.rows[0]), attempt: rowToAttempt(attemptInsert.rows[0]), created: true };

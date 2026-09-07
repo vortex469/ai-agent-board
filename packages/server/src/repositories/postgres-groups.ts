@@ -21,6 +21,7 @@ interface GroupRow {
 }
 
 interface TaskRow {
+  repository_baseline: string | null;
   id: string;
   project_id: string;
   title: string;
@@ -64,6 +65,7 @@ function rowToGroup(row: GroupRow): TaskGroup {
 
 function rowToTask(row: TaskRow): Task {
   return {
+    repositoryBaseline: row.repository_baseline ? JSON.parse(row.repository_baseline) : undefined,
     id: row.id,
     projectId: row.project_id,
     title: row.title,

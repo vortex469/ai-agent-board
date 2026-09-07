@@ -11,7 +11,17 @@ export interface AgentInfo {
   reason?: string;
 }
 
+export interface TaskRepositoryBaseline {
+  startCommit: string;
+  resultCommit?: string;
+  predecessorTaskId?: string;
+  predecessorBranch?: string;
+  predecessorCommit?: string;
+}
+
 export interface Task {
+  /** Server-recorded immutable Git input for an ordered roadmap child. */
+  repositoryBaseline?: TaskRepositoryBaseline;
   id: string;
   title: string;
   description: string;

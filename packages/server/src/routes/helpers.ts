@@ -1,3 +1,5 @@
+import { withOrderedGroupLock } from '../services/group-lock.js';
+import { prepareOrderedGroupBaseline, recordOrderedGroupResult } from '../services/group-baseline.js';
 import { Request, Response, NextFunction } from 'express';
 import { v4 as uuid } from 'uuid';
 import { execFileSync } from 'child_process';
@@ -556,6 +558,16 @@ export function makeStatusCallback(
 ): (status: Task['agentStatus']) => void {
   return async (status) => {
     if (status === 'complete') {
+      const task = await repo.getById(taskId);
+      if (task?.repositoryBaseline) {
+        try { await recordOrderedGroupResult(task, repo); }
+        catch (error) {
+          const blocked = await repo.update(taskId, { agentStatus: 'failed', columnId: 'review' });
+          if (blocked) broadcastTaskUpdate(blocked);
+          await emitTaskLifecycleEvent(repo, task, 'error', `Ordered group blocked: ${errorMessage(error)}`);
+          return;
+        }
+      }
       await autoProgressCompletedTask(repo, taskId, agentManager, taskState, projectRepo);
       return;
     }
@@ -786,6 +798,14 @@ export async function reconcileInterruptedTaskCompletion(
     if (task.agentStatus === 'planning' || task.agentStatus === 'executing') await repo.clearRun(task.id);
     await emitRecoveryReason(repo, task, 'could not prove the task branch contains completed agent work');
     return undefined;
+  }
+
+  if (task.repositoryBaseline && !task.repositoryBaseline.resultCommit) {
+    try { await recordOrderedGroupResult(task, repo); }
+    catch (error) {
+      await emitRecoveryReason(repo, task, `ordered repository result could not be verified: ${errorMessage(error)}`);
+      return undefined;
+    }
   }
 
   const completedAt = task.completedAt ?? Date.now();
@@ -1138,12 +1158,26 @@ export async function startAgentForTask(
   agentManager: AgentManager,
   projectRepo?: ProjectRepository,
   onSettled?: () => Promise<void>,
+  orderedLockHeld = false,
+  resetEventHistory = false,
 ): Promise<void> {
+  if (task.groupId && !orderedLockHeld) {
+    return withOrderedGroupLock(task.groupId, async () => {
+      const current = await repo.getById(task.id);
+      if (current) await startAgentForTask(current, repo, agentManager, projectRepo, onSettled, true, resetEventHistory);
+    });
+  }
   if (!await taskPrerequisitesAreDone(repo, task.id)) return;
+  try { await prepareOrderedGroupBaseline(task, repo); }
+  catch (error) {
+    await emitTaskLifecycleEvent(repo, task, 'error', `Ordered group blocked: ${errorMessage(error)}`);
+    return;
+  }
 
   const claimed = await repo.claimRun(task.id, Date.now());
   if (!claimed) return;
   task = claimed;
+  if (resetEventHistory) await agentManager.resetEvents(task.id);
   const updates: Partial<Task> = {
     agentStatus: 'planning',
     startedAt: Date.now(),

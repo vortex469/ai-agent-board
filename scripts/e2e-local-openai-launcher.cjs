@@ -70,7 +70,26 @@ const taskText = process.argv[process.argv.length - 1] || '';
 const cwd = process.cwd();
 const attempt = stateCount(cwd);
 
-if (taskText.includes('E2E Local AI real blocker')) {
+const orderedStep = taskText.match(/E2E Ordered roadmap P([123])/);
+if (orderedStep) {
+  const step = Number(orderedStep[1]);
+  const baseline = git(['rev-parse', 'HEAD']);
+  // Read real predecessor output from this isolated worktree before writing anything.
+  for (let predecessor = 1; predecessor < step; predecessor++) {
+    const file = `src/ordered-p${predecessor}.json`;
+    if (!existsSync(path.join(cwd, file))) throw new Error(`Missing required P${predecessor} result for P${step}`);
+    const commit = git(['log', '-1', '--format=%H', '--', file]);
+    if (!commit) throw new Error(`Uncommitted P${predecessor} result`);
+    git(['merge-base', '--is-ancestor', commit, baseline]);
+    git(['merge-base', '--is-ancestor', commit, 'main']);
+  }
+  writeFile(`src/ordered-p${step}.json`, JSON.stringify({ baseline, worktree: cwd, branch: git(['branch', '--show-current']) }));
+  git(['add', `src/ordered-p${step}.json`]);
+  git(['commit', '-m', `Ordered roadmap P${step} result`]);
+  emitTestEvidence('npm test -- --ordered-roadmap', `Focused tests passed: P${step} inherited all committed predecessors`);
+  process.stdout.write('<task-summary>\n## Completed\nFocused tests passed: npm test -- --ordered-roadmap\nHostile review passed: verified committed predecessor ancestry in isolated worktree.\n</task-summary>\n');
+  setTimeout(() => process.exit(0), 150);
+} else if (taskText.includes('E2E Local AI real blocker')) {
   process.stdout.write('<task-summary>\n## Completed\nEnvironment error: mocked Local AI blocker prevented validation.\n## Remaining\nBlocked by mocked validation setup.\n</task-summary>\n');
   setTimeout(() => process.exit(1), 150);
 } else if (taskText.includes('E2E Local AI recovery succeeds')) {

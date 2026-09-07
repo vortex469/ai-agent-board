@@ -4,6 +4,7 @@ import type { TaskRepository, ContinuationEligibility } from './types.js';
 import { errorMessage } from '../utils.js';
 
 interface TaskRow {
+  repository_baseline: string | null;
   id: string;
   title: string;
   description: string;
@@ -32,6 +33,7 @@ interface TaskRow {
 
 function rowToTask(row: TaskRow): Task {
   return {
+    repositoryBaseline: row.repository_baseline ? JSON.parse(row.repository_baseline) : undefined,
     id: row.id,
     projectId: row.project_id,
     title: row.title,
@@ -106,9 +108,9 @@ export class SqliteTaskRepository implements TaskRepository {
       getById: db.prepare('SELECT * FROM tasks WHERE id = ?'),
       insert: db.prepare(`
         INSERT INTO tasks (id, project_id, title, description, priority, column_id, agent_status, agent_type, created_at, started_at, completed_at,
-          repo_path, branch_name, base_branch, use_worktree, worktree_path, archived, group_id, group_order, summary, external_source, external_key, provenance, run_requested_at, run_claimed_at, timeout_minutes, sort_order)
+          repo_path, branch_name, base_branch, use_worktree, worktree_path, archived, group_id, group_order, summary, external_source, external_key, provenance, run_requested_at, run_claimed_at, timeout_minutes, sort_order, repository_baseline)
         VALUES (@id, @project_id, @title, @description, @priority, @column_id, @agent_status, @agent_type, @created_at, @started_at, @completed_at,
-          @repo_path, @branch_name, @base_branch, @use_worktree, @worktree_path, @archived, @group_id, @group_order, @summary, @external_source, @external_key, @provenance, @run_requested_at, @run_claimed_at, @timeout_minutes, @sort_order)
+          @repo_path, @branch_name, @base_branch, @use_worktree, @worktree_path, @archived, @group_id, @group_order, @summary, @external_source, @external_key, @provenance, @run_requested_at, @run_claimed_at, @timeout_minutes, @sort_order, @repository_baseline)
       `),
       update: db.prepare(`
         UPDATE tasks SET
@@ -128,7 +130,7 @@ export class SqliteTaskRepository implements TaskRepository {
           archived = @archived,
           summary = @summary, run_requested_at = @run_requested_at, run_claimed_at = @run_claimed_at,
           timeout_minutes = @timeout_minutes,
-          sort_order = @sort_order
+          sort_order = @sort_order, repository_baseline = @repository_baseline
         WHERE id = @id
       `),
       delete: db.prepare('DELETE FROM tasks WHERE id = ?'),
@@ -140,6 +142,14 @@ export class SqliteTaskRepository implements TaskRepository {
       getEventsByTaskId: db.prepare('SELECT * FROM events WHERE task_id = ? ORDER BY timestamp ASC, rowid ASC'),
       deleteEventsByTaskId: db.prepare('DELETE FROM events WHERE task_id = ?'),
     };
+  }
+
+  async getOrderedGroupTasks(groupId: string): Promise<Task[] | undefined> {
+    const group = this.db.prepare('SELECT roadmap_execution_mode, archived FROM task_groups WHERE id = ?').get(groupId) as { roadmap_execution_mode: string | null; archived: number } | undefined;
+    if (!group) return [];
+    if (!group.roadmap_execution_mode) return undefined;
+    if (group.archived) return [];
+    return (this.db.prepare('SELECT * FROM tasks WHERE group_id = ? ORDER BY group_order, created_at').all(groupId) as TaskRow[]).map(rowToTask);
   }
 
   async getAll(includeArchived = false, projectId = 'default'): Promise<Task[]> {
@@ -181,6 +191,7 @@ export class SqliteTaskRepository implements TaskRepository {
       agent_type: task.agentType ?? 'copilot',
       created_at: task.createdAt,
       sort_order: task.sortOrder ?? task.createdAt,
+      repository_baseline: task.repositoryBaseline ? JSON.stringify(task.repositoryBaseline) : null,
       started_at: task.startedAt ?? null,
       completed_at: task.completedAt ?? null,
       repo_path: task.repoPath ?? null,
@@ -257,6 +268,7 @@ export class SqliteTaskRepository implements TaskRepository {
         summary: merged.summary ?? null, run_requested_at: merged.runRequestedAt ?? null, run_claimed_at: merged.runClaimedAt ?? null,
         timeout_minutes: merged.timeoutMinutes ?? null,
         sort_order: merged.sortOrder ?? merged.createdAt,
+        repository_baseline: merged.repositoryBaseline ? JSON.stringify(merged.repositoryBaseline) : null,
       });
       return merged;
   }
