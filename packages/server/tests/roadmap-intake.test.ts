@@ -2,6 +2,23 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { parseRoadmapText, ROADMAP_TASK_LIMIT, ROADMAP_TEXT_LIMIT } from '../src/services/roadmap-intake.js';
 
+for (const length of [100, 5_001, 19_978, 19_979, 20_000]) {
+  test(`preserves all ${length} characters of a roadmap source item`, () => {
+    const source = '- Build coverage ' + 'x'.repeat(length - '- Build coverage '.length);
+    const result = parseRoadmapText(source);
+    assert.notEqual(typeof result, 'string');
+    if (typeof result === 'string') return;
+    assert.equal(result.tasks[0].sourceText, source);
+    const labeled = `Source roadmap item:\n\n${source}`;
+    assert.equal(result.tasks[0].description, labeled.length <= 20_000 ? labeled : source);
+    assert.ok(result.tasks[0].description.length <= 20_000);
+  });
+}
+
+test('rejects a 20,001-character roadmap without truncating', () => {
+  assert.equal(parseRoadmapText('x'.repeat(20_001)), 'Roadmap text must be at most 20,000 characters');
+});
+
 test('parses versioned roadmap sections into ordered cards', () => {
   const result = parseRoadmapText(`
 ## v0.40

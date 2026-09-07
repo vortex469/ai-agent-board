@@ -6,6 +6,7 @@ import { api } from '@/lib/api';
 import { AGENT_OPTIONS } from '@/lib/agent-config';
 import { PRIORITY_OPTIONS } from '@/lib/priority-config';
 import { slugify } from '@/lib/utils';
+import { MAX_DESCRIPTION_LENGTH } from '@ai-agent-board/shared/constants.js';
 
 interface RoadmapIntakeDialogProps {
   open: boolean;
@@ -87,6 +88,10 @@ export function RoadmapIntakeDialog({ open, onClose, project, onCreateTasks }: R
     const accepted = preview.filter((task) => task.title.trim());
     if (accepted.length === 0) {
       setError('Keep at least one proposed task before creating cards');
+      return;
+    }
+    if (accepted.some((task) => task.description.length > MAX_DESCRIPTION_LENGTH)) {
+      setError(`Description must be at most ${MAX_DESCRIPTION_LENGTH.toLocaleString()} characters`);
       return;
     }
     if (executionMode !== 'backlog' && !project.repoPath) {
@@ -251,11 +256,16 @@ export function RoadmapIntakeDialog({ open, onClose, project, onCreateTasks }: R
                           </div>
                           <textarea
                             aria-label={`Description for roadmap item ${task.order}`}
+                            aria-describedby={`roadmap-description-count-${task.order}`}
+                            aria-invalid={task.description.length > MAX_DESCRIPTION_LENGTH}
                             value={task.description}
                             onChange={(event) => updateTask(task.order, { description: event.target.value })}
                             rows={3}
                             className="ml-8 resize-none rounded-lg border border-border bg-background px-3 py-2 text-xs text-muted-foreground focus:border-primary focus:outline-none"
                           />
+                          <p id={`roadmap-description-count-${task.order}`} className="ml-8 text-xs text-muted-foreground">
+                            {task.description.length.toLocaleString()} / {MAX_DESCRIPTION_LENGTH.toLocaleString()} characters
+                          </p>
                         </div>
                       ))}
                     </div>

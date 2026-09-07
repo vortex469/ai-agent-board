@@ -54,11 +54,13 @@ export function parseRoadmapText(input: unknown): RoadmapParseResult | string {
         : normalizeWhitespace(block.version)
       : block.titleSeed;
     const title = makeTitle(rawTitle, index + 1, !block.version);
-    const sourceText = clamp(block.sourceText.trim(), MAX_DESCRIPTION_LENGTH - 24);
+    const sourceText = block.sourceText.trim();
+    const labeledDescription = `Source roadmap item:\n\n${sourceText}`;
     return {
       order: index + 1,
       title,
-      description: `Source roadmap item:\n\n${sourceText}`,
+      // Preserve the full source when the optional label would exceed the task limit.
+      description: labeledDescription.length <= MAX_DESCRIPTION_LENGTH ? labeledDescription : sourceText,
       sourceText,
       ...(index > 0 ? { dependsOnTaskIndexes: [index - 1] } : {}),
     };

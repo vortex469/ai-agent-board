@@ -30,7 +30,7 @@ export function isValidAgentType(value: unknown): value is AgentType {
 }
 
 export const MAX_TITLE_LENGTH = 200;
-export const MAX_DESCRIPTION_LENGTH = 5000;
+export const MAX_DESCRIPTION_LENGTH = 20_000;
 export const MIN_AGENT_TIMEOUT_MINUTES = 1;
 export const MAX_AGENT_TIMEOUT_MINUTES = 240;
 export const MAX_GROUP_CHILDREN = 20;

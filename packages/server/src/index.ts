@@ -34,6 +34,9 @@ const HOST = process.env.HOST?.trim() || '127.0.0.1';
 
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || 'http://localhost:8081,http://localhost:4175,http://localhost:4176').split(',');
 app.use(cors({ origin: ALLOWED_ORIGINS }));
+// Allow 50 full-length descriptions in a batch, including JSON escape overhead.
+app.use('/api/tasks/batch', express.json({ limit: '8mb' }));
+app.use(['/api/tasks', '/api/roadmap-intake'], express.json({ limit: '256kb' }));
 app.use(express.json({ limit: '100kb' }));
 
 // API key auth — when API_KEY env var is set, all /api routes require

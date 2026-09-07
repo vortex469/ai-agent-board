@@ -11,6 +11,7 @@ import { cn, getRepoPathHelpText, getRepoPathPlaceholder, isAbsoluteRepoPath, sl
 import { getRecentRepoPaths, addRepoPath } from '@/lib/repo-history';
 import { api } from '@/lib/api';
 import ImageUpload from './ImageUpload';
+import { MAX_DESCRIPTION_LENGTH } from '@ai-agent-board/shared/constants.js';
 
 interface TaskDialogProps {
   open: boolean;
@@ -142,7 +143,7 @@ export function TaskDialog({ open, onClose, onSubmit, editTask, onEditSubmit, hi
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!title.trim() || submitting) return;
+    if (!title.trim() || submitting || description.length > MAX_DESCRIPTION_LENGTH) return;
 
     // Client-side path validation — required
     const trimmedPath = (lockedRepoPath || repoPath).trim();
@@ -304,12 +305,19 @@ export function TaskDialog({ open, onClose, onSubmit, editTask, onEditSubmit, hi
                   Description
                 </label>
                 <textarea
+                  aria-label="Description"
+                  aria-describedby="task-description-count"
+                  aria-invalid={description.length > MAX_DESCRIPTION_LENGTH}
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
                   placeholder="Describe the task for the selected agent..."
                   rows={4}
                   className="w-full resize-none rounded-lg border border-border bg-background px-3 py-2 text-sm placeholder:text-muted-foreground/50 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
                 />
+                <p id="task-description-count" className="mt-1 text-xs text-muted-foreground" role={description.length > MAX_DESCRIPTION_LENGTH ? 'alert' : undefined}>
+                  {description.length.toLocaleString()} / {MAX_DESCRIPTION_LENGTH.toLocaleString()} characters
+                  {description.length > MAX_DESCRIPTION_LENGTH && ` — Description must be at most ${MAX_DESCRIPTION_LENGTH.toLocaleString()} characters`}
+                </p>
               </div>
 
               {/* Image attachments */}
@@ -561,7 +569,7 @@ export function TaskDialog({ open, onClose, onSubmit, editTask, onEditSubmit, hi
                 </button>
                 <button
                   type="submit"
-                  disabled={!title.trim() || submitting}
+                  disabled={!title.trim() || submitting || description.length > MAX_DESCRIPTION_LENGTH}
                   className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                 >
                   {submitting ? 'Saving…' : isEditMode ? 'Save Changes' : 'Create Task'}
