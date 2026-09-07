@@ -15,7 +15,11 @@ export function createRoadmapIntakeRouter(projectRepo: ProjectRepository): Route
       return;
     }
 
-    const result = parseRoadmapText(req.body.text);
+    if (req.body.creationMode !== undefined && !['loose', 'group'].includes(req.body.creationMode)) {
+      res.status(400).json({ error: 'creationMode must be loose or group' });
+      return;
+    }
+    const result = parseRoadmapText(req.body.text, req.body.creationMode);
     if (typeof result === 'string') {
       res.status(400).json({ error: result });
       return;
@@ -31,6 +35,7 @@ export function createRoadmapIntakeRouter(projectRepo: ProjectRepository): Route
         defaultUseWorktree: project.defaultUseWorktree,
       },
       tasks: result.tasks,
+      suggestedGroupName: result.suggestedGroupName,
     });
   }));
 

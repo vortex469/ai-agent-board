@@ -192,3 +192,36 @@ Add the preview endpoint
   const tooMany = Array.from({ length: ROADMAP_TASK_LIMIT + 1 }, (_, i) => `- Task ${i + 1}`).join('\n');
   assert.match(String(parseRoadmapText(tooMany)), /up to 25 cards/);
 });
+
+test('group preview keeps six child items in source order without numeric title prefixes', () => {
+  const sources = ['Zebra', 'Alpha', 'Delta', 'Beta', 'Gamma', 'Omega'].map((name) => `- v0.54: Build ${name}\n  Preserve ${name}_CONFIG and all details.`);
+  const result = parseRoadmapText(sources.join('\n'), 'group');
+  assert.notEqual(typeof result, 'string');
+  if (typeof result === 'string') return;
+  assert.equal(result.suggestedGroupName, 'v0.54');
+  assert.deepEqual(result.tasks.map((task) => task.order), [1, 2, 3, 4, 5, 6]);
+  assert.deepEqual(result.tasks.map((task) => task.title), ['Zebra', 'Alpha', 'Delta', 'Beta', 'Gamma', 'Omega'].map((name) => `v0.54: Build ${name}`));
+  assert.deepEqual(result.tasks.map((task) => task.description), sources.map((source) => `Source roadmap item:\n\n${source}`));
+  // Persisted group order supplies sequencing; fixed synthetic relationships
+  // would prevent manual reordering from changing the next runnable child.
+  assert.ok(result.tasks.every((task) => task.dependsOnTaskIndexes === undefined));
+});
+
+test('does not suggest a shared milestone when the roadmap versions differ', () => {
+  const result = parseRoadmapText('- v0.54: First item\n- v0.55: Second item', 'group');
+  assert.notEqual(typeof result, 'string');
+  if (typeof result !== 'string') assert.equal(result.suggestedGroupName, undefined);
+});
+
+test('group preview preserves a maximum length description and loose mode keeps dependencies', () => {
+  const source = '- Build ' + 'x'.repeat(20_000 - '- Build '.length);
+  const result = parseRoadmapText(source, 'group');
+  assert.notEqual(typeof result, 'string');
+  if (typeof result !== 'string') assert.equal(result.tasks[0].description, source);
+  const loose = parseRoadmapText('- First item\n- Second item', 'loose');
+  assert.notEqual(typeof loose, 'string');
+  if (typeof loose !== 'string') {
+    assert.equal(loose.tasks[0].title, '01. First item');
+    assert.deepEqual(loose.tasks[1].dependsOnTaskIndexes, [0]);
+  }
+});

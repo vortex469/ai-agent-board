@@ -65,7 +65,7 @@ function BoardPage({
     defaultUseWorktree: project.defaultUseWorktree,
   };
   const { tasks, error, clearError, showArchived, setShowArchived, addTask, addTasksBatch, updateTask, moveTask, reorderBacklogTasks, runTask, stopTask, deleteTask, archiveTask, unarchiveTask, configureAndRunTask, createPR, mergeLocal, cleanupWorktree } = useTasks(project.id);
-  const { groups, createGroup, runGroup, stopGroup, deleteGroup, updateGroup, refreshGroup } = useTaskGroups(project.id);
+  const { groups, createGroup, runGroup, stopGroup, deleteGroup, updateGroup, refreshGroup, reorderGroupChildren } = useTaskGroups(project.id);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [roadmapDialogOpen, setRoadmapDialogOpen] = useState(false);
   const [groupDialogOpen, setGroupDialogOpen] = useState(false);
@@ -218,17 +218,20 @@ function BoardPage({
       autoRunTickKeyRef.current = '';
       return;
     }
-    const hasRunningTask = tasks.some((task) => task.agentStatus === 'planning' || task.agentStatus === 'executing');
+    const hasRunningTask = [...tasks, ...groups.flatMap((group) => group.children)].some((task) => task.agentStatus === 'planning' || task.agentStatus === 'executing');
     if (hasRunningTask) return;
-    const topTask = visibleBacklogTasks[0];
-    if (!topTask) return;
-    const tickKey = `${project.id}:${topTask.id}:${topTask.agentStatus}:${visibleBacklogIds.join(',')}`;
+    // Match Board's group-before-card order. Ordinary groups retain their explicit Run workflow.
+    const backlogGroups = groups.filter((group) => group.roadmapExecutionMode && !group.archived && (group.columnId === 'backlog' || group.columnId === 'in-progress'));
+    const orderedIds = [...backlogGroups.map((group) => group.id), ...visibleBacklogIds];
+    if (orderedIds.length === 0) return;
+    const groupState = backlogGroups.flatMap((group) => group.children.map((child) => `${child.id}:${child.groupOrder}:${child.columnId}:${child.agentStatus}`)).join(',');
+    const tickKey = `${project.id}:${visibleBacklogTasks[0]?.agentStatus}:${orderedIds.join(',')}:${groupState}`;
     if (autoRunTickKeyRef.current === tickKey) return;
     autoRunTickKeyRef.current = tickKey;
-    void api.tickProjectAutoRun(project.id, visibleBacklogIds).catch((err) => {
+    void api.tickProjectAutoRun(project.id, orderedIds).catch((err) => {
       console.error('[auto-run] tick failed:', err);
     });
-  }, [project.id, project.autoRunEnabled, tasks, visibleBacklogTasks, visibleBacklogIds]);
+  }, [project.id, project.autoRunEnabled, tasks, groups, visibleBacklogTasks, visibleBacklogIds]);
 
   const handleToggleProjectAutoRun = useCallback(() => {
     void onUpdateProject(project.id, { autoRunEnabled: !project.autoRunEnabled });
@@ -516,6 +519,7 @@ function BoardPage({
       />
 
       <RoadmapIntakeDialog
+        onCreateGroup={handleCreateGroup}
         open={roadmapDialogOpen}
         onClose={() => setRoadmapDialogOpen(false)}
         project={project}
@@ -535,6 +539,7 @@ function BoardPage({
         onStopGroup={stopGroup}
         onRetryChild={handleRetryChild}
         onChildClick={handleChildClick}
+        onReorderChildren={reorderGroupChildren}
       />
 
       <DeleteConfirmDialog

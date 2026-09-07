@@ -14,6 +14,8 @@ import type {
   ProjectPathValidation,
   ProjectConfig,
   RoadmapPreview,
+  RoadmapExecutionMode,
+  RoadmapCreationMode,
   RepositoryEvidence,
 } from '@/types';
 
@@ -22,6 +24,8 @@ export interface TaskGroupWithChildren extends TaskGroup {
 }
 
 export interface CreateGroupChild {
+  priority?: Priority;
+  dependsOnTaskIndexes?: number[];
   title: string;
   description?: string;
   agentType?: AgentType;
@@ -108,7 +112,7 @@ export const api = {
   createTasksBatch: (tasks: { title: string; description?: string; priority?: Priority; columnId?: ColumnId; agentType?: AgentType; repoPath?: string; branchName?: string; baseBranch?: string; useWorktree?: boolean; autoRun?: boolean; projectId?: string; timeoutMinutes?: number | null; dependsOnTaskIndexes?: number[] }[]) =>
     request<{ tasks: Task[] }>('/tasks/batch', { method: 'POST', body: JSON.stringify({ tasks }) }),
 
-  previewRoadmapIntake: (data: { text: string; projectId?: string }) =>
+  previewRoadmapIntake: (data: { text: string; projectId?: string; creationMode?: RoadmapCreationMode }) =>
     request<RoadmapPreview>('/roadmap-intake/preview', { method: 'POST', body: JSON.stringify(data) }),
 
   updateTask: (id: string, data: Partial<Task>) =>
@@ -192,6 +196,7 @@ export const api = {
     baseBranch?: string;
     maxConcurrency: number;
     children: CreateGroupChild[];
+    roadmapExecutionMode?: RoadmapExecutionMode;
     autoRun?: boolean;
     projectId?: string;
   }) => request<TaskGroupWithChildren>('/groups', { method: 'POST', body: JSON.stringify(data) }),
@@ -201,6 +206,9 @@ export const api = {
 
   deleteGroup: (id: string) =>
     request<void>(`/groups/${id}`, { method: 'DELETE' }),
+
+  reorderGroupChildren: (id: string, orderedTaskIds: string[]) =>
+    request<TaskGroupWithChildren>(`/groups/${id}/reorder`, { method: 'POST', body: JSON.stringify({ orderedTaskIds }) }),
 
   runGroup: (id: string) =>
     request<TaskGroupWithChildren>(`/groups/${id}/run`, { method: 'POST' }),

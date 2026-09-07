@@ -7,4 +7,5 @@ export interface TaskGroupRepository {
   update(id: string, updates: Partial<Omit<TaskGroup, 'id' | 'createdAt'>>): Promise<TaskGroup | undefined>;
   delete(id: string): Promise<boolean>;
   getChildTasks(groupId: string): Promise<Task[]>;
+  reorderChildren(groupId: string, orderedTaskIds: string[]): Promise<Task[]>;
 }

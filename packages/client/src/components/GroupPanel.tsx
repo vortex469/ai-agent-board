@@ -1,8 +1,8 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   X, Layers, Play, Square, RotateCcw,
-  ChevronRight,
+  ChevronRight, ArrowUp, ArrowDown,
 } from 'lucide-react';
 import type { Task, AgentStatus } from '@/types';
 import type { TaskGroupWithChildren } from '@/lib/api';
@@ -17,6 +17,7 @@ interface GroupPanelProps {
   onStopGroup: (id: string) => void;
   onRetryChild: (taskId: string) => void;
   onChildClick: (task: Task) => void;
+  onReorderChildren: (groupId: string, orderedTaskIds: string[]) => Promise<unknown>;
 }
 
 function statusLabel(status: AgentStatus): string {
@@ -29,14 +30,33 @@ function statusLabel(status: AgentStatus): string {
   }
 }
 
-export function GroupPanel({ group, onClose, onRunGroup, onStopGroup, onRetryChild, onChildClick }: GroupPanelProps) {
+export function GroupPanel({ group, onClose, onRunGroup, onStopGroup, onRetryChild, onChildClick, onReorderChildren }: GroupPanelProps) {
   const status = useMemo(() => group ? computeGroupStatus(group.children) : null, [group]);
+  const [reordering, setReordering] = useState(false);
+  const [reorderError, setReorderError] = useState('');
 
   if (!group || !status) return null;
 
   const isRunning = status.executing > 0 || status.planning > 0;
   const pct = status.total > 0 ? (status.completed / status.total) * 100 : 0;
   const elapsed = group.startedAt ? Date.now() - group.startedAt : 0;
+  const backlog = group.children.filter((child) => child.columnId === 'backlog' && !child.archived);
+  const moveChild = async (childId: string, direction: number) => {
+    const ids = backlog.map((child) => child.id);
+    const index = ids.indexOf(childId);
+    const target = index + direction;
+    if (reordering || index < 0 || target < 0 || target >= ids.length) return;
+    [ids[index], ids[target]] = [ids[target], ids[index]];
+    setReordering(true);
+    setReorderError('');
+    try {
+      await onReorderChildren(group.id, ids);
+    } catch (err) {
+      setReorderError(err instanceof Error ? err.message : 'Failed to reorder children');
+    } finally {
+      setReordering(false);
+    }
+  };
 
   return (
     <AnimatePresence>
@@ -108,6 +128,7 @@ export function GroupPanel({ group, onClose, onRunGroup, onStopGroup, onRetryChi
         </div>
 
         {/* Child task list */}
+        {reorderError && <p role="alert" className="px-4 py-2 text-sm text-red-400">{reorderError}</p>}
         <div className="flex-1 overflow-y-auto">
           {group.children.map((child, idx) => {
             const agentDisplay = AGENT_DISPLAY[child.agentType as keyof typeof AGENT_DISPLAY];
@@ -119,6 +140,7 @@ export function GroupPanel({ group, onClose, onRunGroup, onStopGroup, onRetryChi
             return (
               <div
                 key={child.id}
+                data-testid="group-child"
                 className={cn(
                   'flex items-center gap-3 border-b border-zinc-800 px-4 py-3 cursor-pointer hover:bg-zinc-800/50 transition-colors',
                   child.agentStatus === 'executing' && 'bg-blue-500/5',
@@ -147,6 +169,17 @@ export function GroupPanel({ group, onClose, onRunGroup, onStopGroup, onRetryChi
 
                 {/* Actions */}
                 <div className="flex items-center gap-1">
+                  {group.roadmapExecutionMode && backlog.some((task) => task.id === child.id) && ([-1, 1] as const).map((direction) => (
+                    <button
+                      key={direction}
+                      aria-label={`Move ${child.title} ${direction < 0 ? 'up' : 'down'}`}
+                      disabled={reordering || backlog.findIndex((task) => task.id === child.id) + direction < 0 || backlog.findIndex((task) => task.id === child.id) + direction >= backlog.length}
+                      onClick={(event) => { event.stopPropagation(); void moveChild(child.id, direction); }}
+                      className="flex h-11 w-11 shrink-0 items-center justify-center rounded text-zinc-400 hover:bg-zinc-700 disabled:opacity-30 lg:h-8 lg:w-8"
+                    >
+                      {direction < 0 ? <ArrowUp className="h-4 w-4" /> : <ArrowDown className="h-4 w-4" />}
+                    </button>
+                  ))}
                   {child.agentStatus === 'failed' && (
                     <button
                       onClick={(e) => { e.stopPropagation(); onRetryChild(child.id); }}

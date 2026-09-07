@@ -10,6 +10,7 @@ export interface RoadmapProposedTask {
 
 export interface RoadmapParseResult {
   tasks: RoadmapProposedTask[];
+  suggestedGroupName?: string;
 }
 
 export const ROADMAP_TEXT_LIMIT = 20_000;
@@ -28,7 +29,7 @@ const VERSION_TITLE_RE = /^((?:v|version)\s*\d+(?:\.\d+){0,3}(?:[-._]?[a-z0-9]+)
 const DETAIL_CLAUSE_RE = /\s+(?:so|while|because|in order to)\s+/i;
 const CODE_IDENTIFIER_RE = /(?<![\w-])(?:--[a-z0-9][a-z0-9-]*|[A-Z][A-Z0-9]*_[A-Z0-9_]+(?:\.[A-Za-z0-9]+)?|[A-Z][A-Z0-9]{2,}\.[A-Za-z0-9]+|(?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.@-]+|[A-Za-z0-9_.-]+@[0-9][A-Za-z0-9._-]*|[A-Za-z0-9_-]+\.(?:[cm]?[jt]sx?|md|json|ya?ml|toml|env|sh|ps1|css|html|sql|py|rb|go|rs|java|cs|php|txt))(?![\w-])/g;
 
-export function parseRoadmapText(input: unknown): RoadmapParseResult | string {
+export function parseRoadmapText(input: unknown, creationMode: 'loose' | 'group' = 'loose'): RoadmapParseResult | string {
   if (typeof input !== 'string') return 'Roadmap text is required';
   const text = input.replace(/\r\n?/g, '\n');
   const trimmedText = text.trim();
@@ -53,7 +54,7 @@ export function parseRoadmapText(input: unknown): RoadmapParseResult | string {
         ? `${normalizeWhitespace(block.version)}: ${block.titleSeed}`
         : normalizeWhitespace(block.version)
       : block.titleSeed;
-    const title = makeTitle(rawTitle, index + 1, !block.version);
+    const title = makeTitle(rawTitle, index + 1, creationMode === 'loose' && !block.version);
     const sourceText = block.sourceText.trim();
     const labeledDescription = `Source roadmap item:\n\n${sourceText}`;
     return {
@@ -62,11 +63,15 @@ export function parseRoadmapText(input: unknown): RoadmapParseResult | string {
       // Preserve the full source when the optional label would exceed the task limit.
       description: labeledDescription.length <= MAX_DESCRIPTION_LENGTH ? labeledDescription : sourceText,
       sourceText,
-      ...(index > 0 ? { dependsOnTaskIndexes: [index - 1] } : {}),
+      ...(creationMode === 'loose' && index > 0 ? { dependsOnTaskIndexes: [index - 1] } : {}),
     };
   });
 
-  return { tasks };
+  const prefixes = blocks.map((block) => (block.version ?? block.titleSeed)
+    .match(/^((?:v|version)\s*\d+(?:\.\d+){0,3})(?=\s|:|[-–—]|$)/i)?.[1]);
+  const suggestedGroupName = prefixes[0] && prefixes.every((prefix) => prefix?.toLowerCase() === prefixes[0]?.toLowerCase())
+    ? normalizeWhitespace(prefixes[0]) : undefined;
+  return { tasks, suggestedGroupName };
 }
 
 function parseVersionBlocks(lines: string[]): ParsedBlock[] {

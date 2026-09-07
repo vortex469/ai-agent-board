@@ -4,6 +4,7 @@ import type { TaskGroup, Task, Priority, ColumnId, AgentType, AgentStatus } from
 import type { TaskGroupRepository } from './group-types.js';
 
 interface GroupRow {
+  roadmap_execution_mode: TaskGroup['roadmapExecutionMode'];
   id: string;
   project_id: string;
   title: string;
@@ -44,6 +45,7 @@ interface TaskRow {
 
 function rowToGroup(row: GroupRow): TaskGroup {
   return {
+    roadmapExecutionMode: row.roadmap_execution_mode ?? undefined,
     id: row.id,
     projectId: row.project_id,
     title: row.title,
@@ -100,15 +102,18 @@ export class SqliteTaskGroupRepository implements TaskGroupRepository {
 
   constructor(db: Database.Database) {
     this.db = db;
+    if (!(db.pragma('table_info(task_groups)') as { name: string }[]).some(c => c.name === 'roadmap_execution_mode')) {
+      db.exec('ALTER TABLE task_groups ADD COLUMN roadmap_execution_mode TEXT');
+    }
     this.stmts = {
       getAll: db.prepare('SELECT * FROM task_groups WHERE project_id = ? AND archived = 0 ORDER BY created_at ASC'),
       getAllIncludingArchived: db.prepare('SELECT * FROM task_groups WHERE project_id = ? ORDER BY created_at ASC'),
       getById: db.prepare('SELECT * FROM task_groups WHERE id = ?'),
       insertGroup: db.prepare(`
         INSERT INTO task_groups (id, project_id, title, description, priority, column_id, repo_path, base_branch,
-          max_concurrency, created_at, started_at, completed_at, archived)
+          max_concurrency, created_at, started_at, completed_at, archived, roadmap_execution_mode)
         VALUES (@id, @project_id, @title, @description, @priority, @column_id, @repo_path, @base_branch,
-          @max_concurrency, @created_at, @started_at, @completed_at, @archived)
+          @max_concurrency, @created_at, @started_at, @completed_at, @archived, @roadmap_execution_mode)
       `),
       insertChild: db.prepare(`
         INSERT INTO tasks (id, project_id, title, description, priority, column_id, agent_status, agent_type,
@@ -131,6 +136,19 @@ export class SqliteTaskGroupRepository implements TaskGroupRepository {
     };
   }
 
+  async reorderChildren(groupId: string, orderedTaskIds: string[]): Promise<Task[]> {
+    return this.db.transaction(() => {
+      const children = (this.stmts.getChildren.all(groupId) as TaskRow[]).map(rowToTask);
+      const pending = children.filter(c => !c.archived && c.columnId === 'backlog');
+      if (new Set(orderedTaskIds).size !== orderedTaskIds.length || orderedTaskIds.length !== pending.length || orderedTaskIds.some(id => !pending.some(c => c.id === id))) {
+        throw new Error('orderedTaskIds must include every backlog child exactly once');
+      }
+      const update = this.db.prepare('UPDATE tasks SET group_order = ? WHERE id = ?');
+      orderedTaskIds.forEach((id, index) => update.run(pending[index].groupOrder, id));
+      return (this.stmts.getChildren.all(groupId) as TaskRow[]).map(rowToTask);
+    })();
+  }
+
   async getAll(includeArchived = false, projectId = 'default'): Promise<TaskGroup[]> {
     const stmt = includeArchived ? this.stmts.getAllIncludingArchived : this.stmts.getAll;
     return (stmt.all(projectId) as GroupRow[]).map(rowToGroup);
@@ -147,6 +165,7 @@ export class SqliteTaskGroupRepository implements TaskGroupRepository {
   ): Promise<{ group: TaskGroup; children: Task[] }> {
     return this.db.transaction(() => {
       this.stmts.insertGroup.run({
+        roadmap_execution_mode: group.roadmapExecutionMode ?? null,
         id: group.id,
         project_id: group.projectId,
         title: group.title,

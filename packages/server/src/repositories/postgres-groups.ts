@@ -4,6 +4,7 @@ import type { TaskGroup, Task, Priority, ColumnId, AgentType, AgentStatus } from
 import type { TaskGroupRepository } from './group-types.js';
 
 interface GroupRow {
+  roadmap_execution_mode: TaskGroup['roadmapExecutionMode'];
   id: string;
   project_id: string;
   title: string;
@@ -44,6 +45,7 @@ interface TaskRow {
 
 function rowToGroup(row: GroupRow): TaskGroup {
   return {
+    roadmapExecutionMode: row.roadmap_execution_mode ?? undefined,
     id: row.id,
     projectId: row.project_id,
     title: row.title,
@@ -92,6 +94,28 @@ export class PostgresTaskGroupRepository implements TaskGroupRepository {
     this.pool = pool;
   }
 
+  async reorderChildren(groupId: string, orderedTaskIds: string[]): Promise<Task[]> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const { rows } = await client.query('SELECT * FROM tasks WHERE group_id = $1 ORDER BY group_order ASC FOR UPDATE', [groupId]);
+      const children = rows.map(rowToTask);
+      const pending = children.filter(c => !c.archived && c.columnId === 'backlog');
+      if (new Set(orderedTaskIds).size !== orderedTaskIds.length || orderedTaskIds.length !== pending.length || orderedTaskIds.some(id => !pending.some(c => c.id === id))) {
+        throw new Error('orderedTaskIds must include every backlog child exactly once');
+      }
+      for (let i = 0; i < orderedTaskIds.length; i++) {
+        await client.query('UPDATE tasks SET group_order = $1 WHERE id = $2', [pending[i].groupOrder, orderedTaskIds[i]]);
+      }
+      const result = await client.query('SELECT * FROM tasks WHERE group_id = $1 ORDER BY group_order ASC', [groupId]);
+      await client.query('COMMIT');
+      return result.rows.map(rowToTask);
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally { client.release(); }
+  }
+
   async getAll(includeArchived = false, projectId = 'default'): Promise<TaskGroup[]> {
     const query = includeArchived
       ? 'SELECT * FROM task_groups WHERE project_id = $1 ORDER BY created_at ASC'
@@ -115,11 +139,11 @@ export class PostgresTaskGroupRepository implements TaskGroupRepository {
 
       await client.query(
         `INSERT INTO task_groups (id, project_id, title, description, priority, column_id, repo_path, base_branch,
-          max_concurrency, created_at, started_at, completed_at, archived)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+          max_concurrency, created_at, started_at, completed_at, archived, roadmap_execution_mode)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
         [group.id, group.projectId, group.title, group.description ?? '', group.priority, group.columnId,
          group.repoPath ?? null, group.baseBranch ?? null, group.maxConcurrency,
-         group.createdAt, group.startedAt ?? null, group.completedAt ?? null, group.archived ?? false],
+         group.createdAt, group.startedAt ?? null, group.completedAt ?? null, group.archived ?? false, group.roadmapExecutionMode ?? null],
       );
 
       const createdChildren: Task[] = [];

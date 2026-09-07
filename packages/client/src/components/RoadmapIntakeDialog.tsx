@@ -1,17 +1,18 @@
 import { useEffect, useMemo, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { ClipboardList, Loader2, Play, Trash2, X } from 'lucide-react';
-import type { AgentInfo, AgentType, ColumnId, Priority, Project, RoadmapExecutionMode, RoadmapProposedTask } from '@/types';
+import type { AgentInfo, AgentType, ColumnId, Priority, Project, RoadmapCreationMode, RoadmapExecutionMode, RoadmapProposedTask } from '@/types';
 import { api } from '@/lib/api';
 import { AGENT_OPTIONS } from '@/lib/agent-config';
 import { PRIORITY_OPTIONS } from '@/lib/priority-config';
 import { slugify } from '@/lib/utils';
-import { MAX_DESCRIPTION_LENGTH } from '@ai-agent-board/shared/constants.js';
+import { MAX_DESCRIPTION_LENGTH, MAX_TITLE_LENGTH } from '@ai-agent-board/shared/constants.js';
 
 interface RoadmapIntakeDialogProps {
   open: boolean;
   onClose: () => void;
   project: Project;
+  onCreateGroup: (group: Parameters<typeof api.createGroup>[0]) => Promise<unknown>;
   onCreateTasks: (tasks: {
     title: string;
     description: string;
@@ -27,9 +28,12 @@ interface RoadmapIntakeDialogProps {
   }[]) => Promise<unknown>;
 }
 
-export function RoadmapIntakeDialog({ open, onClose, project, onCreateTasks }: RoadmapIntakeDialogProps) {
+export function RoadmapIntakeDialog({ open, onClose, project, onCreateTasks, onCreateGroup }: RoadmapIntakeDialogProps) {
+  const [creationMode, setCreationMode] = useState<RoadmapCreationMode>('loose');
+  const [groupName, setGroupName] = useState('');
   const [text, setText] = useState('');
   const [preview, setPreview] = useState<RoadmapProposedTask[]>([]);
+  const [generatedTitles, setGeneratedTitles] = useState<Map<number, string>>(new Map());
   const [error, setError] = useState('');
   const [executionMode, setExecutionMode] = useState<RoadmapExecutionMode>('backlog');
   const [agentType, setAgentType] = useState<AgentType>(project.defaultAgentType ?? 'codex');
@@ -43,6 +47,8 @@ export function RoadmapIntakeDialog({ open, onClose, project, onCreateTasks }: R
 
   useEffect(() => {
     if (!open) {
+      setCreationMode('loose');
+      setGroupName('');
       setText('');
       setPreview([]);
       setError('');
@@ -66,8 +72,10 @@ export function RoadmapIntakeDialog({ open, onClose, project, onCreateTasks }: R
     setPreviewing(true);
     setError('');
     try {
-      const result = await api.previewRoadmapIntake({ text, projectId: project.id });
+      const result = await api.previewRoadmapIntake({ text, projectId: project.id, creationMode });
       setPreview(result.tasks);
+      setGeneratedTitles(new Map(result.tasks.map((task) => [task.order, task.title])));
+      setGroupName((name) => name || result.suggestedGroupName || 'Roadmap');
     } catch (err) {
       setPreview([]);
       setError((err as Error).message);
@@ -90,6 +98,10 @@ export function RoadmapIntakeDialog({ open, onClose, project, onCreateTasks }: R
       setError('Keep at least one proposed task before creating cards');
       return;
     }
+    if (creationMode === 'group' && (!groupName.trim() || groupName.trim().length > MAX_TITLE_LENGTH)) {
+      setError(`Group name is required and must be at most ${MAX_TITLE_LENGTH} characters`);
+      return;
+    }
     if (accepted.some((task) => task.description.length > MAX_DESCRIPTION_LENGTH)) {
       setError(`Description must be at most ${MAX_DESCRIPTION_LENGTH.toLocaleString()} characters`);
       return;
@@ -102,6 +114,30 @@ export function RoadmapIntakeDialog({ open, onClose, project, onCreateTasks }: R
     setSubmitting(true);
     setError('');
     try {
+      if (creationMode === 'group') {
+        const result = await onCreateGroup({
+          title: groupName.trim(),
+          projectId: project.id,
+          priority,
+          repoPath: project.repoPath,
+          baseBranch,
+          maxConcurrency: 1,
+          roadmapExecutionMode: executionMode,
+          children: accepted.map((task) => ({
+            title: task.title.trim(),
+            description: task.description,
+            priority,
+            agentType,
+            useWorktree,
+            dependsOnTaskIndexes: task.dependsOnTaskIndexes?.flatMap((sourceIndex) => {
+              const acceptedIndex = accepted.findIndex((item) => item.order === sourceIndex + 1);
+              return acceptedIndex < 0 ? [] : [acceptedIndex];
+            }),
+          })),
+        });
+        if (result !== undefined) onClose();
+        return;
+      }
       const result = await onCreateTasks(accepted.map((task, index) => ({
         title: task.title.trim(),
         description: task.description.trim(),
@@ -117,6 +153,8 @@ export function RoadmapIntakeDialog({ open, onClose, project, onCreateTasks }: R
       })));
       if (result === undefined) return;
       onClose();
+    } catch (err) {
+      setError((err as Error).message);
     } finally {
       setSubmitting(false);
     }
@@ -157,8 +195,8 @@ export function RoadmapIntakeDialog({ open, onClose, project, onCreateTasks }: R
               </button>
             </div>
 
-            <div className="grid min-h-0 flex-1 gap-4 lg:grid-cols-[0.85fr_1.15fr]">
-              <div className="flex min-h-0 flex-col gap-3">
+            <div className="grid min-h-0 flex-1 gap-4 overflow-y-auto lg:overflow-hidden lg:grid-cols-[0.85fr_1.15fr]">
+              <div className="flex flex-col gap-3 lg:min-h-0">
                 <label className="text-xs font-medium text-muted-foreground" htmlFor="roadmap-text">
                   Roadmap text
                 </label>
@@ -185,7 +223,44 @@ export function RoadmapIntakeDialog({ open, onClose, project, onCreateTasks }: R
                 )}
               </div>
 
-              <div className="flex min-h-0 flex-col gap-3">
+              <div className="flex flex-col gap-3 lg:min-h-0">
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <label className="space-y-1">
+                    <span className="block text-xs font-medium text-muted-foreground">Creation mode</span>
+                    <select
+                      value={creationMode}
+                      disabled={submitting || previewing}
+                      onChange={(event) => {
+                        const mode = event.target.value as RoadmapCreationMode;
+                        setCreationMode(mode);
+                        setPreview((tasks) => tasks.map((task) => ({
+                          ...task,
+                          // Group order replaces the loose preview's synthetic chain.
+                          dependsOnTaskIndexes: undefined,
+                          // Only remove the parser's generated ordering label.
+                          title: mode === 'group' && generatedTitles.get(task.order) === task.title ? task.title.replace(new RegExp(`^${String(task.order).padStart(2, '0')}\\. `), '') : task.title,
+                        })));
+                      }}
+                      className="h-10 w-full rounded-lg border border-border bg-background px-2 text-sm"
+                    >
+                      <option value="loose">Create loose cards</option>
+                      <option value="group">Create as group</option>
+                    </select>
+                  </label>
+                  {creationMode === 'group' && (
+                    <label className="space-y-1">
+                      <span className="block text-xs font-medium text-muted-foreground">Group Name</span>
+                      <input value={groupName} onChange={(event) => setGroupName(event.target.value)} maxLength={MAX_TITLE_LENGTH}
+                        className="h-10 w-full rounded-lg border border-border bg-background px-3 text-sm" />
+                    </label>
+                  )}
+                </div>
+                {creationMode === 'group' && preview.length > 0 && (
+                  <div className="rounded-lg border border-border bg-background p-3" role="region" aria-label="Group preview">
+                    <p className="font-medium">{groupName || 'Unnamed group'}</p>
+                    <p className="text-xs text-muted-foreground">{preview.length} child tasks · Run in the order shown. Reorder children in the group before running.</p>
+                  </div>
+                )}
                 <div className="grid gap-2 sm:grid-cols-3">
                   <label className="space-y-1">
                     <span className="block text-xs font-medium text-muted-foreground">Execution mode</span>
@@ -227,7 +302,7 @@ export function RoadmapIntakeDialog({ open, onClose, project, onCreateTasks }: R
                   </label>
                 </div>
 
-                <div className="min-h-0 flex-1 overflow-y-auto rounded-lg border border-border">
+                <div className="min-h-56 max-h-96 flex-none overflow-y-auto rounded-lg border border-border lg:min-h-0 lg:max-h-none lg:flex-1">
                   {preview.length === 0 ? (
                     <div className="flex h-full min-h-56 items-center justify-center px-6 text-center text-sm text-muted-foreground">
                       Previewed cards appear here before anything is created.
@@ -289,7 +364,7 @@ export function RoadmapIntakeDialog({ open, onClose, project, onCreateTasks }: R
                 className="flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-                Create {preview.length || ''} Cards
+                {creationMode === 'group' ? `Create Group · ${preview.length} Tasks` : `Create ${preview.length || ''} Cards`}
               </button>
             </div>
           </motion.div>

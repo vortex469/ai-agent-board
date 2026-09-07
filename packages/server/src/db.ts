@@ -179,6 +179,9 @@ export function migrateSqliteDatabase(db: Database.Database): void {
     db.exec(`ALTER TABLE task_groups ADD COLUMN project_id TEXT NOT NULL DEFAULT 'default'`);
   }
   ensureSqliteProjectForeignKeys(db);
+  if (!(db.pragma('table_info(task_groups)') as { name: string }[]).some(c => c.name === 'roadmap_execution_mode')) {
+    db.exec('ALTER TABLE task_groups ADD COLUMN roadmap_execution_mode TEXT');
+  }
   db.exec(`
     CREATE TABLE IF NOT EXISTS task_relationships (
       task_id         TEXT NOT NULL,
@@ -550,6 +553,7 @@ export async function initPostgresDatabase(pool: Pool): Promise<void> {
       archived        BOOLEAN NOT NULL DEFAULT FALSE
     )
   `);
+  await pool.query('ALTER TABLE task_groups ADD COLUMN IF NOT EXISTS roadmap_execution_mode TEXT');
   const { rows: groupColRows } = await pool.query(`
     SELECT column_name FROM information_schema.columns WHERE table_name = 'task_groups'
   `);

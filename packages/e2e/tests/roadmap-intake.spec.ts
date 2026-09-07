@@ -281,6 +281,112 @@ test.describe('Roadmap intake UI', () => {
     await expect(progress.getByLabel('Next eligible card')).toHaveText(`04. Next progress ${stamp}`);
   });
 
+  test('creates six ordered group children with full descriptions and persists manual reordering', async ({ page, request }) => {
+    const project = await createProject(request, `Grouped Roadmap ${Date.now()}`);
+    createdProjectIds.push(project.id);
+    const names = ['Parser', 'Preview', 'Creation', 'Ordering', 'Execution', 'Validation'];
+    await page.goto(`/projects/${project.id}`);
+    await waitForBoard(page);
+    await page.getByRole('button', { name: 'Roadmap Intake', exact: true }).click();
+    await page.getByLabel('Creation mode').selectOption('group');
+    await page.getByLabel('Roadmap text').fill(names.map((name) => `v0.54 - ${name}\n- Preserve ${name.toLowerCase()} details`).join('\n\n'));
+    await page.getByRole('button', { name: 'Preview Cards' }).click();
+    await expect(page.getByLabel('Group Name')).toHaveValue('v0.54');
+    const groupName = `Edited milestone ${project.id}`;
+    await page.getByLabel('Group Name').fill(groupName);
+    const descriptions: string[] = [];
+    for (let index = 0; index < names.length; index++) {
+      // Plain titles deliberately avoid prefixes: the ordering model must carry the order.
+      await page.getByLabel(`Title for roadmap item ${index + 1}`).fill(names[index]);
+      descriptions.push(await page.getByLabel(`Description for roadmap item ${index + 1}`).inputValue());
+    }
+    descriptions[0] = `Full source details\n${'Keep every requirement and exact identifier.\n'.repeat(180)}Final requirement survives.`;
+    await page.getByLabel('Description for roadmap item 1').fill(descriptions[0]);
+    await expect(page.getByRole('region', { name: 'Group preview' })).toContainText(groupName);
+    const responsePromise = page.waitForResponse((response) => response.url().endsWith('/api/groups') && response.request().method() === 'POST');
+    await page.getByRole('button', { name: 'Create Group · 6 Tasks' }).click();
+    const response = await responsePromise;
+    expect(response.status()).toBe(201);
+    const group = await response.json();
+    createdGroupIds.push(group.id);
+    expect(group.children.map((child: any) => child.title)).toEqual(names);
+    expect(group.children.map((child: any) => child.description)).toEqual(descriptions);
+    expect(group.children.map((child: any) => child.groupOrder)).toEqual([0, 1, 2, 3, 4, 5]);
+    for (const child of group.children) {
+      expect(child).toMatchObject({ groupId: group.id, projectId: project.id, repoPath: project.repoPath, agentType: 'claude', priority: 'high', baseBranch: 'develop', useWorktree: true });
+    }
+    const groups = await (await request.get(`${API}/api/groups?projectId=${project.id}`)).json();
+    expect(groups.map((entry: any) => entry.id)).toEqual([group.id]);
+    const loose = await (await request.get(`${API}/api/tasks?projectId=${project.id}`)).json();
+    expect(loose.filter((task: any) => !task.groupId)).toEqual([]);
+    await page.getByRole('heading', { name: groupName, exact: true }).click();
+    await expect(page.getByTestId('group-child')).toHaveCount(6);
+    await expect(page.getByText('0/6 complete', { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Move Preview up', exact: true }).click();
+    await expect(page.getByTestId('group-child').first()).toContainText('Preview');
+    const persisted = await (await request.get(`${API}/api/groups/${group.id}`)).json();
+    expect(persisted.children.map((child: any) => child.title)).toEqual(['Preview', 'Parser', ...names.slice(2)]);
+    await page.reload();
+    await waitForBoard(page);
+    await page.getByRole('heading', { name: groupName, exact: true }).click();
+    await expect(page.getByTestId('group-child').first()).toContainText('Preview');
+  });
+
+  test('group execution modes preserve the selected agent and project without artificial dependencies', async ({ page, request }) => {
+    const project = await createProject(request, `Group Modes ${Date.now()}`);
+    createdProjectIds.push(project.id);
+    const payloads: any[] = [];
+    await page.route('**/api/groups', async (route) => {
+      if (route.request().method() !== 'POST') return route.continue();
+      const payload = route.request().postDataJSON();
+      payloads.push(payload);
+      await route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify({ ...payload, id: `mock-${payloads.length}`, columnId: 'backlog', children: [] }) });
+    });
+    await page.goto(`/projects/${project.id}`);
+    await waitForBoard(page);
+    for (const mode of ['first-card', 'full-roadmap']) {
+      await page.getByRole('button', { name: 'Roadmap Intake', exact: true }).click();
+      await page.getByLabel('Creation mode').selectOption('group');
+      await page.getByLabel('Roadmap text').fill('- Build parser\n- Build preview');
+      await page.getByRole('button', { name: 'Preview Cards' }).click();
+      await expect(page.getByLabel('Title for roadmap item 1')).toHaveValue('Build parser');
+      await page.getByLabel('Group Name').fill(`Group ${mode}`);
+      await page.getByLabel('Execution mode').selectOption(mode);
+      await page.getByLabel('Agent', { exact: true }).selectOption('codex');
+      await page.getByRole('button', { name: 'Create Group · 2 Tasks' }).click();
+      await expect(page.getByRole('dialog', { name: 'Roadmap Intake' })).not.toBeVisible();
+    }
+    expect(payloads.map((payload) => payload.roadmapExecutionMode)).toEqual(['first-card', 'full-roadmap']);
+    for (const payload of payloads) {
+      expect(payload).toMatchObject({ maxConcurrency: 1, projectId: project.id, repoPath: project.repoPath });
+      expect(payload.children).toHaveLength(2);
+      expect(payload.children.map((child: any) => child.agentType)).toEqual(['codex', 'codex']);
+      expect(payload.children.every((child: any) => !child.dependsOnTaskIndexes?.length)).toBe(true);
+    }
+  });
+
+  test('group preview and creation controls remain reachable on a narrow mobile viewport', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto('/');
+    await waitForBoard(page);
+    await page.getByRole('button', { name: 'Roadmap Intake', exact: true }).click();
+    await page.getByLabel('Creation mode').selectOption('group');
+    await page.getByLabel('Roadmap text').fill('- Parser\n- Preview\n- Creation\n- Ordering\n- Execution\n- Validation');
+    await page.getByRole('button', { name: 'Preview Cards' }).click();
+    await page.getByLabel('Group Name').fill('Mobile milestone');
+    await page.getByLabel('Title for roadmap item 6').scrollIntoViewIfNeeded();
+    await expect(page.getByLabel('Title for roadmap item 6')).toBeVisible();
+    const create = page.getByRole('button', { name: 'Create Group · 6 Tasks' });
+    await create.scrollIntoViewIfNeeded();
+    await expect(create).toBeEnabled();
+    const bounds = await page.getByRole('dialog', { name: 'Roadmap Intake' }).boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.x).toBeGreaterThanOrEqual(0);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(390);
+    expect(bounds!.y).toBeGreaterThanOrEqual(0);
+    expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(844);
+  });
+
   test('execution mode submits first-card and full-roadmap payloads for the selected project', async ({ page, request }) => {
     const project = await createProject(request, `Roadmap UI Project ${Date.now()}`);
     createdProjectIds.push(project.id);

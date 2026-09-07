@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import path from 'path';
+import { startOrderedGroupChild, withOrderedGroupLock } from '../services/ordered-group.js';
 import { v4 as uuid } from 'uuid';
 import type { Project, TaskGroup, Task } from '../types.js';
 import {
@@ -71,6 +72,14 @@ export function createGroupsRouter(
     if (typeof body === 'string') { res.status(400).json({ error: body }); return; }
     const { title, description, priority, repoPath, baseBranch, maxConcurrency, children, autoRun } = body;
 
+    const roadmapExecutionMode = body.roadmapExecutionMode;
+    if (roadmapExecutionMode !== undefined && !['backlog', 'first-card', 'full-roadmap'].includes(roadmapExecutionMode)) {
+      res.status(400).json({ error: 'invalid roadmapExecutionMode' }); return;
+    }
+    if (roadmapExecutionMode !== undefined && autoRun) {
+      res.status(400).json({ error: 'use roadmapExecutionMode instead of autoRun for roadmap groups' }); return;
+    }
+
     // Validate group fields
     if (!title || typeof title !== 'string' || !title.trim()) {
       res.status(400).json({ error: 'title is required' }); return;
@@ -102,15 +111,16 @@ export function createGroupsRouter(
     }
 
     // Validate children
-    if (!Array.isArray(children) || children.length < MIN_GROUP_CHILDREN) {
-      res.status(400).json({ error: `children must be an array with at least ${MIN_GROUP_CHILDREN} items` }); return;
+    const minimumChildren = roadmapExecutionMode !== undefined ? 1 : MIN_GROUP_CHILDREN;
+    if (!Array.isArray(children) || children.length < minimumChildren) {
+      res.status(400).json({ error: `children must be an array with at least ${minimumChildren} items` }); return;
     }
     if (children.length > MAX_GROUP_CHILDREN) {
       res.status(400).json({ error: `children must have at most ${MAX_GROUP_CHILDREN} items` }); return;
     }
 
     // Validate concurrency
-    const concurrency = typeof maxConcurrency === 'number' ? maxConcurrency : 2;
+    const concurrency = typeof maxConcurrency === 'number' ? maxConcurrency : roadmapExecutionMode !== undefined ? 1 : 2;
     if (!isValidMaxConcurrency(concurrency, children.length)) {
       res.status(400).json({ error: `maxConcurrency must be between 1 and ${children.length}` }); return;
     }
@@ -118,6 +128,7 @@ export function createGroupsRouter(
     // Validate each child
     for (let i = 0; i < children.length; i++) {
       const child = children[i];
+      if (!child || typeof child !== 'object') { res.status(400).json({ error: `children[${i}] must be an object` }); return; }
       if (!child.title || typeof child.title !== 'string' || !child.title.trim()) {
         res.status(400).json({ error: `children[${i}].title is required` }); return;
       }
@@ -126,6 +137,14 @@ export function createGroupsRouter(
       }
       if (child.description !== undefined && typeof child.description !== 'string') {
         res.status(400).json({ error: `children[${i}].description must be a string` }); return;
+      }
+      if (typeof child.description === 'string' && child.description.length > MAX_DESCRIPTION_LENGTH) {
+        res.status(400).json({ error: `children[${i}].description exceeds max length` }); return;
+      }
+      if (child.priority !== undefined && !isValidPriority(child.priority)) { res.status(400).json({ error: `children[${i}].priority is invalid` }); return; }
+      if (child.useWorktree !== undefined && typeof child.useWorktree !== 'boolean') { res.status(400).json({ error: `children[${i}].useWorktree must be a boolean` }); return; }
+      if (child.dependsOnTaskIndexes !== undefined && (!Array.isArray(child.dependsOnTaskIndexes) || child.dependsOnTaskIndexes.some((index: unknown) => !Number.isInteger(index) || Number(index) < 0 || Number(index) >= i))) {
+        res.status(400).json({ error: `children[${i}].dependsOnTaskIndexes must reference earlier children` }); return;
       }
       if (child.agentType !== undefined && !isValidAgentType(child.agentType)) {
         res.status(400).json({ error: `children[${i}].agentType is invalid` }); return;
@@ -149,7 +168,8 @@ export function createGroupsRouter(
       columnId: autoRun ? 'in-progress' : 'backlog',
       repoPath: expandedRepo,
       baseBranch: effectiveBaseBranch,
-      maxConcurrency: concurrency,
+      maxConcurrency: roadmapExecutionMode !== undefined ? 1 : concurrency,
+      roadmapExecutionMode,
       createdAt: now,
     };
 
@@ -161,7 +181,7 @@ export function createGroupsRouter(
         id: uuid(),
         projectId: project.id,
         title: child.title.trim(),
-        description: child.description?.trim() || '',
+        description: child.description ?? '',
         priority: child.priority || group.priority,
         agentType: child.agentType !== undefined ? child.agentType : (project.defaultAgentType ?? 'copilot'),
         useWorktree,
@@ -175,7 +195,15 @@ export function createGroupsRouter(
 
     try {
       const result = await groupRepo.create(group, childDefs);
+      for (let i = 0; i < children.length; i++) {
+        for (const index of children[i].dependsOnTaskIndexes ?? []) {
+          await taskRepo.createDependency(childDefs[index].id, childDefs[i].id, now);
+        }
+      }
       broadcastGroupUpdate(result.group);
+      if (roadmapExecutionMode === 'first-card' || roadmapExecutionMode === 'full-roadmap') {
+        await startOrderedGroupChild(groupId, groupRepo, taskRepo, agentManager, roadmapExecutionMode === 'full-roadmap', projectRepo);
+      }
 
       // Auto-run if requested
       if (autoRun) {
@@ -190,6 +218,22 @@ export function createGroupsRouter(
     } catch (err: unknown) {
       res.status(500).json({ error: err instanceof Error ? err.message : 'Failed to create group' });
     }
+  }));
+
+  router.post('/:id/reorder', asyncHandler(async (req: Request, res: Response) => {
+    const id = paramId(req);
+    if (!Array.isArray(req.body.orderedTaskIds) || req.body.orderedTaskIds.some((value: unknown) => typeof value !== 'string')) {
+      res.status(400).json({ error: 'orderedTaskIds must be an array of task ids' }); return;
+    }
+    const group = await groupRepo.getById(id);
+    if (!group) { res.status(404).json({ error: 'group not found' }); return; }
+    if (!group.roadmapExecutionMode) { res.status(400).json({ error: 'only roadmap group children can be reordered' }); return; }
+    try {
+      const children = await withOrderedGroupLock(id, () => groupRepo.reorderChildren(id, req.body.orderedTaskIds));
+      broadcastGroupUpdate(group);
+      for (const child of children) broadcastTaskUpdate(child);
+      res.json({ ...group, children });
+    } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : 'reorder failed' }); }
   }));
 
   // PATCH /api/groups/:id — update group metadata
@@ -245,6 +289,9 @@ export function createGroupsRouter(
     if (req.body.maxConcurrency !== undefined) {
       const children = await groupRepo.getChildTasks(id);
       const mc = req.body.maxConcurrency;
+      if (group.roadmapExecutionMode && mc !== 1) {
+        res.status(400).json({ error: 'roadmap groups run one child at a time' }); return;
+      }
       if (!isValidMaxConcurrency(mc, children.length)) {
         res.status(400).json({ error: `maxConcurrency must be an integer between 1 and ${children.length}` }); return;
       }
@@ -260,7 +307,13 @@ export function createGroupsRouter(
 
     // E3: Moving group back to backlog stops all running children and resets state
     if (updates.columnId === 'backlog' && group.columnId !== 'backlog') {
-      if (agentManager.isGroupRunning(id)) {
+      if (group.roadmapExecutionMode) {
+        // Pause admission before cancelling individual roadmap sessions.
+        await groupRepo.update(id, { columnId: 'backlog' });
+        for (const child of await groupRepo.getChildTasks(id)) {
+          if (agentManager.isRunning(child.id)) await agentManager.stopAgent(child.id);
+        }
+      } else if (agentManager.isGroupRunning(id)) {
         await agentManager.stopGroup(id);
       }
       const children = await groupRepo.getChildTasks(id);
@@ -271,9 +324,11 @@ export function createGroupsRouter(
           const cleanup = agentManager.removeWorktree(child);
           if (cleanup.status !== 'blocked') worktreePath = undefined;
         }
-        if (child.agentStatus !== 'idle' || worktreePath !== child.worktreePath) {
+        if (group.roadmapExecutionMode) await taskRepo.clearRun(child.id);
+        if (group.roadmapExecutionMode || child.agentStatus !== 'idle' || worktreePath !== child.worktreePath) {
           await taskRepo.update(child.id, {
             agentStatus: 'idle',
+            ...(group.roadmapExecutionMode ? { columnId: 'backlog' as const } : {}),
             startedAt: undefined,
             completedAt: undefined,
             worktreePath,
@@ -302,6 +357,11 @@ export function createGroupsRouter(
 
     // Stop group queue + all running agents
     await agentManager.stopGroup(id);
+    if (group.roadmapExecutionMode) {
+      for (const child of await groupRepo.getChildTasks(id)) {
+        if (agentManager.isRunning(child.id)) await agentManager.stopAgent(child.id);
+      }
+    }
 
     // Preflight every child so one dirty worktree cannot cause partial cleanup.
     const children = await groupRepo.getChildTasks(id);
@@ -345,6 +405,12 @@ export function createGroupsRouter(
       res.status(409).json({ error: 'group is already running' }); return;
     }
 
+    if (group.roadmapExecutionMode) {
+      await startOrderedGroupChild(id, groupRepo, taskRepo, agentManager, true, projectRepo);
+      res.json({ ...(await groupRepo.getById(id)), children: await groupRepo.getChildTasks(id) });
+      return;
+    }
+
     const now = Date.now();
     const updated = await groupRepo.update(id, {
       columnId: 'in-progress',
@@ -367,6 +433,11 @@ export function createGroupsRouter(
     if (!group) { res.status(404).json({ error: 'group not found' }); return; }
 
     await agentManager.stopGroup(id);
+    if (group.roadmapExecutionMode) {
+      for (const child of await groupRepo.getChildTasks(id)) {
+        if (agentManager.isRunning(child.id)) await agentManager.stopAgent(child.id);
+      }
+    }
 
     // Mark remaining pending children as idle
     const children = await groupRepo.getChildTasks(id);
@@ -390,8 +461,13 @@ export function createGroupsRouter(
     if (!group) { res.status(404).json({ error: 'group not found' }); return; }
 
     // Stop running agents first
-    if (agentManager.isGroupRunning(id)) {
+    if (agentManager.isGroupRunning(id) || group.roadmapExecutionMode) {
       await agentManager.stopGroup(id);
+      if (group.roadmapExecutionMode) {
+        for (const child of await groupRepo.getChildTasks(id)) {
+          if (agentManager.isRunning(child.id)) await agentManager.stopAgent(child.id);
+        }
+      }
     }
 
     // Archive all children. Clean worktrees are removed; blocked worktrees stay attached.

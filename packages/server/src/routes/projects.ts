@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import { startOrderedGroupChild } from '../services/ordered-group.js';
 import { spawnSync } from 'child_process';
 import crypto from 'crypto';
 import fs from 'fs';
@@ -137,6 +138,8 @@ async function autoRunPrerequisitesAreDone(taskRepo: TaskRepository, taskId: str
 export async function tickProjectAutoRun(args: {
   project: Project;
   orderedBacklogIds: string[];
+  groupRepo?: TaskGroupRepository;
+  projectRepo?: ProjectRepository;
   taskRepo: TaskRepository;
   agentManager: AgentManager;
 }): Promise<
@@ -149,7 +152,9 @@ export async function tickProjectAutoRun(args: {
     return { started: false, reason: 'auto-run-disabled' };
   }
 
-  const projectTasks = await taskRepo.getAll(true, project.id);
+  const groups = args.groupRepo ? await args.groupRepo.getAll(true, project.id) : [];
+  const groupChildren = args.groupRepo ? (await Promise.all(groups.map(group => args.groupRepo!.getChildTasks(group.id)))).flat() : [];
+  const projectTasks = [...await taskRepo.getAll(true, project.id), ...groupChildren];
 
   if (projectTasks.some((task) =>
     agentManager.isRunning(task.id)
@@ -161,7 +166,6 @@ export async function tickProjectAutoRun(args: {
 
   if (projectTasks.some((task) =>
     !task.archived
-    && !task.groupId
     && (task.columnId === 'in-progress' || task.columnId === 'review')
   )) {
     return { started: false, reason: 'awaiting-current-card-done' };
@@ -172,6 +176,12 @@ export async function tickProjectAutoRun(args: {
     return { started: false, reason: 'empty-backlog' };
   }
 
+  const topGroup = groups.find(group => group.id === firstId);
+  if (topGroup && args.groupRepo) {
+    if (!topGroup.roadmapExecutionMode || topGroup.archived) return { started: false, reason: 'top-card-not-runnable' };
+    const started = await startOrderedGroupChild(topGroup.id, args.groupRepo, taskRepo, agentManager, topGroup.roadmapExecutionMode === 'full-roadmap', args.projectRepo);
+    return started ? { started: true, task: started } : { started: false, reason: 'top-card-blocked' };
+  }
   const topTask = await taskRepo.getById(firstId);
 
   if (
@@ -442,6 +452,8 @@ export function createProjectsRouter(
     res.json(await tickProjectAutoRun({
       project,
       orderedBacklogIds,
+      groupRepo,
+      projectRepo,
       taskRepo,
       agentManager,
     }));

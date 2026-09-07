@@ -81,6 +81,7 @@ export interface TaskProvenance {
 }
 
 export interface TaskGroup {
+  roadmapExecutionMode?: RoadmapExecutionMode;
   id: string;
   title: string;
   description?: string;
@@ -209,9 +210,12 @@ export interface RoadmapProposedTask {
   dependsOnTaskIndexes?: number[];
 }
 
+export type RoadmapCreationMode = 'loose' | 'group';
+
 export type RoadmapExecutionMode = 'backlog' | 'first-card' | 'full-roadmap';
 
 export interface RoadmapPreview {
+  suggestedGroupName?: string;
   project: {
     id: string;
     repoPath?: string;

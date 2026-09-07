@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect } from 'react';
 import type { TaskGroup } from '@/types';
 import { api, connectWS } from '@/lib/api';
 import type { TaskGroupWithChildren, CreateGroupChild } from '@/lib/api';
-import type { Priority } from '@/types';
+import type { Priority, RoadmapExecutionMode } from '@/types';
 
 const getProjectId = (value: { projectId?: string }) => value.projectId ?? 'default';
 
@@ -48,7 +48,8 @@ export function useTaskGroups(projectId = 'default') {
               if (g.id !== child.groupId) return g;
               return {
                 ...g,
-                children: g.children.map((c) => (c.id === child.id ? child : c)),
+                children: g.children.map((c) => (c.id === child.id ? child : c))
+                  .sort((a, b) => (a.groupOrder ?? 0) - (b.groupOrder ?? 0)),
               };
             }),
           );
@@ -76,6 +77,7 @@ export function useTaskGroups(projectId = 'default') {
     baseBranch?: string;
     maxConcurrency: number;
     children: CreateGroupChild[];
+    roadmapExecutionMode?: RoadmapExecutionMode;
     autoRun?: boolean;
     projectId?: string;
   }) => {
@@ -138,6 +140,12 @@ export function useTaskGroups(projectId = 'default') {
     }
   }, []);
 
+  const reorderGroupChildren = useCallback(async (id: string, orderedTaskIds: string[]) => {
+    const result = await api.reorderGroupChildren(id, orderedTaskIds);
+    setGroups((prev) => prev.map((group) => group.id === id ? result : group));
+    return result;
+  }, []);
+
   return {
     groups,
     error,
@@ -147,5 +155,6 @@ export function useTaskGroups(projectId = 'default') {
     deleteGroup,
     updateGroup,
     refreshGroup,
+    reorderGroupChildren,
   };
 }

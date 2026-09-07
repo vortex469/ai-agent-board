@@ -1137,6 +1137,7 @@ export async function startAgentForTask(
   repo: TaskRepository,
   agentManager: AgentManager,
   projectRepo?: ProjectRepository,
+  onSettled?: () => Promise<void>,
 ): Promise<void> {
   if (!await taskPrerequisitesAreDone(repo, task.id)) return;
 
@@ -1160,6 +1161,7 @@ export async function startAgentForTask(
       async (status) => {
         if (status === 'complete' || status === 'failed') await repo.clearRun(task.id);
         await onStatusChange(status);
+        if (status === 'complete' || status === 'failed') await onSettled?.();
       },
       makeWorktreeCallback(repo, task.id),
     );
