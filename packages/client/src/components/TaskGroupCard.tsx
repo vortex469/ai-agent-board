@@ -1,4 +1,6 @@
 import { useMemo } from 'react';
+import type { Task } from '@/types';
+import { GroupChildActions } from './GroupChildActions';
 import { Layers, Play, Square, Trash2, Pencil } from 'lucide-react';
 import type { TaskGroupWithChildren } from '@/lib/api';
 import { AGENT_DISPLAY } from '@/lib/agent-config';
@@ -9,6 +11,10 @@ import { isPendingGroupChild } from '@ai-agent-board/shared/constants.js';
 
 interface TaskGroupCardProps {
   group: TaskGroupWithChildren;
+  onChildClick: (task: Task) => void;
+  onEditChild?: (task: Task) => void;
+  onRetryChild?: (task: Task) => void;
+  onResetChild?: (task: Task) => void;
   onClickGroup: (group: TaskGroupWithChildren) => void;
   onRunGroup: (id: string) => void;
   onStopGroup: (id: string) => void;
@@ -16,7 +22,7 @@ interface TaskGroupCardProps {
   onEditGroup?: (group: TaskGroupWithChildren) => void;
 }
 
-export function TaskGroupCard({ group, onClickGroup, onRunGroup, onStopGroup, onDeleteGroup, onEditGroup }: TaskGroupCardProps) {
+export function TaskGroupCard({ group, onClickGroup, onRunGroup, onStopGroup, onDeleteGroup, onEditGroup, onChildClick, onEditChild, onRetryChild, onResetChild }: TaskGroupCardProps) {
   const status = useMemo(() => computeGroupStatus(group.children), [group.children]);
   const isRunning = status.executing > 0 || status.planning > 0;
   const pct = status.total > 0 ? ((status.completed / status.total) * 100) : 0;
@@ -142,22 +148,28 @@ export function TaskGroupCard({ group, onClickGroup, onRunGroup, onStopGroup, on
             return (
               <div
                 key={child.id}
+                data-testid="group-card-child"
+                onClick={(event) => { event.stopPropagation(); onChildClick(child); }}
+                onPointerDown={(event) => event.stopPropagation()}
+                onMouseDown={(event) => event.stopPropagation()}
+                onTouchStart={(event) => event.stopPropagation()}
                 className={cn(
                   'rounded-md border border-zinc-700/60 bg-zinc-800/60 px-2.5 py-1.5',
                   priorityInfo?.borderClass,
                 )}
               >
                 <div className="flex items-start justify-between gap-2">
-                  <h4 className="text-xs font-medium leading-snug text-zinc-200 line-clamp-1">
+                  <button type="button" aria-label={`Open ${child.title}`} className="text-left text-xs font-medium leading-snug text-zinc-200 line-clamp-1">
                     {priorityInfo && <span className="mr-0.5">{priorityInfo.emoji}</span>}
                     {child.title}
-                  </h4>
+                  </button>
                   {statusIcon(child.agentStatus, 'h-3 w-3')}
                 </div>
                 {child.description && (
                   <p className="mt-0.5 text-[10px] leading-snug text-zinc-500 line-clamp-1">{child.description}</p>
                 )}
-                <div className="mt-1 flex items-center gap-2">
+                <div className="mt-1 flex items-center justify-between gap-2">
+                  <GroupChildActions task={child} onEdit={onEditChild} onRetry={onRetryChild} onReset={onResetChild} />
                   {agentDisplay && (
                     <span className="inline-flex items-center gap-0.5 text-[10px] text-zinc-500">
                       {agentDisplay.emoji} {agentDisplay.label}

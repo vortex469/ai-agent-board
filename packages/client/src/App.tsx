@@ -151,6 +151,15 @@ function BoardPage({
     if (selectedGroupId) refreshGroup(selectedGroupId);
   }, [runTask, selectedGroupId, refreshGroup]);
 
+  const handleResetChild = useCallback(async (task: Task) => {
+    if (task.agentStatus !== 'failed' || task.archived) return;
+    // Review/done cannot transition directly to backlog. Reset those children
+    // to in-progress without auto-running; other failed children return to backlog.
+    const columnId = task.columnId === 'review' || task.columnId === 'done' ? 'in-progress' : 'backlog';
+    const updated = await updateTask(task.id, { columnId, agentStatus: 'idle' });
+    if (updated && task.groupId) await refreshGroup(task.groupId);
+  }, [updateTask, refreshGroup]);
+
   const handleChildClick = useCallback((task: Task) => {
     setSelectedGroupId(null);
     setSelectedTaskId(task.id);
@@ -315,6 +324,7 @@ function BoardPage({
   }, []);
 
   const handleEditTask = useCallback((task: Task) => {
+    setSelectedGroupId(null);
     setEditingTask(task);
     setDialogOpen(true);
   }, []);
@@ -365,7 +375,8 @@ function BoardPage({
 
   // Worktree dialog: intercept Run — if task has repoPath, run directly; otherwise open edit dialog
   const handleRunWithConfig = useCallback((taskId: string) => {
-    const task = tasks.find((t) => t.id === taskId);
+    const task = tasks.find((t) => t.id === taskId)
+      ?? groups.flatMap((group) => group.children).find((child) => child.id === taskId);
     if (!task) return;
 
     if (task.repoPath) {
@@ -387,20 +398,22 @@ function BoardPage({
       setHighlightRequiredFields(true);
       setDialogOpen(true);
     }
-  }, [tasks, configureAndRunTask]);
+  }, [tasks, groups, configureAndRunTask]);
 
   const handleRetryTask = useCallback((task: Task) => {
+    setSelectedGroupId(null);
     setSelectedTaskId(task.id);
     runTask(task.id);
   }, [runTask]);
 
   const handleReconfigureRetry = useCallback((taskId: string) => {
-    const task = tasks.find((t) => t.id === taskId);
+    const task = tasks.find((t) => t.id === taskId)
+      ?? groups.flatMap((group) => group.children).find((child) => child.id === taskId);
     if (!task) return;
     setEditingTask(task);
     setHighlightRequiredFields(true);
     setDialogOpen(true);
-  }, [tasks]);
+  }, [tasks, groups]);
 
   // Keyboard shortcuts
   const handleCloseAll = useCallback(() => {
@@ -483,6 +496,8 @@ function BoardPage({
           onArchiveTask={handleArchiveTask}
           onUnarchiveTask={handleUnarchiveTask}
           onRetryTask={handleRetryTask}
+          onResetTask={handleResetChild}
+          onChildClick={handleChildClick}
           onAddTask={handleOpenDialog}
           showArchived={showArchived}
           onDropInProgress={(task) => setSelectedTaskId(task.id)}
@@ -539,6 +554,8 @@ function BoardPage({
         onRunGroup={runGroup}
         onStopGroup={stopGroup}
         onRetryChild={handleRetryChild}
+        onEditChild={handleEditTask}
+        onResetChild={handleResetChild}
         onChildClick={handleChildClick}
         onReorderChildren={reorderGroupChildren}
       />

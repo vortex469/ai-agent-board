@@ -1,7 +1,8 @@
 import { useMemo, useState } from 'react';
+import { GroupChildActions } from './GroupChildActions';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-  X, Layers, Play, Square, RotateCcw,
+  X, Layers, Play, Square,
   ChevronRight, ArrowUp, ArrowDown,
 } from 'lucide-react';
 import type { Task, AgentStatus } from '@/types';
@@ -16,6 +17,8 @@ interface GroupPanelProps {
   onRunGroup: (id: string) => void;
   onStopGroup: (id: string) => void;
   onRetryChild: (taskId: string) => void;
+  onEditChild: (task: Task) => void;
+  onResetChild: (task: Task) => void;
   onChildClick: (task: Task) => void;
   onReorderChildren: (groupId: string, orderedTaskIds: string[]) => Promise<unknown>;
 }
@@ -30,7 +33,7 @@ function statusLabel(status: AgentStatus): string {
   }
 }
 
-export function GroupPanel({ group, onClose, onRunGroup, onStopGroup, onRetryChild, onChildClick, onReorderChildren }: GroupPanelProps) {
+export function GroupPanel({ group, onClose, onRunGroup, onStopGroup, onRetryChild, onEditChild, onResetChild, onChildClick, onReorderChildren }: GroupPanelProps) {
   const status = useMemo(() => group ? computeGroupStatus(group.children) : null, [group]);
   const [reordering, setReordering] = useState(false);
   const [reorderError, setReorderError] = useState('');
@@ -157,7 +160,7 @@ export function GroupPanel({ group, onClose, onRunGroup, onStopGroup, onRetryChi
                 {/* Content */}
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
-                    <span className="truncate text-sm text-zinc-200">{child.title}</span>
+                    <button type="button" aria-label={`Open ${child.title}`} className="truncate text-left text-sm text-zinc-200">{child.title}</button>
                   </div>
                   <div className="flex items-center gap-2 mt-0.5 text-xs text-zinc-500">
                     <span>{agentDisplay?.emoji} {agentDisplay?.label}</span>
@@ -180,15 +183,8 @@ export function GroupPanel({ group, onClose, onRunGroup, onStopGroup, onRetryChi
                       {direction < 0 ? <ArrowUp className="h-4 w-4" /> : <ArrowDown className="h-4 w-4" />}
                     </button>
                   ))}
-                  {child.agentStatus === 'failed' && (
-                    <button
-                      onClick={(e) => { e.stopPropagation(); onRetryChild(child.id); }}
-                      className="flex h-11 w-11 items-center justify-center rounded text-zinc-400 hover:bg-zinc-700 hover:text-amber-400 lg:h-auto lg:w-auto lg:p-1"
-                      title="Retry"
-                    >
-                      <RotateCcw className="h-3.5 w-3.5" />
-                    </button>
-                  )}
+                  <GroupChildActions task={child} onEdit={onEditChild}
+                    onRetry={(task) => onRetryChild(task.id)} onReset={onResetChild} />
                   <ChevronRight className="h-4 w-4 text-zinc-600" />
                 </div>
               </div>
