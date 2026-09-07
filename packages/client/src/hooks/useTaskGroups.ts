@@ -1,6 +1,7 @@
-import { useState, useCallback, useEffect } from 'react';
-import type { TaskGroup, ReconfigureTaskGroupInput } from '@/types';
+import { useState, useCallback, useEffect, useMemo } from 'react';
+import type { Task, TaskGroup, ReconfigureTaskGroupInput } from '@/types';
 import { api, connectWS } from '@/lib/api';
+import { createTaskUpdateTracker } from '@/lib/task-update-tracker';
 import type { TaskGroupWithChildren, CreateGroupChild } from '@/lib/api';
 import type { Priority, RoadmapExecutionMode } from '@/types';
 
@@ -9,6 +10,19 @@ const getProjectId = (value: { projectId?: string }) => value.projectId ?? 'defa
 export function useTaskGroups(projectId = 'default') {
   const [groups, setGroups] = useState<TaskGroupWithChildren[]>([]);
   const [error, setError] = useState<string | null>(null);
+
+  // REST responses must update children too: recovery cannot depend on a
+  // WebSocket broadcast arriving before the user retries with a new agent.
+  const updateChild = useCallback((child: Task) => {
+    if (!child.groupId || getProjectId(child) !== projectId) return;
+    setGroups((prev) => prev.map((group) => group.id !== child.groupId ? group : {
+      ...group,
+      children: group.children.map((task) => task.id === child.id ? child : task)
+        .sort((a, b) => (a.groupOrder ?? 0) - (b.groupOrder ?? 0)),
+    }));
+  }, [projectId]);
+
+  const childUpdates = useMemo(() => createTaskUpdateTracker(updateChild), [updateChild]);
 
   // Fetch groups on mount
   useEffect(() => {
@@ -41,23 +55,12 @@ export function useTaskGroups(projectId = 'default') {
         }
         // Update child task within its parent group
         if (msg.type === 'task_updated' && msg.payload.groupId) {
-          const child = msg.payload;
-          if (getProjectId(child) !== projectId) return;
-          setGroups((prev) =>
-            prev.map((g) => {
-              if (g.id !== child.groupId) return g;
-              return {
-                ...g,
-                children: g.children.map((c) => (c.id === child.id ? child : c))
-                  .sort((a, b) => (a.groupOrder ?? 0) - (b.groupOrder ?? 0)),
-              };
-            }),
-          );
+          childUpdates.receive(msg.payload);
         }
       },
       () => { api.getGroups(false, projectId).then(setGroups).catch(console.error); },
     );
-  }, [projectId]);
+  }, [projectId, childUpdates]);
 
   // Refetch a single group's children (for status updates)
   const refreshGroup = useCallback(async (groupId: string) => {
@@ -161,6 +164,7 @@ export function useTaskGroups(projectId = 'default') {
     deleteGroup,
     updateGroup,
     refreshGroup,
+    trackChildMutation: childUpdates.start,
     reorderGroupChildren,
     reconfigureGroup,
   };

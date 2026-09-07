@@ -5,10 +5,22 @@ import { api, connectWS } from '@/lib/api';
 
 const getProjectId = (task: Task) => task.projectId ?? 'default';
 
-export function useTasks(projectId = 'default') {
+export function useTasks(projectId = 'default', trackTaskMutation?: (id: string) => (task?: Task) => void) {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [showArchived, setShowArchived] = useState(false);
+
+  const withTaskUpdate = useCallback(async (id: string, request: () => Promise<Task>) => {
+    const complete = trackTaskMutation?.(id);
+    try {
+      const updated = await request();
+      complete?.(updated);
+      return updated;
+    } catch (err) {
+      complete?.();
+      throw err;
+    }
+  }, [trackTaskMutation]);
 
   // Fetch tasks on mount and when showArchived changes
   useEffect(() => {
@@ -71,14 +83,14 @@ export function useTasks(projectId = 'default') {
 
   const runTask = useCallback(async (id: string) => {
     try {
-      const updated = await api.runTask(id);
+      const updated = await withTaskUpdate(id, () => api.runTask(id));
       setTasks((prev) => prev.map((t) => (t.id === id ? updated : t)));
       return updated;
     } catch (err) {
       setError(`Failed to start agent: ${(err as Error).message}`);
       return undefined;
     }
-  }, []);
+  }, [withTaskUpdate]);
 
   const moveTask = useCallback((taskId: string, targetColumn: ColumnId) => {
     setTasks((prev) => {
@@ -145,14 +157,14 @@ export function useTasks(projectId = 'default') {
     config: { repoPath: string; branchName: string; baseBranch: string; useWorktree: boolean; agentType?: AgentType }
   ) => {
     try {
-      const configured = await api.configureTask(id, config);
+      const configured = await withTaskUpdate(id, () => api.configureTask(id, config));
       setTasks((prev) => prev.map((t) => (t.id === id ? configured : t)));
-      const updated = await api.runTask(id);
+      const updated = await withTaskUpdate(id, () => api.runTask(id));
       setTasks((prev) => prev.map((t) => (t.id === id ? updated : t)));
     } catch (err) {
       setError(`Failed to start agent: ${(err as Error).message}`);
     }
-  }, []);
+  }, [withTaskUpdate]);
 
   const createPR = useCallback(async (id: string) => {
     try {
@@ -194,14 +206,14 @@ export function useTasks(projectId = 'default') {
 
   const updateTask = useCallback(async (id: string, updates: Partial<Task>) => {
     try {
-      const updated = await api.updateTask(id, updates);
+      const updated = await withTaskUpdate(id, () => api.updateTask(id, updates));
       setTasks((prev) => prev.map((t) => (t.id === id ? updated : t)));
       return updated;
     } catch (err) {
       setError(`Failed to update task: ${(err as Error).message}`);
       return undefined;
     }
-  }, []);
+  }, [withTaskUpdate]);
 
   const deleteTask = useCallback(async (id: string) => {
     try {

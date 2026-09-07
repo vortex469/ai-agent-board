@@ -64,8 +64,8 @@ function BoardPage({
     defaultBaseBranch: project.defaultBaseBranch,
     defaultUseWorktree: project.defaultUseWorktree,
   };
-  const { tasks, error, clearError, showArchived, setShowArchived, addTask, addTasksBatch, updateTask, moveTask, reorderBacklogTasks, runTask, stopTask, deleteTask, archiveTask, unarchiveTask, configureAndRunTask, createPR, mergeLocal, cleanupWorktree } = useTasks(project.id);
-  const { groups, createGroup, runGroup, stopGroup, deleteGroup, updateGroup, refreshGroup, reorderGroupChildren, reconfigureGroup } = useTaskGroups(project.id);
+  const { groups, createGroup, runGroup, stopGroup, deleteGroup, updateGroup, refreshGroup, trackChildMutation, reorderGroupChildren, reconfigureGroup } = useTaskGroups(project.id);
+  const { tasks, error, clearError, showArchived, setShowArchived, addTask, addTasksBatch, updateTask, moveTask, reorderBacklogTasks, runTask, stopTask, deleteTask, archiveTask, unarchiveTask, configureAndRunTask, createPR, mergeLocal, cleanupWorktree } = useTasks(project.id, trackChildMutation);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [roadmapDialogOpen, setRoadmapDialogOpen] = useState(false);
   const [groupDialogOpen, setGroupDialogOpen] = useState(false);
