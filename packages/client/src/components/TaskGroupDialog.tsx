@@ -1,13 +1,14 @@
 import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, Plus, Trash2, ChevronDown, AlertTriangle } from 'lucide-react';
-import type { AgentType, Priority } from '@/types';
+import type { AgentType, Priority, ReconfigureTaskGroupInput } from '@/types';
 import { MAX_GROUP_CHILDREN, MIN_GROUP_CHILDREN } from '@/types';
 import { AGENT_OPTIONS } from '@/lib/agent-config';
 import { PRIORITY_OPTIONS } from '@/lib/priority-config';
 import { cn, getRepoPathHelpText, getRepoPathPlaceholder, isAbsoluteRepoPath } from '@/lib/utils';
 import { getRecentRepoPaths, addRepoPath } from '@/lib/repo-history';
 import ParallelismSlider from './ParallelismSlider';
+import { GroupReconfigure } from './GroupReconfigure';
 import type { CreateGroupChild, TaskGroupWithChildren } from '@/lib/api';
 
 interface ChildRow {
@@ -33,6 +34,7 @@ interface TaskGroupDialogProps {
   }) => Promise<unknown>;
   editGroup?: TaskGroupWithChildren | null;
   onEditSubmit?: (id: string, updates: { title: string; description?: string; priority: Priority; maxConcurrency: number }) => Promise<unknown>;
+  onReconfigure?: (id: string, updates: ReconfigureTaskGroupInput) => Promise<unknown>;
   lockedRepoPath?: string;
   /** Project-level task defaults used to prefill create mode (each overridable). */
   projectDefaults?: {
@@ -51,7 +53,7 @@ function makeRow(agentType: AgentType = 'copilot', useWorktree = true): ChildRow
   return { key: `child-${nextKey++}`, title: '', description: '', agentType, useWorktree };
 }
 
-export function TaskGroupDialog({ open, onClose, onSubmit, editGroup, onEditSubmit, lockedRepoPath, projectDefaults }: TaskGroupDialogProps) {
+export function TaskGroupDialog({ open, onClose, onSubmit, editGroup, onEditSubmit, onReconfigure, lockedRepoPath, projectDefaults }: TaskGroupDialogProps) {
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [priority, setPriority] = useState<Priority>('medium');
@@ -205,6 +207,9 @@ export function TaskGroupDialog({ open, onClose, onSubmit, editGroup, onEditSubm
           onClick={onClose}
         >
           <motion.div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="task-group-dialog-title"
             className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-border bg-card shadow-2xl"
             initial={{ scale: 0.95, opacity: 0 }}
             animate={{ scale: 1, opacity: 1 }}
@@ -213,8 +218,8 @@ export function TaskGroupDialog({ open, onClose, onSubmit, editGroup, onEditSubm
           >
             {/* Header */}
             <div className="flex items-center justify-between border-b border-border px-6 py-4">
-              <h2 className="text-lg font-semibold text-foreground">{isEditMode ? 'Edit Task Group' : 'Create Task Group'}</h2>
-              <button onClick={onClose} className="rounded-lg p-1 text-muted-foreground hover:bg-accent hover:text-foreground">
+              <h2 id="task-group-dialog-title" className="text-lg font-semibold text-foreground">{isEditMode ? 'Edit Task Group' : 'Create Task Group'}</h2>
+              <button aria-label="Close task group dialog" onClick={onClose} className="rounded-lg p-1 text-muted-foreground hover:bg-accent hover:text-foreground">
                 <X className="h-5 w-5" />
               </button>
             </div>
@@ -247,7 +252,7 @@ export function TaskGroupDialog({ open, onClose, onSubmit, editGroup, onEditSubm
               </div>
 
               {/* Priority + Repo + Branch row */}
-              <div className="grid grid-cols-3 gap-3">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
                 {/* Priority dropdown */}
                 <div className="relative">
                   <label className="mb-1 block text-sm font-medium text-muted-foreground">Priority</label>
@@ -288,8 +293,8 @@ export function TaskGroupDialog({ open, onClose, onSubmit, editGroup, onEditSubm
                     }}
                     placeholder={repoPathPlaceholder}
                     list={hasLockedRepoPath ? undefined : 'recent-group-repo-paths'}
-                    readOnly={hasLockedRepoPath}
-                    aria-readonly={hasLockedRepoPath}
+                    readOnly={hasLockedRepoPath || isEditMode}
+                    aria-readonly={hasLockedRepoPath || isEditMode}
                     className={`w-full rounded-lg border bg-background px-3 py-2 text-sm placeholder:text-muted-foreground/50 focus:outline-none ${
                       hasLockedRepoPath
                         ? 'border-border text-muted-foreground'
@@ -317,6 +322,7 @@ export function TaskGroupDialog({ open, onClose, onSubmit, editGroup, onEditSubm
                   <input
                     type="text"
                     value={baseBranch}
+                    readOnly={isEditMode}
                     onChange={(e) => setBaseBranch(e.target.value)}
                     placeholder="main"
                     className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm placeholder:text-muted-foreground/50 focus:border-primary focus:outline-none"
@@ -327,11 +333,13 @@ export function TaskGroupDialog({ open, onClose, onSubmit, editGroup, onEditSubm
               {/* Parallelism slider */}
               <div>
                 <label className="mb-1 block text-sm font-medium text-muted-foreground">Parallelism</label>
-                <ParallelismSlider value={maxConcurrency} max={children.length} onChange={setMaxConcurrency} />
+                <ParallelismSlider disabled={isEditMode && (!!editGroup?.startedAt || !!editGroup?.roadmapExecutionMode || editGroup?.children.some((child) => child.agentStatus === 'planning' || child.agentStatus === 'executing'))} value={maxConcurrency} max={children.length} onChange={setMaxConcurrency} />
               </div>
 
-              {/* Children */}
-              <div>
+              {isEditMode && editGroup && onReconfigure && <GroupReconfigure group={editGroup} onApply={onReconfigure} onSaved={onClose} />}
+
+              {/* Children are configured without rewriting task content in edit mode. */}
+              {!isEditMode && <div>
                 <label className="mb-2 block text-sm font-medium text-muted-foreground">Tasks ({children.length})</label>
                 <div className="space-y-3">
                   {children.map((child, idx) => (
@@ -401,8 +409,9 @@ export function TaskGroupDialog({ open, onClose, onSubmit, editGroup, onEditSubm
                     <Plus className="h-4 w-4" /> Add Task
                   </button>
                 )}
-              </div>
+              </div>}
 
+              {!isEditMode && <>
               {/* Auto-run checkbox */}
               <label className="flex cursor-pointer items-center gap-2.5">
                 <input
@@ -423,6 +432,7 @@ export function TaskGroupDialog({ open, onClose, onSubmit, editGroup, onEditSubm
                   </p>
                 </div>
               )}
+              </>}
             </div>
 
             {/* Footer */}

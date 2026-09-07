@@ -5,6 +5,8 @@ import { v4 as uuid } from 'uuid';
 import type { Project, TaskGroup, Task } from '../types.js';
 import {
   isValidPriority,
+  isPendingGroupChild,
+  isValidAgentTimeoutMinutes,
   isValidAgentType,
   isValidColumnId,
   isValidMaxConcurrency,
@@ -234,6 +236,62 @@ export function createGroupsRouter(
       for (const child of children) broadcastTaskUpdate(child);
       res.json({ ...group, children });
     } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : 'reorder failed' }); }
+  }));
+
+  // POST /api/groups/:id/reconfigure — update only untouched pending execution settings.
+  router.post('/:id/reconfigure', asyncHandler(async (req: Request, res: Response) => {
+    const id = paramId(req);
+    const body = req.body;
+    if (!body || typeof body !== 'object' || Array.isArray(body)
+      || Object.keys(body).some(key => !['taskIds', 'agentType', 'priority', 'timeoutMinutes'].includes(key))) {
+      res.status(400).json({ error: 'unsupported group configuration fields' }); return;
+    }
+    const { taskIds, agentType, priority, timeoutMinutes } = body;
+    if (taskIds !== undefined && (!Array.isArray(taskIds) || taskIds.length === 0
+      || taskIds.length > MAX_GROUP_CHILDREN || taskIds.some((value: unknown) => typeof value !== 'string')
+      || new Set(taskIds).size !== taskIds.length)) {
+      res.status(400).json({ error: 'taskIds must be a non-empty array of unique child ids' }); return;
+    }
+    if (agentType !== undefined && !isValidAgentType(agentType)) {
+      res.status(400).json({ error: 'invalid agentType' }); return;
+    }
+    if (priority !== undefined && !isValidPriority(priority)) {
+      res.status(400).json({ error: 'invalid priority' }); return;
+    }
+    if (timeoutMinutes !== undefined && timeoutMinutes !== null && !isValidAgentTimeoutMinutes(timeoutMinutes)) {
+      res.status(400).json({ error: 'timeoutMinutes must be null or an integer between 1 and 240' }); return;
+    }
+    const updates = {
+      ...(agentType !== undefined ? { agentType } : {}),
+      ...(priority !== undefined ? { priority } : {}),
+      ...(timeoutMinutes !== undefined ? { timeoutMinutes } : {}),
+    };
+    if (Object.keys(updates).length === 0) {
+      res.status(400).json({ error: 'at least one execution setting is required' }); return;
+    }
+    await withOrderedGroupLock(id, async () => {
+      const group = await groupRepo.getById(id);
+      if (!group) { res.status(404).json({ error: 'group not found' }); return; }
+      if (group.archived) { res.status(409).json({ error: 'archived groups cannot be reconfigured' }); return; }
+      try {
+        const updated = await agentManager.reconfigurePendingGroupTasks(id, async () => {
+          const children = await groupRepo.getChildTasks(id);
+          const eligible = children.filter(child => isPendingGroupChild(child) && !agentManager.isRunning(child.id)
+            && !agentManager.isGroupChildRunning(id, child.id));
+          const selected = taskIds === undefined ? eligible : eligible.filter(child => taskIds.includes(child.id));
+          if (taskIds !== undefined && selected.length !== taskIds.length) {
+            throw new Error('Selected children are no longer pending; refresh the group before applying changes');
+          }
+          if (!selected.length) throw new Error('No pending children are available to reconfigure');
+          return taskRepo.reconfigureGroupChildren(id, selected.map(child => child.id), updates);
+        });
+        for (const child of updated) broadcastTaskUpdate(child);
+        broadcastGroupUpdate(group);
+        res.json({ ...group, children: await groupRepo.getChildTasks(id), updatedCount: updated.length });
+      } catch (error) {
+        res.status(409).json({ error: error instanceof Error ? error.message : 'group configuration failed' });
+      }
+    });
   }));
 
   // PATCH /api/groups/:id — update group metadata
@@ -523,46 +581,48 @@ async function startGroupExecution(
   taskRepo: TaskRepository,
   agentManager: AgentManager,
 ): Promise<void> {
-  const group = await groupRepo.getById(groupId);
-  if (!group) return;
+  return withOrderedGroupLock(groupId, async () => {
+    const group = await groupRepo.getById(groupId);
+    if (!group) return;
 
-  const children = await groupRepo.getChildTasks(groupId);
-  const pendingChildren = children.filter((c) => c.agentStatus === 'idle' || c.agentStatus === 'failed');
+    const children = await groupRepo.getChildTasks(groupId);
+    const pendingChildren = children.filter((c) => c.agentStatus === 'idle' || c.agentStatus === 'failed');
 
-  if (pendingChildren.length === 0) return;
+    if (pendingChildren.length === 0) return;
 
-  const onChildComplete = async (_taskId: string) => {
-    // Guard: group may have been deleted while agents were running
-    const currentGroup = await groupRepo.getById(groupId);
-    if (!currentGroup) return;
+    const onChildComplete = async (_taskId: string) => {
+      // Guard: group may have been deleted while agents were running
+      const currentGroup = await groupRepo.getById(groupId);
+      if (!currentGroup) return;
 
-    const currentChildren = await groupRepo.getChildTasks(groupId);
-    const allDone = currentChildren.every(
-      (c) => c.agentStatus === 'complete' || c.agentStatus === 'failed',
-    );
+      const currentChildren = await groupRepo.getChildTasks(groupId);
+      const allDone = currentChildren.every(
+        (c) => c.agentStatus === 'complete' || c.agentStatus === 'failed',
+      );
 
-    if (allDone) {
-      const anyFailed = currentChildren.some((c) => c.agentStatus === 'failed');
-      if (!anyFailed) {
-        const updated = await groupRepo.update(groupId, {
-          columnId: 'review',
-          completedAt: Date.now(),
-        });
-        if (updated) broadcastGroupUpdate(updated);
-      } else {
-        const updated = await groupRepo.update(groupId, { completedAt: Date.now() });
-        if (updated) broadcastGroupUpdate(updated);
+      if (allDone) {
+        const anyFailed = currentChildren.some((c) => c.agentStatus === 'failed');
+        if (!anyFailed) {
+          const updated = await groupRepo.update(groupId, {
+            columnId: 'review',
+            completedAt: Date.now(),
+          });
+          if (updated) broadcastGroupUpdate(updated);
+        } else {
+          const updated = await groupRepo.update(groupId, { completedAt: Date.now() });
+          if (updated) broadcastGroupUpdate(updated);
+        }
       }
-    }
-  };
+    };
 
-  agentManager.startGroup(
-    group,
-    pendingChildren,
-    (task: Task) => makeStatusCallback(taskRepo, task.id, agentManager, task),
-    (task: Task) => makeWorktreeCallback(taskRepo, task.id),
-    onChildComplete,
-  );
+    agentManager.startGroup(
+      group,
+      pendingChildren,
+      (task: Task) => makeStatusCallback(taskRepo, task.id, agentManager, task),
+      (task: Task) => makeWorktreeCallback(taskRepo, task.id),
+      onChildComplete,
+    );
+  });
 }
 
 async function getProjectForRequest(projectRepo: ProjectRepository, value: unknown): Promise<Project | undefined> {

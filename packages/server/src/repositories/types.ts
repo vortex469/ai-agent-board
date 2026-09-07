@@ -14,6 +14,8 @@ export interface ContinuationEligibility {
 }
 
 export interface TaskRepository {
+  /** Atomically update only still-pending children; reject the entire batch on a stale selection. */
+  reconfigureGroupChildren(groupId: string, taskIds: string[], updates: Pick<Partial<Task>, 'agentType' | 'priority' | 'timeoutMinutes'>): Promise<Task[]>;
   /** Persisted ordered children, or undefined for an independent group. */
   getOrderedGroupTasks(groupId: string): Promise<Task[] | undefined>;
   getAll(includeArchived?: boolean, projectId?: string): Promise<Task[]>;

@@ -360,6 +360,7 @@ export class AgentManager {
   /** Pending coalesced output/thinking broadcast per task */
   private streamBuffer = new Map<string, { event: AgentEvent; timer: ReturnType<typeof setTimeout> }>();
   private groupQueues = new Map<string, GroupQueue>();
+  private pausedGroupAdmissions = new Set<string>();
   /** Per-repo mutex to serialize git operations (merge, checkout) */
   private repoLocks = new Map<string, Promise<void>>();
   /** Automatic no-change recovery attempts for the current task execution cycle. */
@@ -1459,6 +1460,27 @@ export class AgentManager {
     return this.groupQueues.has(groupId);
   }
 
+  isGroupChildRunning(groupId: string, taskId: string): boolean {
+    return this.groupQueues.get(groupId)?.runningTaskIds.has(taskId) ?? false;
+  }
+
+  /** Hold legacy queue admission while persisting and refreshing pending task snapshots. */
+  async reconfigurePendingGroupTasks(groupId: string, save: () => Promise<Task[]>): Promise<Task[]> {
+    this.pausedGroupAdmissions.add(groupId);
+    try {
+      const updated = await save();
+      const queue = this.groupQueues.get(groupId);
+      for (const task of updated) {
+        if (queue?.pendingTaskIds.includes(task.id)) queue.tasks.set(task.id, task);
+      }
+      return updated;
+    } finally {
+      this.pausedGroupAdmissions.delete(groupId);
+      // Only resume an existing queue; configuration never creates an execution.
+      queueMicrotask(() => this.drainGroupQueue(groupId));
+    }
+  }
+
   startGroup(
     group: TaskGroup,
     children: Task[],
@@ -1493,7 +1515,7 @@ export class AgentManager {
     // synchronously calls onStatusChange('failed') for unavailable agents
     const startNext = () => {
       const q = this.groupQueues.get(groupId);
-      if (!q) return;
+      if (!q || this.pausedGroupAdmissions.has(groupId)) return;
       if (q.runningTaskIds.size >= q.maxConcurrency || q.pendingTaskIds.length === 0) return;
 
       const taskId = q.pendingTaskIds.shift()!;

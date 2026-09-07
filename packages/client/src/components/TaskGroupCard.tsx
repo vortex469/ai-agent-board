@@ -5,6 +5,7 @@ import { AGENT_DISPLAY } from '@/lib/agent-config';
 import { PRIORITY_DISPLAY } from '@/lib/priority-config';
 import { computeGroupStatus, statusIcon } from '@/lib/group-utils';
 import { cn } from '@/lib/utils';
+import { isPendingGroupChild } from '@ai-agent-board/shared/constants.js';
 
 interface TaskGroupCardProps {
   group: TaskGroupWithChildren;
@@ -47,7 +48,7 @@ export function TaskGroupCard({ group, onClickGroup, onRunGroup, onStopGroup, on
           <h3 className="text-sm font-medium text-zinc-100 line-clamp-1">{group.title}</h3>
         </div>
         {/* Action buttons (visible on hover) */}
-        <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+        <div className="flex items-center gap-1 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100">
           {!isRunning && status.idle > 0 && group.columnId !== 'done' && (
             <button
               onClick={(e) => { e.stopPropagation(); onRunGroup(group.id); }}
@@ -115,6 +116,13 @@ export function TaskGroupCard({ group, onClickGroup, onRunGroup, onStopGroup, on
           );
         })}
       </div>
+
+      <p className="mb-2 text-xs text-zinc-400">
+        Pending agents: {agentCounts.map(([type]) => {
+          const count = group.children.filter((child) => isPendingGroupChild(child) && (child.agentType ?? 'copilot') === type).length;
+          return count ? `${AGENT_DISPLAY[type as keyof typeof AGENT_DISPLAY].label} (${count})` : null;
+        }).filter(Boolean).join(', ') || 'None'}
+      </p>
 
       {/* Child status summary */}
       <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-zinc-500">

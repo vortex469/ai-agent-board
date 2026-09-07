@@ -1,4 +1,10 @@
-import type { ColumnId, Priority, AgentStatus, AgentType } from './types.js';
+import type { ColumnId, Priority, AgentStatus, AgentType, Task } from './types.js';
+
+/** Bulk configuration never resets execution or review history. */
+export function isPendingGroupChild(task: Task): boolean {
+  return task.columnId === 'backlog' && task.agentStatus === 'idle' && !task.archived
+    && task.startedAt === undefined && task.completedAt === undefined && task.runClaimedAt === undefined;
+}
 
 export const VALID_PRIORITIES: readonly Priority[] = ['low', 'medium', 'high', 'critical'] as const;
 export const VALID_COLUMNS: readonly ColumnId[] = ['backlog', 'in-progress', 'review', 'done'] as const;

@@ -1,6 +1,7 @@
 import type {
   Task,
   TaskGroup,
+  ReconfigureTaskGroupInput,
   TaskAttachment,
   AgentEvent,
   AgentInfo,
@@ -203,6 +204,9 @@ export const api = {
 
   updateGroup: (id: string, data: Partial<TaskGroup>) =>
     request<TaskGroupWithChildren>(`/groups/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+
+  reconfigureGroup: (id: string, data: ReconfigureTaskGroupInput) =>
+    request<TaskGroupWithChildren & { updatedCount: number }>(`/groups/${id}/reconfigure`, { method: 'POST', body: JSON.stringify(data) }),
 
   deleteGroup: (id: string) =>
     request<void>(`/groups/${id}`, { method: 'DELETE' }),

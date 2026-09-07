@@ -22,6 +22,7 @@ export type {
   Task,
   TaskAttachment,
   TaskGroup,
+  ReconfigureTaskGroupInput,
   TaskTemplate,
   AgentEventType,
   AgentEvent,

@@ -107,6 +107,14 @@ export interface TaskGroup {
   projectId: string;
 }
 
+export interface ReconfigureTaskGroupInput {
+  /** Omit to apply to every eligible pending child. */
+  taskIds?: string[];
+  agentType?: AgentType;
+  priority?: Priority;
+  timeoutMinutes?: number | null;
+}
+
 export interface ProjectTaskCounts {
   backlog: number;
   'in-progress': number;

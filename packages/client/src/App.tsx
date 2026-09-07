@@ -65,7 +65,7 @@ function BoardPage({
     defaultUseWorktree: project.defaultUseWorktree,
   };
   const { tasks, error, clearError, showArchived, setShowArchived, addTask, addTasksBatch, updateTask, moveTask, reorderBacklogTasks, runTask, stopTask, deleteTask, archiveTask, unarchiveTask, configureAndRunTask, createPR, mergeLocal, cleanupWorktree } = useTasks(project.id);
-  const { groups, createGroup, runGroup, stopGroup, deleteGroup, updateGroup, refreshGroup, reorderGroupChildren } = useTaskGroups(project.id);
+  const { groups, createGroup, runGroup, stopGroup, deleteGroup, updateGroup, refreshGroup, reorderGroupChildren, reconfigureGroup } = useTaskGroups(project.id);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [roadmapDialogOpen, setRoadmapDialogOpen] = useState(false);
   const [groupDialogOpen, setGroupDialogOpen] = useState(false);
@@ -514,6 +514,7 @@ function BoardPage({
         onSubmit={handleCreateGroup}
         editGroup={editingGroup}
         onEditSubmit={handleEditGroupSubmit}
+        onReconfigure={reconfigureGroup}
         lockedRepoPath={lockedRepoPath}
         projectDefaults={projectDefaults}
       />

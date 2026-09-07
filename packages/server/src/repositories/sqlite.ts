@@ -1,3 +1,4 @@
+import { isPendingGroupChild } from '@ai-agent-board/shared/constants.js';
 import Database from 'better-sqlite3';
 import type { Task, Priority, ColumnId, AgentStatus, AgentType, AgentEvent, TaskRelationship, ExecutionAttempt } from '../types.js';
 import type { TaskRepository, ContinuationEligibility } from './types.js';
@@ -235,6 +236,23 @@ export class SqliteTaskRepository implements TaskRepository {
       return (this.db.prepare(
         'SELECT * FROM tasks WHERE project_id = ? AND column_id = ? AND archived = 0 AND group_id IS NULL ORDER BY COALESCE(sort_order, created_at), created_at'
       ).all(projectId, columnId) as TaskRow[]).map(rowToTask);
+    })();
+  }
+
+  async reconfigureGroupChildren(groupId: string, taskIds: string[], updates: Pick<Partial<Task>, 'agentType' | 'priority' | 'timeoutMinutes'>): Promise<Task[]> {
+    return this.db.transaction(() => {
+      const children = taskIds.map(id => {
+        const row = this.db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as TaskRow | undefined;
+        const task = row && rowToTask(row);
+        if (!task || task.groupId !== groupId || !isPendingGroupChild(task)) throw new Error('Selected children are no longer pending');
+        return task;
+      });
+      return children.map(task => {
+        this.db.prepare('UPDATE tasks SET agent_type = ?, priority = ?, timeout_minutes = ? WHERE id = ?').run(
+          updates.agentType ?? task.agentType ?? 'copilot', updates.priority ?? task.priority,
+          updates.timeoutMinutes !== undefined ? updates.timeoutMinutes : task.timeoutMinutes ?? null, task.id);
+        return rowToTask(this.db.prepare('SELECT * FROM tasks WHERE id = ?').get(task.id) as TaskRow);
+      });
     })();
   }
 

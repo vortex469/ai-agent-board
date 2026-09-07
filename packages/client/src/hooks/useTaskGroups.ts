@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from 'react';
-import type { TaskGroup } from '@/types';
+import type { TaskGroup, ReconfigureTaskGroupInput } from '@/types';
 import { api, connectWS } from '@/lib/api';
 import type { TaskGroupWithChildren, CreateGroupChild } from '@/lib/api';
 import type { Priority, RoadmapExecutionMode } from '@/types';
@@ -146,6 +146,12 @@ export function useTaskGroups(projectId = 'default') {
     return result;
   }, []);
 
+  const reconfigureGroup = useCallback(async (id: string, updates: ReconfigureTaskGroupInput) => {
+    const result = await api.reconfigureGroup(id, updates);
+    setGroups((prev) => prev.map((group) => group.id === id ? result : group));
+    return result;
+  }, []);
+
   return {
     groups,
     error,
@@ -156,5 +162,6 @@ export function useTaskGroups(projectId = 'default') {
     updateGroup,
     refreshGroup,
     reorderGroupChildren,
+    reconfigureGroup,
   };
 }

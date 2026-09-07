@@ -1,7 +1,7 @@
 import { Pool } from 'pg';
 import type { Task, Priority, ColumnId, AgentStatus, AgentType, AgentEvent, TaskRelationship, ExecutionAttempt } from '../types.js';
 import type { TaskRepository, ContinuationEligibility } from './types.js';
-import { isValidPriority, isValidColumnId, isValidAgentStatus, isValidAgentType } from '@ai-agent-board/shared/constants.js';
+import { isPendingGroupChild, isValidPriority, isValidColumnId, isValidAgentStatus, isValidAgentType } from '@ai-agent-board/shared/constants.js';
 import { errorMessage } from '../utils.js';
 
 interface TaskRow {
@@ -214,6 +214,30 @@ export class PostgresTaskRepository implements TaskRepository {
     } finally {
       client.release();
     }
+  }
+
+  async reconfigureGroupChildren(groupId: string, taskIds: string[], updates: Pick<Partial<Task>, 'agentType' | 'priority' | 'timeoutMinutes'>): Promise<Task[]> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const { rows } = await client.query<TaskRow>('SELECT * FROM tasks WHERE id = ANY($1::text[]) ORDER BY id FOR UPDATE', [taskIds]);
+      const children = rows.map(rowToTask);
+      if (children.length !== taskIds.length || children.some(task => task.groupId !== groupId || !isPendingGroupChild(task))) {
+        throw new Error('Selected children are no longer pending');
+      }
+      const result: Task[] = [];
+      for (const task of children) {
+        const updated = await client.query<TaskRow>('UPDATE tasks SET agent_type = $1, priority = $2, timeout_minutes = $3 WHERE id = $4 RETURNING *', [
+          updates.agentType ?? task.agentType ?? 'copilot', updates.priority ?? task.priority,
+          updates.timeoutMinutes !== undefined ? updates.timeoutMinutes : task.timeoutMinutes ?? null, task.id]);
+        result.push(rowToTask(updated.rows[0]));
+      }
+      await client.query('COMMIT');
+      return result;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally { client.release(); }
   }
 
   async update(id: string, updates: Partial<Task>): Promise<Task | undefined> {
