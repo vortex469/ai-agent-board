@@ -112,9 +112,11 @@ if (importedStep) {
     git(['add', `src/synchronization-${step}.json`]);
     git(['commit', '-m', `Synchronization ${step} result`]);
     emitTestEvidence('npm test -- --synchronization', `Focused tests passed: ${step} verified synchronized baseline`);
-    process.stdout.write('<task-summary>\n## Completed\nFocused tests passed: synchronization baseline verified.\nHostile review passed: prerequisite ancestry checked.\n</task-summary>\n');
+    process.stdout.write(taskText.includes('Manual integration required')
+      ? '<task-summary>\n## Completed\nRepository changes prepared for manual integration.\n</task-summary>\n'
+      : '<task-summary>\n## Completed\nFocused tests passed: synchronization baseline verified.\nHostile review passed: prerequisite ancestry checked.\n</task-summary>\n');
     setTimeout(() => process.exit(0), 150);
-  }, prerequisite ? 150 : 2000);
+  }, prerequisite && !taskText.includes('Observe running transition') ? 150 : 2000);
 } else if (orderedStep) {
   const step = Number(orderedStep[1]);
   const baseline = git(['rev-parse', 'HEAD']);

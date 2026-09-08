@@ -62,8 +62,14 @@ export async function prepareOrderedGroupBaseline(task: Task, repo: TaskReposito
         && git(previous.worktreePath, 'status', '--porcelain', '--untracked-files=all')) {
         throw new Error(`Predecessor ${previous.title} has uncommitted changes`);
       }
-      const commit = git(task.repoPath, 'rev-parse', '--verify', `refs/heads/${previous.branchName}^{commit}`);
-      if (commit !== previous.repositoryBaseline.resultCommit) throw new Error(`Predecessor ${previous.title} has no matching recorded result commit`);
+      // Cleanup may delete an integrated predecessor branch. The persisted result
+      // remains the authority, but a surviving branch must still match it.
+      const commit = previous.repositoryBaseline.resultCommit;
+      if (!commit) throw new Error(`Predecessor ${previous.title} has no recorded result commit`);
+      let branchCommit: string | undefined;
+      try { branchCommit = git(task.repoPath, 'rev-parse', '--verify', `refs/heads/${previous.branchName}^{commit}`); }
+      catch { /* The integrated branch may have been cleaned up. */ }
+      if (branchCommit && branchCommit !== commit) throw new Error(`Predecessor ${previous.title} has no matching recorded result commit`);
       ancestor(task.repoPath, previous.repositoryBaseline.startCommit, commit);
       if (!git(task.repoPath, 'diff', '--name-only', previous.repositoryBaseline.startCommit, commit, '--')) {
         throw new Error(`Predecessor ${previous.title} has no committed repository changes`);

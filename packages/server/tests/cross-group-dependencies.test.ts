@@ -27,6 +27,37 @@ function fixture() {
   return { tasks, edges, make, repo };
 }
 
+test('eligible tasks queued at capacity start exactly once as execution slots are released', async () => {
+  const f = fixture();
+  const tasks = ['a', 'b', 'c', 'd'].map(id => f.make(id, { groupId: 'group' }));
+  const manager = new AgentManager(); manager.initEventPersistence(f.repo);
+  const started: string[] = [];
+  const callbacks = new Map<string, (status: Task['agentStatus']) => void | Promise<void>>();
+  Object.assign(manager, { startAgentChecked: (task: Task, callback: (status: Task['agentStatus']) => void | Promise<void>) => {
+    started.push(task.id); callbacks.set(task.id, callback);
+  } });
+  manager.startGroup({ id: 'group', maxConcurrency: 2 } as Parameters<AgentManager['startGroup']>[0], tasks,
+    task => status => { task.agentStatus = status; }, () => () => {}, () => {});
+  const settle = () => new Promise(resolve => setTimeout(resolve, 20));
+  await settle(); assert.deepEqual(started, ['a', 'b']);
+  for (let i = 0; i < 8; i++) manager.reevaluateGroupQueues();
+  await settle(); assert.deepEqual(started, ['a', 'b']);
+  await callbacks.get('a')!('complete'); await settle();
+  assert.deepEqual(started, ['a', 'b', 'c']);
+  await callbacks.get('b')!('failed'); await settle();
+  assert.deepEqual(started, ['a', 'b', 'c', 'd']);
+  for (const id of ['c', 'd']) await callbacks.get(id)!('complete');
+});
+
+test('retained prerequisite worktree never satisfies synchronization, even if its path is missing', async () => {
+  const f = fixture(); f.make('dependent');
+  f.make('a', { columnId: 'done', agentStatus: 'complete', worktreePath: path.join(process.cwd(), 'missing-retained-worktree') });
+  f.edges.set('dependent', ['a']);
+  const gate = await getTaskDependencyGate(f.repo, 'dependent');
+  assert.equal(gate.eligible, false);
+  assert.match(gate.reason!, /synchronization.*cleanup/);
+});
+
 for (const group of ['same', 'external']) test(`${group} group gate requires true successful completion and closes after reset`, async () => {
   const f = fixture();
   f.make('dependent', { groupId: 'same' });

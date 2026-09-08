@@ -675,6 +675,7 @@ export async function autoProgressCompletedTask(
   if (!done) return undefined;
 
   broadcastTaskUpdate(done);
+  console.log(`[scheduler] repository synchronization completed: ${done.id} into ${mergeResult.baseBranch}`);
   await emitTaskLifecycleEvent(
     repo,
     done,
@@ -1154,14 +1155,18 @@ export async function startAgentForTask(
   onSettled?: () => Promise<void>,
   orderedLockHeld = false,
   resetEventHistory = false,
+  automatic = false,
+  canStart?: () => Promise<boolean>,
 ): Promise<void> {
   if (task.groupId && !orderedLockHeld) {
     return withOrderedGroupLock(task.groupId, async () => {
       const current = await repo.getById(task.id);
-      if (current) await startAgentForTask(current, repo, agentManager, projectRepo, onSettled, true, resetEventHistory);
+      if (current) await startAgentForTask(current, repo, agentManager, projectRepo, onSettled, true, resetEventHistory, automatic, canStart);
     });
   }
   await withDependencyAdmissionLock(async () => {
+    if (automatic && (!projectRepo || !await isProjectAutoRunEnabled(projectRepo, task.projectId))) return;
+    if (canStart && !await canStart()) return;
     if (!await taskPrerequisitesAreDone(repo, task.id)) return;
     try { await prepareOrderedGroupBaseline(task, repo); }
     catch (error) {
@@ -1186,6 +1191,7 @@ export async function startAgentForTask(
     if (updated) {
       broadcastTaskUpdate(updated);
       const onStatusChange = makeStatusCallback(repo, task.id, agentManager, updated, projectRepo);
+      console.log(`[scheduler] task start dispatched: ${task.id}`);
       agentManager.startAgent(
         updated,
         async (status) => {
@@ -1234,7 +1240,7 @@ export async function startNextEligibleProjectAutoRunTask(
       return undefined;
     }
 
-    await startAgentForTask(task, repo, agentManager, projectRepo);
+    await startAgentForTask(task, repo, agentManager, projectRepo, undefined, false, false, true);
     return repo.getById(task.id);
   }
 

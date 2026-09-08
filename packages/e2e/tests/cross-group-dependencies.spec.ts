@@ -1,6 +1,53 @@
 import { test, expect } from '@playwright/test';
 import { API, waitForBoard, prepareTestRepo, cleanupTestPath, git } from './helpers';
 
+test('manual integration resumes first-card Auto Run and refreshes roadmap state over WebSocket', async ({ page, request }) => {
+  test.setTimeout(60_000);
+  const repoPath = prepareTestRepo(`merge-wakeup-${Date.now()}`, { clean: true });
+  let projectId: string | undefined;
+  let groupId: string | undefined;
+  try {
+    const project = await request.post(`${API}/api/projects`, { data: {
+      name: `Merge wakeup ${Date.now()}`, repoPath, defaultAgentType: 'local-openai',
+      defaultBaseBranch: 'main', defaultUseWorktree: true, autoRunEnabled: true,
+    } });
+    expect(project.status()).toBe(201); projectId = (await project.json()).id;
+    const response = await request.post(`${API}/api/groups`, { data: {
+      projectId, title: 'Integration wakeup roadmap', repoPath, baseBranch: 'main',
+      roadmapExecutionMode: 'first-card',
+      children: [
+        { title: 'E2E Synchronization A1 Manual integration required', agentType: 'local-openai', useWorktree: true },
+        { title: 'E2E Synchronization A2 Observe running transition', agentType: 'local-openai', useWorktree: true },
+      ],
+    } });
+    expect(response.status()).toBe(201); const group = await response.json(); groupId = group.id;
+    // Disable browser scheduling: this test must prove the server owns progression.
+    await page.route('**/api/projects/*/auto-run/tick', route => route.fulfill({
+      status: 200, contentType: 'application/json', body: JSON.stringify({ started: false, reason: 'test-server-scheduling' }),
+    }));
+    await page.goto(`/projects/${projectId}`); await waitForBoard(page);
+    const children = async () => (await (await request.get(`${API}/api/groups/${groupId}`)).json()).children;
+    await expect.poll(async () => (await children())[0].columnId, { timeout: 20_000 }).toBe('review');
+    expect((await children())[1].worktreePath).toBeFalsy();
+    await expect(page.getByLabel('Current running card')).toHaveText('None');
+    await expect(page.getByLabel('Next eligible card')).toHaveText('None');
+    const merge = await request.post(`${API}/api/tasks/${group.children[0].id}/merge-local`);
+    expect(merge.ok()).toBeTruthy();
+    await expect(page.getByLabel('Current running card')).toHaveText('Integration wakeup roadmap');
+    await expect.poll(async () => (await children()).every((child: any) => child.columnId === 'done'), { timeout: 20_000 }).toBe(true);
+    await expect(page.getByLabel('Completed cards', { exact: true })).toHaveText('1');
+    await expect(page.getByLabel('Current running card')).toHaveText('None');
+    await expect(page.getByLabel('Next eligible card')).toHaveText('None');
+    const firstCommit = git(['log', '-1', '--format=%H', '--', 'src/synchronization-A1.json'], repoPath).trim();
+    const successor = JSON.parse(git(['show', 'main:src/synchronization-A2.json'], repoPath));
+    git(['merge-base', '--is-ancestor', firstCommit, successor.baseline], repoPath);
+  } finally {
+    if (groupId) await request.delete(`${API}/api/groups/${groupId}`);
+    if (projectId) await request.delete(`${API}/api/projects/${projectId}`);
+    cleanupTestPath(repoPath);
+  }
+});
+
 for (const viewport of [{ width: 1440, height: 1000 }, { width: 768, height: 1024 }, { width: 390, height: 844 }]) {
   test.describe(`Cross-group editor ${viewport.width}px`, () => {
     test.use({ viewport });

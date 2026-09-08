@@ -36,13 +36,19 @@ async function fixture() {
   const started: Task[] = [];
   Object.assign(manager, { getAvailableAgents: () => [{ name: 'hermes', available: true }], startAgent: (task: Task) => { task.worktreePath = manager.setupWorktree(task); started.push(task); } });
   async function start() { await startOrderedGroupChild('chain', groups, repo, manager); return started.at(-1)!; }
-  async function finish(task: Task, merge = true) {
+  async function finish(task: Task, merge = true, retainWorktree = false) {
     fs.writeFileSync(path.join(task.worktreePath!, task.id), task.id);
     git(task.worktreePath!, 'add', task.id); git(task.worktreePath!, 'commit', '-m', task.id);
     await repo.update(task.id, { worktreePath: task.worktreePath });
     await recordOrderedGroupResult((await repo.getById(task.id))!, repo);
     const commit = git(root, 'rev-parse', task.branchName!);
-    if (merge) git(root, 'merge', '--ff-only', task.branchName!);
+    if (merge) {
+      git(root, 'merge', '--ff-only', task.branchName!);
+      if (!retainWorktree) {
+        assert.notEqual(manager.removeWorktree(task).status, 'blocked');
+        await repo.update(task.id, { worktreePath: undefined });
+      }
+    }
     await repo.update(task.id, { columnId: 'done', agentStatus: 'complete' });
     return commit;
   }
@@ -75,7 +81,7 @@ for (const state of ['failed', 'review', 'uncommitted', 'empty', 'stale-main', '
     try {
       const p1 = await f.start(); const c1 = await f.finish(p1);
       const p2 = await f.start();
-      if (state !== 'empty') await f.finish(p2, state !== 'stale-main');
+      if (state !== 'empty') await f.finish(p2, state !== 'stale-main', state === 'uncommitted' || state === 'changed-result');
       else await f.repo.update(p2.id, { columnId: 'done', agentStatus: 'complete' });
       if (state === 'failed') await f.repo.update(p2.id, { agentStatus: 'failed' });
       if (state === 'review') await f.repo.update(p2.id, { columnId: 'review' });
@@ -120,5 +126,37 @@ test('ordered successor pins current integrated base including changes beyond it
     assert.equal(p2.repositoryBaseline?.predecessorCommit, predecessorCommit);
     assert.equal(p2.repositoryBaseline?.startCommit, integratedBase);
     assert.equal(git(p2.worktreePath!, 'rev-parse', 'HEAD'), integratedBase);
+  } finally { f.close(); }
+});
+
+test('successor uses the recorded integrated result after predecessor worktree and branch cleanup', async () => {
+  const f = await fixture();
+  try {
+    const p1 = await f.start();
+    const resultCommit = await f.finish(p1);
+    git(f.root, 'branch', '-d', p1.branchName!);
+    await f.repo.update(p1.id, { worktreePath: undefined });
+    const p2 = await f.start();
+    assert.equal(f.started.length, 2);
+    assert.equal(p2.id, 'p2');
+    assert.equal(p2.repositoryBaseline?.predecessorCommit, resultCommit);
+    assert.equal(git(p2.worktreePath!, 'rev-parse', 'HEAD'), resultCommit);
+    assert.equal(fs.readFileSync(path.join(p2.worktreePath!, 'p1'), 'utf8'), 'p1');
+  } finally { f.close(); }
+});
+
+test('deleted predecessor branch cannot bypass integration into the required base', async () => {
+  const f = await fixture();
+  try {
+    const p1 = await f.start();
+    await f.finish(p1, false);
+    git(f.root, 'worktree', 'remove', p1.worktreePath!);
+    git(f.root, 'branch', '-D', p1.branchName!);
+    await f.repo.update(p1.id, { worktreePath: undefined });
+    const p2 = (await f.repo.getById('p2'))!;
+    await assert.rejects(prepareOrderedGroupBaseline(p2, f.repo), /not contained/);
+    await f.start();
+    assert.equal(f.started.length, 1);
+    assert.throws(() => git(f.root, 'show-ref', '--verify', 'refs/heads/chain/p2'));
   } finally { f.close(); }
 });

@@ -339,6 +339,7 @@ interface GroupQueue {
   maxConcurrency: number;
   pendingTaskIds: string[];
   runningTaskIds: Set<string>;
+  concurrencyDeferredTaskIds: Set<string>;
   completedTaskIds: Set<string>;
   failedTaskIds: Set<string>;
   tasks: Map<string, Task>;
@@ -1574,6 +1575,7 @@ export class AgentManager {
       maxConcurrency: group.maxConcurrency,
       pendingTaskIds: children.map((c) => c.id),
       runningTaskIds: new Set(),
+      concurrencyDeferredTaskIds: new Set(),
       completedTaskIds: new Set(),
       failedTaskIds: new Set(),
       tasks: new Map(children.map((c) => [c.id, c])),
@@ -1613,8 +1615,15 @@ export class AgentManager {
       const q = this.groupQueues.get(groupId);
       if (!q || this.pausedGroupAdmissions.has(groupId)) return;
       for (const taskId of [...q.pendingTaskIds]) {
-        if (this.groupQueues.get(groupId) !== q || this.pausedGroupAdmissions.has(groupId)
-          || q.runningTaskIds.size >= q.maxConcurrency) break;
+        if (this.groupQueues.get(groupId) !== q || this.pausedGroupAdmissions.has(groupId)) break;
+        if (q.runningTaskIds.size >= q.maxConcurrency) {
+          if (!q.concurrencyDeferredTaskIds.has(taskId)
+            && (!this.eventRepo || (await getTaskDependencyGate(this.eventRepo, taskId)).eligible)) {
+            q.concurrencyDeferredTaskIds.add(taskId);
+            console.log(`[scheduler] task deferred due to concurrency: ${taskId} (group ${groupId}, limit ${q.maxConcurrency})`);
+          }
+          continue;
+        }
         await withDependencyAdmissionLock(async () => {
           const task = this.eventRepo ? await this.eventRepo.getById(taskId) : q.tasks.get(taskId);
           if (!task || this.sessions.has(taskId)) return;
@@ -1623,6 +1632,7 @@ export class AgentManager {
             || !q.pendingTaskIds.includes(taskId) || q.runningTaskIds.size >= q.maxConcurrency) return;
           // Leave blocked tasks pending: an external completion will wake this queue.
           q.pendingTaskIds = q.pendingTaskIds.filter(id => id !== taskId);
+          q.concurrencyDeferredTaskIds.delete(taskId);
           q.runningTaskIds.add(taskId);
           const originalStatusCb = q.makeStatusCallback(task);
           const wrappedStatusCb = async (status: Task['agentStatus']) => {
@@ -1635,6 +1645,7 @@ export class AgentManager {
               this.reevaluateGroupQueues();
             }
           };
+          console.log(`[scheduler] task start dispatched: ${taskId} (group ${groupId})`);
           this.startAgentChecked(task, wrappedStatusCb, q.makeWorktreeCallback(task));
         });
       }

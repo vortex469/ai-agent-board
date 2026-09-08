@@ -9,6 +9,8 @@ import { installDependencyScheduler } from '../src/services/dependency-scheduler
 import { broadcastTaskUpdate } from '../src/routes/helpers.js';
 import { startOrderedGroupChild } from '../src/services/ordered-group.js';
 import { tickProjectAutoRun } from '../src/routes/projects.js';
+import { broadcast } from '../src/websocket.js';
+import { withDependencyAdmissionLock } from '../src/services/task-dependencies.js';
 
 function fixture() {
   const children = ['a1', 'a2', 'b1', 'b2'].map((id, index) => ({ id, title: id, projectId: 'p', groupId: id[0],
@@ -125,4 +127,75 @@ test('imported task Auto Run false pauses automatic admission but permits explic
   f.children[1].provenance = { origin: { roadmapAutoRun: false } };
   await startOrderedGroupChild('a', f.groupRepo, f.repo, f.manager, true, f.projects);
   assert.deepEqual(f.started, ['a1']);
+});
+
+for (const mode of ['backlog', 'first-card'] as const) test(`${mode} active group continues after merge without a successor Run request`, async () => {
+  const f = fixture(); f.groups[1].archived = true; f.groups[0].roadmapExecutionMode = mode;
+  Object.assign(f.children[0], { columnId: 'review', agentStatus: 'complete' });
+  const stop = installDependencyScheduler(f.repo, f.groupRepo, f.projects, f.manager);
+  try {
+    await settle(); assert.deepEqual(f.started, []);
+    assert.equal(f.children[1].runRequestedAt, undefined);
+    f.children[0].columnId = 'done';
+    for (let i = 0; i < 10; i++) {
+      broadcastTaskUpdate(f.children[0]);
+      broadcast({ type: 'group_updated', payload: f.groups[0] });
+    }
+    await settle(); assert.deepEqual(f.started, ['a2']);
+  } finally { stop(); }
+});
+
+test('stopped active group is not resumed by integration broadcasts', async () => {
+  const f = fixture(); f.groups[1].archived = true; f.groups[0].completedAt = 1;
+  Object.assign(f.children[0], { columnId: 'done', agentStatus: 'complete' });
+  const stop = installDependencyScheduler(f.repo, f.groupRepo, f.projects, f.manager);
+  try { broadcastTaskUpdate(f.children[0]); await settle(); assert.deepEqual(f.started, []); }
+  finally { stop(); }
+});
+
+test('Auto Run is rechecked after waiting for the admission lock', async () => {
+  const f = fixture();
+  let release!: () => void;
+  const barrier = new Promise<void>(resolve => { release = resolve; });
+  const held = withDependencyAdmissionLock(() => barrier);
+  const start = startOrderedGroupChild('a', f.groupRepo, f.repo, f.manager, true, f.projects, undefined, true);
+  await settle(); f.project.autoRunEnabled = false; release();
+  await Promise.all([held, start]);
+  assert.deepEqual(f.started, []);
+});
+
+test('one broken group does not starve an independent eligible group', async () => {
+  const f = fixture(); const getChildren = f.groupRepo.getChildTasks;
+  f.groupRepo.getChildTasks = async id => { if (id === 'a') throw new Error('repository unavailable'); return getChildren(id); };
+  const stop = installDependencyScheduler(f.repo, f.groupRepo, f.projects, f.manager);
+  try { await settle(); assert.deepEqual(f.started, ['b1']); } finally { stop(); }
+});
+
+test('group stop persisted while admission waits prevents successor reservation', async () => {
+  const f = fixture();
+  let release!: () => void;
+  const barrier = new Promise<void>(resolve => { release = resolve; });
+  const held = withDependencyAdmissionLock(async () => { await barrier; f.groups[0].completedAt = Date.now(); });
+  const start = startOrderedGroupChild('a', f.groupRepo, f.repo, f.manager, true, f.projects, undefined, true);
+  await settle(); release(); await Promise.all([held, start]);
+  assert.deepEqual(f.started, []);
+  assert.equal(f.children[0].runClaimedAt, undefined);
+});
+
+test('manual Run can resume a previously stopped group with Auto Run OFF', async () => {
+  const f = fixture(); f.project.autoRunEnabled = false; f.groups[0].completedAt = 1;
+  await startOrderedGroupChild('a', f.groupRepo, f.repo, f.manager, false, f.projects, 'a1');
+  assert.deepEqual(f.started, ['a1']);
+  assert.equal(f.groups[0].completedAt, undefined);
+});
+
+test('post-dispatch group bookkeeping cannot clear a newer stop token', async () => {
+  const f = fixture(); let stopped: Promise<void> | undefined;
+  f.manager.startAgent = task => {
+    f.started.push(task.id);
+    stopped = withDependencyAdmissionLock(async () => { f.groups[0].completedAt = 123; });
+  };
+  await startOrderedGroupChild('a', f.groupRepo, f.repo, f.manager, true, f.projects, undefined, true);
+  await stopped;
+  assert.equal(f.groups[0].completedAt, 123);
 });

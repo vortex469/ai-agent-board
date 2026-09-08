@@ -222,6 +222,7 @@ export function createGitRouter(repo: TaskRepository, agentManager: AgentManager
         return;
       }
       broadcastTaskUpdate(updated);
+      if (!updated.worktreePath) console.log(`[scheduler] repository synchronization completed: ${id} into ${result.baseBranch}`);
       await triggerAutomaticDependentProgression(repo, updated, agentManager, projectRepo);
       res.json(result);
     } catch (err: unknown) {

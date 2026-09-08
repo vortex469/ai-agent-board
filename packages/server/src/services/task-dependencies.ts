@@ -14,13 +14,10 @@ function git(cwd: string, ...args: string[]): string {
 function integrationReason(task: Task, prerequisite: Task): string | undefined {
   // Sessions without worktree isolation are explicitly read-only in the runtime.
   if (!prerequisite.useWorktree && !prerequisite.worktreePath && !prerequisite.repositoryBaseline) return;
+  if (prerequisite.worktreePath) return 'Waiting for dependency synchronization: prerequisite worktree cleanup is pending or blocked';
   try {
     if (!task.repoPath || !prerequisite.repoPath || fs.realpathSync(task.repoPath) !== fs.realpathSync(prerequisite.repoPath)) {
       return 'Prerequisite repository integration cannot be verified for this project';
-    }
-    if (prerequisite.worktreePath && fs.existsSync(prerequisite.worktreePath)
-      && git(prerequisite.worktreePath, 'status', '--porcelain', '--untracked-files=all')) {
-      return 'Prerequisite has uncommitted repository changes';
     }
     const result = prerequisite.repositoryBaseline?.resultCommit
       ?? (prerequisite.branchName ? git(task.repoPath, 'rev-parse', '--verify', `refs/heads/${prerequisite.branchName}^{commit}`) : undefined);

@@ -497,10 +497,14 @@ export function createGroupsRouter(
     const group = await groupRepo.getById(id);
     if (!group) { res.status(404).json({ error: 'group not found' }); return; }
 
+    // Persist stop intent under the same lock used for admission. A queued
+    // scheduler pass must observe this before reserving another child.
+    await withDependencyAdmissionLock(() => groupRepo.update(id, { completedAt: Date.now() }));
+
     await agentManager.stopGroup(id);
     if (group.roadmapExecutionMode) {
       for (const child of await groupRepo.getChildTasks(id)) {
-        if (agentManager.isRunning(child.id)) await agentManager.stopAgent(child.id);
+        if (agentManager.isRunning(child.id) || child.agentStatus === 'planning' || child.agentStatus === 'executing') await agentManager.stopAgent(child.id);
       }
     }
 
