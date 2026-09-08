@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { createGitRouter } from '../src/routes/git.js';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -88,6 +89,13 @@ async function fixture(mode: NonNullable<TaskGroup['roadmapExecutionMode']> = 'b
     return git(root, 'rev-parse', 'main');
   }
   return { root, repo, groups, projects, manager, started, updates, ids, complete, integrate,
+    async persistedGate() {
+      const filename = path.join(temporaryRoot, 'restart.db');
+      await db.backup(filename);
+      const restarted = new Database(filename);
+      try { return await getTaskDependencyGate(new SqliteTaskRepository(restarted), 'a2'); }
+      finally { restarted.close(); }
+    },
     stopScheduler() { stop(); },
     restartScheduler() { stop(); stop = installDependencyScheduler(repo, groups, projects, manager); },
     async close() { stop(); unsubscribe(); await settle(); db.close(); if (oldTmp === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = oldTmp; fs.rmSync(temporaryRoot, { recursive: true, force: true }); } };
@@ -399,6 +407,77 @@ for (const scenario of ['not-integrated', 'reset-to-main', 'extra-integrated'] a
     assert.ok(result.reason);
     assert.equal((await f.repo.getById('a1'))!.repositoryBaseline!.resultCommit, task.repositoryBaseline!.resultCommit);
     assert.equal((await getTaskDependencyGate(f.repo, 'a2')).eligible, false);
+    assert.deepEqual(f.ids(), ['a1']);
+  } finally { await f.close(); }
+});
+
+for (const laterMain of [false, true]) for (const autoRun of [false, true]) {
+  test(`merge-local reconciles rebased completion before returning (later main: ${laterMain}, Auto Run: ${autoRun})`, async () => {
+    const f = await fixture('full-roadmap', false, autoRun);
+    try {
+      if (!autoRun) await startOrderedGroupChild('a', f.groups, f.repo, f.manager, false, f.projects, 'a1');
+      await until(() => f.started.length === 1);
+      const task = await failedMerge(f);
+      f.stopScheduler(); // The route must repair evidence without a later scheduler scan.
+      const repaired = repairAndFastForward(f, task, true);
+      const original = task.repositoryBaseline!.resultCommit;
+      assert.notEqual(repaired, original);
+      if (laterMain) {
+        fs.writeFileSync(path.join(f.root, 'later'), 'later main work');
+        git(f.root, 'add', 'later'); git(f.root, 'commit', '-m', 'Advance main');
+      }
+      const main = git(f.root, 'rev-parse', 'main');
+      const router = createGitRouter(f.repo, f.manager, f.projects);
+      const layer = router.stack.find(entry => entry.route?.path === '/:id/merge-local');
+      assert.ok(layer);
+      let status = 200;
+      const body = await new Promise<unknown>((resolve, reject) => {
+        const response = { status(code: number) { status = code; return this; }, json: resolve };
+        layer.route.stack[0].handle({ params: { id: 'a1' } }, response, reject);
+      });
+      assert.equal(status, 200, JSON.stringify(body));
+      const reconciled = (await f.repo.getById('a1'))!;
+      assert.equal(reconciled.repositoryBaseline!.resultCommit, repaired);
+      assert.equal(reconciled.repositoryBaseline!.originalResultCommit, original);
+      assert.equal(reconciled.worktreePath, undefined);
+      assert.equal((await getTaskDependencyGate(f.repo, 'a2')).eligible, true, 'Next Eligible accepts reconciled evidence');
+      assert.equal((await f.persistedGate()).eligible, true, 'fresh database connection retains reconciliation');
+      f.restartScheduler();
+      if (autoRun) {
+        await until(() => f.started.length === 2);
+        assert.deepEqual(f.ids(), ['a1', 'a2']);
+        assert.equal(git(f.started[1].worktreePath!, 'rev-parse', 'HEAD'), main);
+      } else {
+        await new Promise(resolve => setTimeout(resolve, 150));
+        assert.deepEqual(f.ids(), ['a1']);
+        assert.equal((await f.projects.getById('default'))!.autoRunEnabled, false);
+      }
+    } finally {
+      await f.close();
+    }
+  });
+}
+
+for (const repaired of [false, true]) test(`missing prerequisite branch stays blocked (rebased: ${repaired})`, async () => {
+  const f = await fixture('full-roadmap');
+  try {
+    await until(() => f.started.length === 1);
+    const task = await failedMerge(f);
+    f.stopScheduler();
+    if (repaired) repairAndFastForward(f, task, true);
+    else {
+      assert.throws(() => git(f.root, 'merge', '--no-edit', task.branchName!));
+      fs.writeFileSync(path.join(f.root, 'base'), 'resolved');
+      git(f.root, 'add', 'base'); git(f.root, 'commit', '-m', 'Resolve merge');
+    }
+    git(f.root, 'worktree', 'remove', task.worktreePath!);
+    git(f.root, 'branch', '-D', task.branchName!);
+    await f.repo.update('a1', { columnId: 'done', worktreePath: undefined });
+    const result = await reconcileTaskIntegration(f.repo, 'a1', f.manager);
+    assert.equal(result.synchronized, false);
+    assert.match(result.reason!, /branch is missing/);
+    assert.equal((await getTaskDependencyGate(f.repo, 'a2')).eligible, false);
+    assert.equal((await f.repo.getById('a1'))!.repositoryBaseline!.resultCommit, task.repositoryBaseline!.resultCommit);
     assert.deepEqual(f.ids(), ['a1']);
   } finally { await f.close(); }
 });

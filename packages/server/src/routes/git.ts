@@ -268,10 +268,17 @@ export function createGitRouter(repo: TaskRepository, agentManager: AgentManager
         }
       }
 
-      const updated = await repo.update(id, updates);
+      let updated = await repo.update(id, updates);
       if (!updated) {
         res.status(500).json({ error: 'merge succeeded but failed to update task state' });
         return;
+      }
+      // A manual rebase can change the completed result before this merge.
+      // Persist the validated replacement before notifying dependency admission;
+      // a successful merge alone does not prove the rewritten task's lineage.
+      if (updated.groupId && updated.repositoryBaseline?.resultCommit && updated.agentStatus === 'complete') {
+        await reconcileTaskIntegration(repo, id, agentManager);
+        updated = (await repo.getById(id)) ?? updated;
       }
       broadcastTaskUpdate(updated);
       if (!updated.worktreePath) console.log(`[scheduler] repository synchronization completed: ${id} into ${result.baseBranch}`);

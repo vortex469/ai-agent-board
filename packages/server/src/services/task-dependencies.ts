@@ -24,7 +24,8 @@ function integrationReason(task: Task, prerequisite: Task): string | undefined {
     if (!result) return 'Prerequisite has no verifiable repository result';
     if (prerequisite.repositoryBaseline?.resultCommit && prerequisite.branchName) {
       let branchCommit: string | undefined;
-      try { branchCommit = git(task.repoPath, 'rev-parse', '--verify', `refs/heads/${prerequisite.branchName}^{commit}`); } catch { /* integrated branch may be cleaned */ }
+      try { branchCommit = git(task.repoPath, 'rev-parse', '--verify', `refs/heads/${prerequisite.branchName}^{commit}`); }
+      catch { return 'Prerequisite branch is missing; current repository integration cannot be verified'; }
       if (branchCommit && branchCommit !== result) return 'Prerequisite branch changed after its recorded completion';
     }
     git(task.repoPath, 'merge-base', '--is-ancestor', result, `refs/heads/${task.baseBranch || 'main'}`);

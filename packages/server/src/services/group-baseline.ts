@@ -62,13 +62,13 @@ export async function prepareOrderedGroupBaseline(task: Task, repo: TaskReposito
         && git(previous.worktreePath, 'status', '--porcelain', '--untracked-files=all')) {
         throw new Error(`Predecessor ${previous.title} has uncommitted changes`);
       }
-      // Cleanup may delete an integrated predecessor branch. The persisted result
-      // remains the authority, but a surviving branch must still match it.
+      // Require the current branch as well as persisted evidence: a missing
+      // branch cannot prove that the recorded completion is still current.
       const commit = previous.repositoryBaseline.resultCommit;
       if (!commit) throw new Error(`Predecessor ${previous.title} has no recorded result commit`);
       let branchCommit: string | undefined;
       try { branchCommit = git(task.repoPath, 'rev-parse', '--verify', `refs/heads/${previous.branchName}^{commit}`); }
-      catch { /* The integrated branch may have been cleaned up. */ }
+      catch { throw new Error(`Predecessor ${previous.title} branch is missing`); }
       if (branchCommit && branchCommit !== commit) throw new Error(`Predecessor ${previous.title} has no matching recorded result commit`);
       ancestor(task.repoPath, previous.repositoryBaseline.startCommit, commit);
       if (!git(task.repoPath, 'diff', '--name-only', previous.repositoryBaseline.startCommit, commit, '--')) {

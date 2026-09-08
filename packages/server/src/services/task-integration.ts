@@ -95,8 +95,7 @@ function inspect(task: Task): { head: string; baseHead: string } {
   let head: string;
   try { head = git(cwd, 'rev-parse', '--verify', `refs/heads/${task.branchName}^{commit}`); }
   catch {
-    // A deleted branch is safe only for the exact recorded result, never a rewrite.
-    head = task.repositoryBaseline.resultCommit;
+    throw new Error('Prerequisite branch is missing; current repository integration cannot be verified');
   }
   requireClean(cwd);
   for (const worktree of listRegisteredWorktrees(cwd)) {

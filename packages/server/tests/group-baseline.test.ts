@@ -129,19 +129,18 @@ test('ordered successor pins current integrated base including changes beyond it
   } finally { f.close(); }
 });
 
-test('successor uses the recorded integrated result after predecessor worktree and branch cleanup', async () => {
+test('successor remains blocked when an integrated predecessor branch is missing', async () => {
   const f = await fixture();
   try {
     const p1 = await f.start();
-    const resultCommit = await f.finish(p1);
+    await f.finish(p1);
     git(f.root, 'branch', '-d', p1.branchName!);
     await f.repo.update(p1.id, { worktreePath: undefined });
-    const p2 = await f.start();
-    assert.equal(f.started.length, 2);
-    assert.equal(p2.id, 'p2');
-    assert.equal(p2.repositoryBaseline?.predecessorCommit, resultCommit);
-    assert.equal(git(p2.worktreePath!, 'rev-parse', 'HEAD'), resultCommit);
-    assert.equal(fs.readFileSync(path.join(p2.worktreePath!, 'p1'), 'utf8'), 'p1');
+    const p2 = (await f.repo.getById('p2'))!;
+    await assert.rejects(prepareOrderedGroupBaseline(p2, f.repo), /branch is missing/);
+    await f.start();
+    assert.equal(f.started.length, 1);
+    assert.throws(() => git(f.root, 'show-ref', '--verify', 'refs/heads/chain/p2'));
   } finally { f.close(); }
 });
 
@@ -154,7 +153,7 @@ test('deleted predecessor branch cannot bypass integration into the required bas
     git(f.root, 'branch', '-D', p1.branchName!);
     await f.repo.update(p1.id, { worktreePath: undefined });
     const p2 = (await f.repo.getById('p2'))!;
-    await assert.rejects(prepareOrderedGroupBaseline(p2, f.repo), /not contained/);
+    await assert.rejects(prepareOrderedGroupBaseline(p2, f.repo), /branch is missing/);
     await f.start();
     assert.equal(f.started.length, 1);
     assert.throws(() => git(f.root, 'show-ref', '--verify', 'refs/heads/chain/p2'));
