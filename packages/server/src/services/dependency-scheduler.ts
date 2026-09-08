@@ -6,6 +6,7 @@ import type { AgentManager } from './agent-manager.js';
 import { startOrderedGroupChild } from './ordered-group.js';
 import { observeBroadcasts } from '../websocket.js';
 import { getTaskDependencyGate } from './task-dependencies.js';
+import { reconcileTaskIntegration } from './task-integration.js';
 
 /** Coalesce persisted lifecycle notifications. Never depend on a browser to resume gates. */
 export function installDependencyScheduler(tasks: TaskRepository, groups: TaskGroupRepository,
@@ -27,8 +28,21 @@ export function installDependencyScheduler(tasks: TaskRepository, groups: TaskGr
     running = true;
     dirty = false;
     try {
-      manager.reevaluateGroupQueues();
       for (const project of await projects.getAllWithCounts()) {
+        // Reconcile before admission, including when Auto Run is off. Git may
+        // have changed without a Workbench merge event or a connected browser.
+        for (const group of await groups.getAll(false, project.id)) {
+          try {
+            for (const task of await groups.getChildTasks(group.id)) {
+              if (disposed) return;
+              if (task.agentStatus === 'complete' && task.repositoryBaseline?.resultCommit
+                && (task.columnId === 'review' || task.columnId === 'done')) {
+                await reconcileTaskIntegration(tasks, task.id, manager, true);
+              }
+            }
+          } catch (error) { console.error(`[integration] group ${group.id} reconciliation failed:`, error); }
+        }
+        manager.reevaluateGroupQueues();
         if (!project.autoRunEnabled) continue;
         for (const group of await groups.getAll(false, project.id)) {
           if (disposed) return;
@@ -58,5 +72,7 @@ export function installDependencyScheduler(tasks: TaskRepository, groups: TaskGr
     if (['task_updated', 'task_deleted', 'group_updated', 'group_deleted', 'project_updated', 'agent_complete'].includes(message.type)) schedule(message.type);
   });
   schedule();
-  return () => { disposed = true; unsubscribe(); if (timer) clearTimeout(timer); };
+  const poll = setInterval(() => schedule('external Git refresh'), 10_000);
+  poll.unref();
+  return () => { disposed = true; unsubscribe(); clearInterval(poll); if (timer) clearTimeout(timer); };
 }

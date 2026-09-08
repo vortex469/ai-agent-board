@@ -55,6 +55,10 @@ Use **Edit dependencies** on a grouped task to select prerequisite tasks from th
 
 A dependent task waits without reserving execution or creating a worktree until every prerequisite is successfully Done. Coding prerequisites must also have their repository results integrated into the dependent's configured base; existing stale branches or pinned baselines remain blocked for explicit recovery. Read-only prerequisites require successful completion but no Git integration. Auto Run reevaluates waiting groups on server lifecycle changes, and the UI updates over WebSocket. Reopening a prerequisite closes the gate for pending tasks and warns already-running dependents. Deleting a prerequisite retains its missing ID until the dependency is explicitly removed.
 
+If an ordered grouped task completes but its automatic merge fails, you can resolve the integration externally and use **Recheck integration**. The server also rechecks on startup, lifecycle updates, and every 10 seconds. It verifies the recorded result against the expected base's Git ancestry, safely cleans the managed worktree, and moves the task to Done. Eligible same-group and cross-group dependents resume when Auto Run is enabled; their worktrees start from the updated base. Rechecking does not rerun the agent, create commits, or push.
+
+Conflict-resolution merges must join the exact task result to a recorded base commit. Rebased results require an exact rebase reflog from the recorded result and a complete linear replay preserving commit author and message metadata. Missing reflogs, squashed/dropped commits, additional task commits, dirty worktrees, unresolved Git operations, and stale dependent baselines remain blocked with an explanation. File-content equality alone is not integration evidence. A task held in Review for validation cannot bypass that review through reconciliation.
+
 ### Import multiple roadmap groups
 
 Open **Roadmap Intake**, select the multi-group creation mode, and paste explicit group declarations with numbered tasks:

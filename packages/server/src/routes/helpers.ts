@@ -783,6 +783,13 @@ export async function reconcileInterruptedTaskCompletion(
   agentManager: AgentManager,
   projectRepo?: ProjectRepository,
 ): Promise<Task | undefined> {
+  // Completed ordered results have stronger lineage requirements than the
+  // interrupted-session heuristic below (especially after operator rebases).
+  if (task.groupId && task.agentStatus === 'complete' && task.repositoryBaseline?.resultCommit) {
+    const { reconcileTaskIntegration } = await import('../services/task-integration.js');
+    const result = await reconcileTaskIntegration(repo, task.id, agentManager);
+    return result.synchronized ? repo.getById(task.id) : undefined;
+  }
   if (task.archived || task.columnId === 'done' || !task.repoPath || !task.branchName) return undefined;
   if (!['planning', 'executing', 'complete', 'failed'].includes(task.agentStatus) && task.columnId !== 'review') {
     return undefined;

@@ -28,6 +28,7 @@ import {
 import type { Task, AgentEvent, AgentEventType, RepositoryEvidence, ContextBudgetSnapshot } from '@/types';
 import { getAgentDisplay } from '@/lib/agent-config';
 import { TerminalView } from './TerminalView';
+import { IntegrationStatus } from './IntegrationStatus';
 import { api, connectWS } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
@@ -668,6 +669,7 @@ export function AgentPanel({ task, onClose, onRun, onStop, onCreatePR, onMergeLo
       setMergeReady(info.mergeReady ?? true);
       setMergeBlockedReason(info.mergeBlockedReason ?? null);
       setRepositoryEvidence(info.repositoryEvidence ?? null);
+      if (info.integration?.synchronized === false) setMergeResult(null);
     }).catch(() => {
       if (cancelled) return;
       setHasRemote(false);
@@ -1014,10 +1016,15 @@ export function AgentPanel({ task, onClose, onRun, onStop, onCreatePR, onMergeLo
                 </div>
               )}
 
+              <IntegrationStatus task={task} onSynchronized={() => {
+                setMergeError(null);
+                setMergeBlockedReason(null);
+                setMergeResult(task.baseBranch || 'main');
+              }} />
               {/* PR / Cleanup actions — show when task is done or complete */}
               {(task.agentStatus === 'complete' || task.columnId === 'done') && (
                 <div className="flex items-center gap-2 overflow-x-auto pb-0.5 pt-1">
-                  {!prUrl && onCreatePR && hasRemote === true && mergeReady !== false && (
+                  {!mergeResult && !prUrl && onCreatePR && hasRemote === true && mergeReady !== false && (
                     <button
                       onClick={async () => {
                         setPrLoading(true);
@@ -1074,7 +1081,7 @@ export function AgentPanel({ task, onClose, onRun, onStop, onCreatePR, onMergeLo
                       Merged to {mergeResult}
                     </span>
                   )}
-                  {mergeReady === false && (
+                  {!mergeResult && mergeReady === false && (
                     <span className="min-w-0 text-xs text-amber-600 dark:text-amber-300">
                       Not merge-ready: {mergeBlockedReason || 'worktree needs attention'}
                     </span>

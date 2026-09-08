@@ -12,7 +12,7 @@ import { prepareOrderedGroupBaseline, recordOrderedGroupResult } from '../src/se
 import { startOrderedGroupChild } from '../src/services/ordered-group.js';
 import type { Task } from '../src/types.js';
 
-function git(cwd: string, ...args: string[]) { return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: 'pipe' }).trim(); }
+function git(cwd: string, ...args: string[]) { return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim(); }
 async function fixture() {
   const root = fs.mkdtempSync(path.join(process.cwd(), '.group-chain-test-'));
   const oldTmp = process.env.TMPDIR;

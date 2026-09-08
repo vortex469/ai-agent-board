@@ -104,7 +104,7 @@ test('runtime rejects gated start before worktree creation or session reservatio
 test('repository gate requires integration and rejects an existing stale dependent branch', async () => {
   const f = fixture();
   const root = fs.mkdtempSync(path.join(process.cwd(), '.dependency-baseline-'));
-  const git = (...args: string[]) => execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: 'pipe' }).trim();
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   try {
     git('init', '-b', 'main'); git('config', 'user.email', 'test@example.invalid'); git('config', 'user.name', 'Test');
     fs.writeFileSync(path.join(root, 'base'), 'base'); git('add', '.'); git('commit', '-m', 'base');

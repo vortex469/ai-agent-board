@@ -1,4 +1,5 @@
 import type { TaskDependencyGate } from '../../../../shared/types';
+export interface TaskIntegrationStatus { synchronized: boolean; reason?: string }
 import type {
   Task,
   TaskGroup,
@@ -161,9 +162,11 @@ export const api = {
 
   mergeLocal: (id: string) =>
     request<{ merged: boolean; baseBranch: string }>(`/tasks/${id}/merge-local`, { method: 'POST' }),
+  recheckIntegration: (id: string) =>
+    request<TaskIntegrationStatus>(`/tasks/${id}/recheck-integration`, { method: 'POST' }),
 
   getGitInfo: (id: string) =>
-    request<{ hasRemote: boolean; mergeReady?: boolean; mergeBlockedReason?: string; repositoryEvidence?: RepositoryEvidence }>(`/tasks/${id}/git-info`),
+    request<{ hasRemote: boolean; mergeReady?: boolean; mergeBlockedReason?: string; repositoryEvidence?: RepositoryEvidence; integration?: TaskIntegrationStatus }>(`/tasks/${id}/git-info`),
 
   sendMessage: (id: string, message: string, attachmentIds?: string[]) =>
     request<{ success: boolean }>(`/tasks/${id}/message`, { method: 'POST', body: JSON.stringify({ message, attachmentIds }) }),

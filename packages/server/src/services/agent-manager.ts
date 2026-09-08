@@ -836,7 +836,7 @@ export class AgentManager {
     }
   }
 
-  private async withRepoLock<T>(repoPath: string, fn: () => T | Promise<T>): Promise<T> {
+  async withRepoLock<T>(repoPath: string, fn: () => T | Promise<T>): Promise<T> {
     const prev = this.repoLocks.get(repoPath) ?? Promise.resolve();
     let resolve: () => void;
     const lock = new Promise<void>((r) => { resolve = r; });

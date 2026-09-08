@@ -108,6 +108,23 @@ if (importedStep) {
   }
   // Keep independent roots alive together long enough to observe real overlap.
   setTimeout(() => {
+    if (step === 'A1' && taskText.includes('External integration conflict')) {
+      // This fixture deliberately creates the operator-side edit in the primary
+      // checkout while the agent writes the same line in its isolated worktree.
+      const baseRepo = path.dirname(git(['rev-parse', '--path-format=absolute', '--git-common-dir']));
+      const fixtureFile = 'external-integration-conflict.txt';
+      const baseGit = args => execFileSync('git', args, { cwd: baseRepo, stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim();
+      if (process.env.AGENTBOARD_E2E_MOCK_LOCAL_OPENAI !== '1' || baseRepo === cwd
+        || baseGit(['branch', '--show-current']) !== 'main'
+        || readFileSync(path.join(baseRepo, fixtureFile), 'utf8') !== 'E2E external integration original\n') {
+        throw new Error('External integration conflict fixture requires its isolated marked test repository');
+      }
+      writeFileSync(path.join(baseRepo, fixtureFile), 'E2E external integration main edit\n');
+      baseGit(['add', fixtureFile]);
+      baseGit(['commit', '-m', 'E2E concurrent main edit']);
+      writeFile(fixtureFile, 'E2E external integration task edit\n');
+      git(['add', fixtureFile]);
+    }
     writeFile(`src/synchronization-${step}.json`, JSON.stringify({ baseline, startedAt, finishedAt: Date.now() }));
     git(['add', `src/synchronization-${step}.json`]);
     git(['commit', '-m', `Synchronization ${step} result`]);

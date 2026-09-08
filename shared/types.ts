@@ -14,6 +14,8 @@ export interface AgentInfo {
 export interface TaskRepositoryBaseline {
   startCommit: string;
   resultCommit?: string;
+  /** Original completion retained when a verified operator rebase rewrites the result. */
+  originalResultCommit?: string;
   predecessorTaskId?: string;
   predecessorBranch?: string;
   predecessorCommit?: string;

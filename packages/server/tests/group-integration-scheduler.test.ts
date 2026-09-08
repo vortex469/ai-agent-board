@@ -17,7 +17,7 @@ import { autoProgressCompletedTask, broadcastTaskUpdate } from '../src/routes/he
 import { observeBroadcasts } from '../src/websocket.js';
 import type { Task, TaskGroup } from '../src/types.js';
 
-const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: 'pipe' }).trim();
+const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const settle = () => new Promise(resolve => setTimeout(resolve, 40));
 async function until(predicate: () => boolean) {
   for (let i = 0; i < 100 && !predicate(); i++) await settle();
@@ -51,6 +51,10 @@ async function fixture(mode: NonNullable<TaskGroup['roadmapExecutionMode']> = 'b
       maxConcurrency: 1, roadmapExecutionMode: mode, repoPath: root, baseBranch: 'main' },
     Array.from({ length: groupId === 'b' ? 3 : 2 }, (_, i) => ({ id: `${groupId}${i + 1}`, projectId: 'default', title: `${groupId}${i + 1}`,
       description: '', priority: 'medium', groupOrder: i, useWorktree: true, branchName: `integration/${groupId}${i + 1}`, agentType: 'hermes' })));
+  }
+  // Active groups retain backlog children until the scheduler admits each task.
+  for (const group of await groups.getAll()) {
+    for (const child of await groups.getChildTasks(group.id)) await repo.update(child.id, { columnId: 'backlog' });
   }
   if (twoGroups) await repo.createDependency('a2', 'b3', Date.now());
   const manager = new AgentManager();

@@ -1,6 +1,7 @@
 import { DependencyEditor, DependencyStatus, useDependencies } from './TaskDependencies';
 import { useMemo, useState } from 'react';
 import { GroupChildActions } from './GroupChildActions';
+import { IntegrationStatus } from './IntegrationStatus';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   X, Layers, Play, Square,
@@ -194,6 +195,7 @@ export function GroupPanel({ group, onClose, onRunGroup, onStopGroup, onRetryChi
                   <ChevronRight className="h-4 w-4 text-zinc-600" />
                 </div>
                 <div className="w-full min-w-0">
+                  <IntegrationStatus task={child} />
                   <DependencyStatus task={child} gate={gates[child.id]} />
                   <DependencyEditor task={child} />
                 </div>
