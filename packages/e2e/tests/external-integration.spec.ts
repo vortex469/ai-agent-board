@@ -47,6 +47,9 @@ test('Recheck integration verifies an external fast-forward and refreshes depend
     const prerequisite = (await children())[0];
     expect((await children())[1].worktreePath).toBeFalsy();
     const originalResult = prerequisite.repositoryBaseline.resultCommit;
+    // Manual Done cleans up the old managed worktree before repository evidence
+    // is reconciled. Pause automatic admission while reproducing that state.
+    expect((await request.patch(`${API}/api/projects/${projectId}`, { data: { autoRunEnabled: false } })).ok()).toBeTruthy();
     // Repair the genuine automatic conflict outside Workbench, preserving the
     // task's recorded rebase lineage while changing its commit hash.
     expect(() => git(['rebase', 'main'], prerequisite.worktreePath)).toThrow();
@@ -56,11 +59,18 @@ test('Recheck integration verifies an external fast-forward and refreshes depend
     const repairedResult = git(['rev-parse', 'HEAD'], prerequisite.worktreePath).trim();
     expect(repairedResult).not.toBe(originalResult);
     git(['merge', '--ff-only', prerequisite.branchName], repoPath);
+    expect((await request.patch(`${API}/api/tasks/${taskId}`, { data: { columnId: 'done' } })).ok()).toBeTruthy();
+    expect((await children())[0].worktreePath).toBeFalsy();
     // Polling may already have reconciled and removed the button. The pending
     // button was exercised above; the final API recheck must be idempotent.
     const recheck = await request.post(`${API}/api/tasks/${taskId}/recheck-integration`);
     expect(recheck.status()).toBe(200);
     expect((await recheck.json()).synchronized).toBe(true);
+    const evidence = (await (await request.get(`${API}/api/tasks/${taskId}/git-info`)).json()).repositoryEvidence;
+    expect(evidence.available).toBe(true);
+    expect(evidence.latestTaskCommit.sha).toBe(repairedResult);
+    expect(evidence.commitsAhead).toBe(0);
+    expect((await request.patch(`${API}/api/projects/${projectId}`, { data: { autoRunEnabled: true } })).ok()).toBeTruthy();
     await expect(row).toContainText('Synchronized / integrated');
     await expect(row.getByRole('button', { name: 'Recheck integration', exact: true })).toHaveCount(0);
     await expect(row).not.toContainText('Integration pending');

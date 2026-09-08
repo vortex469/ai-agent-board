@@ -114,8 +114,8 @@ function inspect(task: Task): { head: string; baseHead: string } {
 
 export function inspectTaskIntegration(task: Task): IntegrationStatus {
   try {
-    inspect(task);
-    return task.columnId === 'done' && !task.worktreePath
+    const proof = inspect(task);
+    return task.columnId === 'done' && !task.worktreePath && proof.head === task.repositoryBaseline?.resultCommit
       ? { synchronized: true }
       : { synchronized: false, reason: 'Branch commit is already contained in base; recheck to finalize repository synchronization' };
   } catch (error) { return { synchronized: false, reason: error instanceof Error ? error.message : 'Git integration could not be verified' }; }
@@ -135,8 +135,13 @@ export async function reconcileTaskIntegration(repo: TaskRepository, taskId: str
         const completionTime = task.completedAt ?? task.startedAt ?? 0;
         const failedMerge = events.some(event => event.type === 'error' && event.timestamp >= completionTime
           && /^Auto-merge (failed:|succeeded into .*worktree cleanup was blocked:)/.test(event.content));
-        if (!failedMerge) {
-          // Periodic scans need no Git subprocesses for ordinary successful tasks.
+        // Done already records lifecycle approval. Its merge-failure event may
+        // predate the manual completion (or have expired); still reconcile Git
+        // evidence, using the same strict repair proof as failed automatic merges.
+        const completedWithoutWorktree = task.columnId === 'done'
+          && (!task.worktreePath || !fs.existsSync(task.worktreePath));
+        if (!failedMerge && !completedWithoutWorktree) {
+          // Periodic scans leave outstanding review/cleanup requirements intact.
           const status = automatic ? { synchronized: false } : inspectTaskIntegration(task);
           return status.synchronized ? status : {
             synchronized: false,

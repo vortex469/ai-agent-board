@@ -342,3 +342,63 @@ test('clean index with unresolved merge state fails closed', async () => {
     assert.deepEqual(f.ids(), ['a1']);
   } finally { await f.close(); }
 });
+
+for (const recordedPath of [false, true]) test(`Done repaired prerequisite reconciles with absent worktree (recorded path: ${recordedPath}) and satisfied external gate`, async () => {
+  const f = await fixture('full-roadmap');
+  try {
+    await until(() => f.started.length === 1);
+    const task = await failedMerge(f);
+    f.stopScheduler();
+    const main = repairAndFastForward(f, task, true);
+    assert.notEqual(main, task.repositoryBaseline!.resultCommit);
+    git(f.root, 'worktree', 'remove', task.worktreePath!);
+    // Manual completion can be newer than the automatic merge failure event.
+    await f.repo.update('a1', { columnId: 'done', completedAt: Date.now() + 1000,
+      worktreePath: recordedPath ? task.worktreePath : undefined });
+    await f.groups.create({ id: 'external', projectId: 'default', title: 'v0.12', priority: 'medium',
+      columnId: 'done', createdAt: 1, maxConcurrency: 1 }, [{ id: 'external07', projectId: 'default',
+      title: '07 Synchronization gate', description: '', priority: 'medium', useWorktree: false }]);
+    await f.repo.update('external07', { columnId: 'done', agentStatus: 'complete' });
+    await f.repo.createDependency('external07', 'a2', Date.now());
+    const before = await getTaskDependencyGate(f.repo, 'a2');
+    assert.equal(before.eligible, false);
+    assert.equal(before.dependencies[0].status, 'Done');
+    if (!recordedPath) assert.match(before.reason!, /branch changed after its recorded completion/);
+    const result = await reconcileTaskIntegration(f.repo, 'a1', f.manager, true);
+    assert.equal(result.synchronized, true, result.reason);
+    const reconciled = (await f.repo.getById('a1'))!;
+    assert.equal(reconciled.repositoryBaseline!.resultCommit, main);
+    assert.equal(reconciled.repositoryBaseline!.originalResultCommit, task.repositoryBaseline!.resultCommit);
+    assert.equal(reconciled.worktreePath, undefined);
+    assert.equal((await getTaskDependencyGate(f.repo, 'a2')).eligible, true);
+    f.restartScheduler();
+    await until(() => f.started.length === 2);
+    assert.deepEqual(f.ids(), ['a1', 'a2']);
+    assert.equal(git(f.started[1].worktreePath!, 'rev-parse', 'HEAD'), main);
+    assert.equal(git(f.root, 'rev-parse', 'main'), main);
+  } finally { await f.close(); }
+});
+
+for (const scenario of ['not-integrated', 'reset-to-main', 'extra-integrated'] as const) test(`Done without worktree still fails closed for ${scenario}`, async () => {
+  const f = await fixture('full-roadmap');
+  try {
+    await until(() => f.started.length === 1);
+    const task = await failedMerge(f);
+    f.stopScheduler();
+    if (scenario === 'reset-to-main') git(task.worktreePath!, 'reset', '--hard', 'main');
+    if (scenario === 'extra-integrated') {
+      repairAndFastForward(f, task, true);
+      fs.writeFileSync(path.join(task.worktreePath!, 'extra'), 'unrecorded work');
+      git(task.worktreePath!, 'add', 'extra'); git(task.worktreePath!, 'commit', '-m', 'Extra work');
+      git(f.root, 'merge', '--ff-only', task.branchName!);
+    }
+    git(f.root, 'worktree', 'remove', task.worktreePath!);
+    await f.repo.update('a1', { columnId: 'done', worktreePath: undefined, completedAt: Date.now() + 1000 });
+    const result = await reconcileTaskIntegration(f.repo, 'a1', f.manager, true);
+    assert.equal(result.synchronized, false);
+    assert.ok(result.reason);
+    assert.equal((await f.repo.getById('a1'))!.repositoryBaseline!.resultCommit, task.repositoryBaseline!.resultCommit);
+    assert.equal((await getTaskDependencyGate(f.repo, 'a2')).eligible, false);
+    assert.deepEqual(f.ids(), ['a1']);
+  } finally { await f.close(); }
+});

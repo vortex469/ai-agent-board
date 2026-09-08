@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { execFileSync } from 'child_process';
+import { realpathSync } from 'node:fs';
 import type { RepositoryEvidence, RepositoryEvidenceCommit, RepositoryEvidenceFile, RepositoryEvidenceState, Task } from '../types.js';
 import type { TaskRepository } from '../repositories/types.js';
 import type { ProjectRepository } from '../repositories/project-types.js';
@@ -13,6 +14,7 @@ function git(args: string[], cwd: string): string {
     cwd,
     encoding: 'utf8',
     maxBuffer: 1024 * 1024,
+    timeout: 5000,
     stdio: ['ignore', 'pipe', 'pipe'],
   }).trim();
 }
@@ -58,13 +60,54 @@ function parseLatestCommit(output: string): RepositoryEvidenceCommit | undefined
   };
 }
 
+/** Historical commit evidence is observational; it never approves integration. */
+function inspectHistoricalRepositoryEvidence(task: Task, missingReason: string): RepositoryEvidence {
+  if (!task.repoPath || task.agentStatus !== 'complete' || (!task.branchName && !task.repositoryBaseline?.resultCommit)) {
+    return emptyRepositoryEvidence(task, 'unavailable', missingReason);
+  }
+  try {
+    const cwd = realpathSync(task.repoPath);
+    // Do not let Git's parent-directory discovery substitute another repository.
+    if (realpathSync(git(['rev-parse', '--show-toplevel'], cwd)) !== cwd) throw new Error('Repository root mismatch');
+    const baseBranch = task.baseBranch || 'main';
+    const baseRef = `refs/heads/${baseBranch}`;
+    git(['check-ref-format', baseRef], cwd);
+    const baseCommit = git(['rev-parse', '--verify', '--end-of-options', `${baseRef}^{commit}`], cwd);
+    let taskCommit: string | undefined;
+    if (task.branchName) {
+      const branchRef = `refs/heads/${task.branchName}`;
+      git(['check-ref-format', branchRef], cwd);
+      try { taskCommit = git(['rev-parse', '--verify', '--end-of-options', `${branchRef}^{commit}`], cwd); }
+      catch { /* A cleaned-up branch can still have a recorded result commit. */ }
+    }
+    if (!taskCommit) {
+      const recorded = task.repositoryBaseline?.resultCommit;
+      if (!recorded || !/^[0-9a-f]{40,64}$/i.test(recorded)) throw new Error('No recorded commit');
+      taskCommit = git(['rev-parse', '--verify', '--end-of-options', `${recorded}^{commit}`], cwd);
+    }
+    const commitsAhead = Number.parseInt(git(['rev-list', '--count', `${baseCommit}..${taskCommit}`, '--'], cwd), 10);
+    const latestTaskCommit = parseLatestCommit(git(['log', '-1', '--format=%H%x09%h%x09%cI%x09%an%x09%s', taskCommit, '--'], cwd));
+    return {
+      ...emptyRepositoryEvidence(task, commitsAhead > 0 ? 'clean_after_commit' : 'no_changes'),
+      available: true,
+      baseBranch,
+      baseCommit,
+      baseShortCommit: git(['rev-parse', '--short', baseCommit], cwd),
+      commitsAhead,
+      latestTaskCommit,
+    };
+  } catch {
+    return emptyRepositoryEvidence(task, 'unavailable', 'Historical repository evidence could not be verified from recorded branch or commit metadata.');
+  }
+}
+
 export function inspectRepositoryEvidence(task: Task): RepositoryEvidence {
   if (!task.worktreePath) {
-    return emptyRepositoryEvidence(task, 'unavailable', 'No managed worktree path is recorded for this task.');
+    return inspectHistoricalRepositoryEvidence(task, 'No managed worktree path is recorded for this task.');
   }
   const worktreeInspection = inspectTaskWorktreeIdentity(task);
   if (worktreeInspection.status === 'missing') {
-    return emptyRepositoryEvidence(task, 'unavailable', 'Managed worktree path is no longer available.');
+    return inspectHistoricalRepositoryEvidence(task, 'Managed worktree path is no longer available.');
   }
   if (worktreeInspection.status === 'blocked') {
     return emptyRepositoryEvidence(task, 'unavailable', 'Persisted worktree path is not a verified Board-managed worktree.');
