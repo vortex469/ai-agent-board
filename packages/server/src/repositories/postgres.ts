@@ -281,7 +281,7 @@ export class PostgresTaskRepository implements TaskRepository {
           agent_status = $5, agent_type = $6, started_at = $7, completed_at = $8,
           repo_path = $9, branch_name = $10, base_branch = $11, use_worktree = $12,
           worktree_path = $13, archived = $14, summary = $15, run_requested_at=$16, run_claimed_at=$17,
-          timeout_minutes=$18, sort_order=$19, repository_baseline=$21
+          timeout_minutes=$18, sort_order=$19, repository_baseline=$21, provenance=$22
         WHERE id = $20`,
         [
           merged.title,
@@ -301,6 +301,7 @@ export class PostgresTaskRepository implements TaskRepository {
           merged.summary ?? null, merged.runRequestedAt ?? null, merged.runClaimedAt ?? null, merged.timeoutMinutes ?? null, merged.sortOrder ?? merged.createdAt,
           id,
           merged.repositoryBaseline ? JSON.stringify(merged.repositoryBaseline) : null,
+          merged.provenance ? JSON.stringify(merged.provenance) : null,
         ]
       );
       await client.query('COMMIT');

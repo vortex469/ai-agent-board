@@ -72,7 +72,29 @@ const attempt = stateCount(cwd);
 
 const orderedStep = taskText.match(/E2E Ordered roadmap P([123])/);
 const synchronizationStep = taskText.match(/E2E Synchronization (A1|A2|B1|B2)/);
-if (synchronizationStep) {
+const importedStep = taskText.match(/E2E Imported roadmap ([AB]\d{2})/);
+if (importedStep) {
+  const step = importedStep[1];
+  const baseline = git(['rev-parse', 'HEAD']);
+  const prerequisite = { B04: 'A04', B06: 'A07', B08: 'A09' }[step];
+  if (prerequisite) {
+    const file = `src/imported-${prerequisite}.json`;
+    if (!existsSync(path.join(cwd, file))) throw new Error(`Missing imported prerequisite ${prerequisite}`);
+    const commit = git(['log', '-1', '--format=%H', '--', file]);
+    if (!commit) throw new Error(`Uncommitted imported prerequisite ${prerequisite}`);
+    git(['merge-base', '--is-ancestor', commit, baseline]);
+    git(['merge-base', '--is-ancestor', commit, 'main']);
+  }
+  // Base building progresses more slowly so all three imported gates wait.
+  setTimeout(() => {
+    writeFile(`src/imported-${step}.json`, JSON.stringify({ baseline }));
+    git(['add', `src/imported-${step}.json`]);
+    git(['commit', '-m', `Imported roadmap ${step} result`]);
+    emitTestEvidence('npm test -- --imported-roadmap', `Focused tests passed: ${step} verified integrated prerequisite`);
+    process.stdout.write('<task-summary>\n## Completed\nFocused tests passed: imported roadmap baseline verified.\nHostile review passed: prerequisite ancestry checked.\n</task-summary>\n');
+    setTimeout(() => process.exit(0), 150);
+  }, step.startsWith('A') ? 1500 : 150);
+} else if (synchronizationStep) {
   const step = synchronizationStep[1];
   const startedAt = Date.now();
   const baseline = git(['rev-parse', 'HEAD']);

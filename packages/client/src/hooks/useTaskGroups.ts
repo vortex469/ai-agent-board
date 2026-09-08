@@ -78,6 +78,15 @@ export function useTaskGroups(projectId = 'default') {
     }
   }, []);
 
+  const importRoadmap = useCallback(async (data: Parameters<typeof api.importRoadmap>[0]) => {
+    const result = await api.importRoadmap(data);
+    setGroups(previous => {
+      const importedIds = new Set(result.groups.map(group => group.id));
+      return [...previous.filter(group => !importedIds.has(group.id)), ...result.groups];
+    });
+    return result;
+  }, []);
+
   const createGroup = useCallback(async (data: {
     title: string;
     description?: string;
@@ -165,6 +174,7 @@ export function useTaskGroups(projectId = 'default') {
     groups,
     error,
     createGroup,
+    importRoadmap,
     runGroup,
     stopGroup,
     deleteGroup,

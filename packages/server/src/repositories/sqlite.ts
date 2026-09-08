@@ -115,6 +115,7 @@ export class SqliteTaskRepository implements TaskRepository {
       `),
       update: db.prepare(`
         UPDATE tasks SET
+          provenance = @provenance,
           title = @title,
           description = @description,
           priority = @priority,
@@ -282,6 +283,7 @@ export class SqliteTaskRepository implements TaskRepository {
         priority: merged.priority,
         column_id: merged.columnId,
         agent_status: merged.agentStatus,
+        provenance: merged.provenance ? JSON.stringify(merged.provenance) : null,
         agent_type: merged.agentType,
         started_at: merged.startedAt ?? null,
         completed_at: merged.completedAt ?? null,

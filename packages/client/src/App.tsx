@@ -65,7 +65,7 @@ function BoardPage({
     defaultBaseBranch: project.defaultBaseBranch,
     defaultUseWorktree: project.defaultUseWorktree,
   };
-  const { groups, createGroup, runGroup, stopGroup, deleteGroup, updateGroup, refreshGroup, trackChildMutation, reorderGroupChildren, reconfigureGroup } = useTaskGroups(project.id);
+  const { groups, createGroup, importRoadmap, runGroup, stopGroup, deleteGroup, updateGroup, refreshGroup, trackChildMutation, reorderGroupChildren, reconfigureGroup } = useTaskGroups(project.id);
   const { tasks, error, clearError, showArchived, setShowArchived, addTask, addTasksBatch, updateTask, moveTask, reorderBacklogTasks, runTask, stopTask, deleteTask, archiveTask, unarchiveTask, configureAndRunTask, createPR, mergeLocal, cleanupWorktree } = useTasks(project.id, trackChildMutation);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [roadmapDialogOpen, setRoadmapDialogOpen] = useState(false);
@@ -483,6 +483,21 @@ function BoardPage({
         onToggleAutoRun={handleToggleProjectAutoRun}
       />
 
+      {groups.some(group => group.roadmapExecutionMode && !group.archived) && (
+        <div role="tablist" aria-label="Roadmap groups" className="flex shrink-0 gap-2 overflow-x-auto border-b border-border px-4 py-2">
+          {groups.filter(group => group.roadmapExecutionMode && !group.archived).map(group => (
+            <button key={group.id} type="button" role="tab" id={`roadmap-group-tab-${group.id}`} aria-controls={`roadmap-group-panel-${group.id}`} aria-selected={selectedGroupId === group.id}
+              onKeyDown={event => {
+                const tabs = Array.from(event.currentTarget.parentElement!.querySelectorAll<HTMLButtonElement>('[role="tab"]'));
+                const index = tabs.indexOf(event.currentTarget);
+                const next = event.key === 'ArrowRight' ? (index + 1) % tabs.length : event.key === 'ArrowLeft' ? (index + tabs.length - 1) % tabs.length : event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : -1;
+                if (next >= 0) { event.preventDefault(); tabs[next].focus(); tabs[next].click(); }
+              }}
+              className="min-h-11 max-w-72 shrink-0 truncate rounded-lg border border-border px-3 py-2 text-sm aria-selected:bg-accent"
+              onClick={() => handleClickGroup(group)}>{group.title}</button>
+          ))}
+        </div>
+      )}
       <main className="min-h-0 flex-1 overflow-hidden">
         <Board
           tasks={filteredTasks}
@@ -538,6 +553,7 @@ function BoardPage({
 
       <RoadmapIntakeDialog
         onCreateGroup={handleCreateGroup}
+        onImportRoadmap={importRoadmap}
         open={roadmapDialogOpen}
         onClose={() => setRoadmapDialogOpen(false)}
         project={project}
@@ -715,6 +731,7 @@ export function App() {
 
   return (
     <BoardPage
+      key={selectedProject.id}
       project={selectedProject}
       theme={theme}
       toggleTheme={toggleTheme}

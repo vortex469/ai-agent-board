@@ -469,7 +469,9 @@ export function createGroupsRouter(
     if (group.roadmapExecutionMode) {
       const waiting = await groupRepo.update(id, { columnId: 'in-progress', startedAt: group.startedAt ?? Date.now(), completedAt: undefined });
       if (waiting) broadcastGroupUpdate(waiting);
-      await startOrderedGroupChild(id, groupRepo, taskRepo, agentManager, true, projectRepo);
+      const next = (await groupRepo.getChildTasks(id)).find(task => task.columnId !== 'done' || task.agentStatus !== 'complete');
+      const manualImportedTaskId = next?.columnId === 'backlog' && next.agentStatus === 'idle' && next.provenance?.origin?.roadmapAutoRun !== undefined ? next.id : undefined;
+      await startOrderedGroupChild(id, groupRepo, taskRepo, agentManager, true, projectRepo, manualImportedTaskId);
       res.json({ ...(await groupRepo.getById(id)), children: await groupRepo.getChildTasks(id) });
       return;
     }

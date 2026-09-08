@@ -67,6 +67,9 @@ export function GroupPanel({ group, onClose, onRunGroup, onStopGroup, onRetryChi
     <AnimatePresence>
       <motion.div
         key="group-panel"
+        id={`roadmap-group-panel-${group.id}`}
+        role={group.roadmapExecutionMode ? 'tabpanel' : undefined}
+        aria-labelledby={group.roadmapExecutionMode ? `roadmap-group-tab-${group.id}` : undefined}
         initial={{ x: '100%' }}
         animate={{ x: 0 }}
         exit={{ x: '100%' }}

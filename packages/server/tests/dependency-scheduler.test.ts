@@ -32,7 +32,7 @@ function fixture() {
   } as unknown as TaskGroupRepository;
   const project = { id: 'p', name: 'P', autoRunEnabled: true, isDefault: false, createdAt: 1, updatedAt: 1 };
   const projects = { getById: async () => project, getAllWithCounts: async () => [project] } as unknown as ProjectRepository;
-  const manager = { isRunning: () => false, reevaluateGroupQueues: () => {},
+  const manager = { resetEvents: async () => {}, isRunning: () => false, reevaluateGroupQueues: () => {},
     getAvailableAgents: () => [{ name: 'codex', available: true }], startAgent: (task: Task) => started.push(task.id),
   } as unknown as AgentManager;
   return { children, groups, started, repo, groupRepo, projects, manager, project };
@@ -112,4 +112,17 @@ for (const mode of ['backlog', 'first-card'] as const) test(`explicit Group Run 
     Object.assign(f.children[1], { columnId: 'done', agentStatus: 'complete' }); broadcastTaskUpdate(f.children[1]);
     await settle(); assert.deepEqual(f.started, ['b2']);
   } finally { stop(); }
+});
+
+test('imported task Auto Run false pauses automatic admission but permits explicit Run', async () => {
+  const f = fixture();
+  f.children[0].provenance = { origin: { roadmapAutoRun: false } };
+  await startOrderedGroupChild('a', f.groupRepo, f.repo, f.manager, true, f.projects);
+  assert.deepEqual(f.started, []);
+  await startOrderedGroupChild('a', f.groupRepo, f.repo, f.manager, true, f.projects, 'a1');
+  assert.deepEqual(f.started, ['a1']);
+  Object.assign(f.children[0], { columnId: 'done', agentStatus: 'complete' });
+  f.children[1].provenance = { origin: { roadmapAutoRun: false } };
+  await startOrderedGroupChild('a', f.groupRepo, f.repo, f.manager, true, f.projects);
+  assert.deepEqual(f.started, ['a1']);
 });

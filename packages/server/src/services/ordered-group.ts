@@ -25,6 +25,9 @@ export async function startOrderedGroupChild(
       if (completed) broadcastGroupUpdate(completed);
       return undefined;
     }
+    // Imported per-task Auto Run overrides are persisted as provenance, never source references.
+    const persistedChild = await taskRepo.getById(child.id);
+    if (!requestedTaskId && persistedChild?.runRequestedAt === undefined && persistedChild?.provenance?.origin?.roadmapAutoRun === false) return undefined;
     if (child.archived || (requestedTaskId && requestedTaskId !== child.id)) return undefined;
     if (requestedTaskId && (child.agentStatus === 'failed' || child.columnId === 'review')) {
       await withDependencyAdmissionLock(() => taskRepo.update(child.id, { agentStatus: 'idle', columnId: 'backlog' }));

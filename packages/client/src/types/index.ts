@@ -15,6 +15,7 @@ export type {
   RepositoryEvidenceState,
   RoadmapPreview,
   RoadmapProposedTask,
+  RoadmapProposedGroup,
   RoadmapExecutionMode,
   RoadmapCreationMode,
   CreateProjectRequest,

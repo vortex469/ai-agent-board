@@ -16,6 +16,7 @@ import type {
   ProjectPathValidation,
   ProjectConfig,
   RoadmapPreview,
+  RoadmapProposedGroup,
   RoadmapExecutionMode,
   RoadmapCreationMode,
   RepositoryEvidence,
@@ -122,6 +123,9 @@ export const api = {
 
   createTasksBatch: (tasks: { title: string; description?: string; priority?: Priority; columnId?: ColumnId; agentType?: AgentType; repoPath?: string; branchName?: string; baseBranch?: string; useWorktree?: boolean; autoRun?: boolean; projectId?: string; timeoutMinutes?: number | null; dependsOnTaskIndexes?: number[] }[]) =>
     request<{ tasks: Task[] }>('/tasks/batch', { method: 'POST', body: JSON.stringify({ tasks }) }),
+
+  importRoadmap: (data: { projectId: string; groups: RoadmapProposedGroup[] }) =>
+    request<{ groups: TaskGroupWithChildren[]; tasks: Task[] }>('/roadmap-intake/import', { method: 'POST', body: JSON.stringify(data) }),
 
   previewRoadmapIntake: (data: { text: string; projectId?: string; creationMode?: RoadmapCreationMode }) =>
     request<RoadmapPreview>('/roadmap-intake/preview', { method: 'POST', body: JSON.stringify(data) }),

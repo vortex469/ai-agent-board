@@ -21,6 +21,9 @@ interface GroupRow {
 }
 
 interface TaskRow {
+  provenance: string | null;
+  run_requested_at: number | null;
+  run_claimed_at: number | null;
   repository_baseline: string | null;
   id: string;
   project_id: string;
@@ -65,6 +68,9 @@ function rowToGroup(row: GroupRow): TaskGroup {
 
 function rowToTask(row: TaskRow): Task {
   return {
+    provenance: row.provenance ? JSON.parse(row.provenance) : undefined,
+    runRequestedAt: row.run_requested_at == null ? undefined : Number(row.run_requested_at),
+    runClaimedAt: row.run_claimed_at == null ? undefined : Number(row.run_claimed_at),
     repositoryBaseline: row.repository_baseline ? JSON.parse(row.repository_baseline) : undefined,
     id: row.id,
     projectId: row.project_id,

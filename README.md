@@ -55,6 +55,32 @@ Use **Edit dependencies** on a grouped task to select prerequisite tasks from th
 
 A dependent task waits without reserving execution or creating a worktree until every prerequisite is successfully Done. Coding prerequisites must also have their repository results integrated into the dependent's configured base; existing stale branches or pinned baselines remain blocked for explicit recovery. Read-only prerequisites require successful completion but no Git integration. Auto Run reevaluates waiting groups on server lifecycle changes, and the UI updates over WebSocket. Reopening a prerequisite closes the gate for pending tasks and warns already-running dependents. Deleting a prerequisite retains its missing ID until the dependency is explicitly removed.
 
+### Import multiple roadmap groups
+
+Open **Roadmap Intake**, select the multi-group creation mode, and paste explicit group declarations with numbered tasks:
+
+```text
+GROUP: v0.11 Base Building
+AGENT: codex
+AUTO RUN: false
+01. Construction foundation
+02. Placement preview
+    DEPENDS ON: 01
+
+GROUP: v0.12 Advanced Crafting & Workstations
+01. Workstation definitions
+02. Workstation integration
+    DEPENDS ON: 01, v0.11 Base Building / 02
+```
+
+Preview and edit the groups, tasks, settings, and dependency references before creating them. Task numbers identify items within their declared group; use `Group name / number` for a cross-group dependency and commas for multiple dependencies. Versioned names and ampersands are supported. Numbered tasks retain their order within each group.
+
+Optional settings are `AGENT`, `AUTO RUN`, `REPO`, `BASE BRANCH`, `PRIORITY`, and `USE WORKTREE`. Place them after `GROUP:` and before its first task to set group defaults, or after a task to override that task. `BRANCH` sets a task's worktree branch (or the group's base branch when placed before tasks). Boolean settings accept `true` or `false`. Unspecified agent, repository, branch, priority, and worktree settings inherit project defaults; automatic execution is off unless requested. A task with `AUTO RUN: false` pauses its ordered lane until explicitly run.
+
+The server validates the entire import, including unknown or ambiguous references, self-dependencies, and cycles involving group order. It resolves references to database task IDs after creating all groups and tasks. A failed persistence step triggers rollback before any agents start. Imported groups appear immediately, and cross-group links use the existing synchronization gate badges and integration checks. Project Auto Run must also be enabled for automatic execution; prerequisites must finish successfully and their code must be integrated before dependent tasks can start.
+
+Existing loose-card and single-group roadmap formats remain available.
+
 ## Features
 
 - Kanban board with Backlog, In Progress, Review, Done columns

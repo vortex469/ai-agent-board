@@ -1,3 +1,5 @@
+import { parseMultiRoadmap } from './multi-roadmap.js';
+import type { RoadmapProposedGroup } from '@ai-agent-board/shared/types.js';
 import { MAX_DESCRIPTION_LENGTH, MAX_TITLE_LENGTH } from '@ai-agent-board/shared/constants.js';
 
 export interface RoadmapProposedTask {
@@ -9,6 +11,7 @@ export interface RoadmapProposedTask {
 }
 
 export interface RoadmapParseResult {
+  groups?: RoadmapProposedGroup[];
   tasks: RoadmapProposedTask[];
   suggestedGroupName?: string;
 }
@@ -29,13 +32,14 @@ const VERSION_TITLE_RE = /^((?:v|version)\s*\d+(?:\.\d+){0,3}(?:[-._]?[a-z0-9]+)
 const DETAIL_CLAUSE_RE = /\s+(?:so|while|because|in order to)\s+/i;
 const CODE_IDENTIFIER_RE = /(?<![\w-])(?:--[a-z0-9][a-z0-9-]*|[A-Z][A-Z0-9]*_[A-Z0-9_]+(?:\.[A-Za-z0-9]+)?|[A-Z][A-Z0-9]{2,}\.[A-Za-z0-9]+|(?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.@-]+|[A-Za-z0-9_.-]+@[0-9][A-Za-z0-9._-]*|[A-Za-z0-9_-]+\.(?:[cm]?[jt]sx?|md|json|ya?ml|toml|env|sh|ps1|css|html|sql|py|rb|go|rs|java|cs|php|txt))(?![\w-])/g;
 
-export function parseRoadmapText(input: unknown, creationMode: 'loose' | 'group' = 'loose'): RoadmapParseResult | string {
+export function parseRoadmapText(input: unknown, creationMode: 'loose' | 'group' | 'multi-group' = 'loose'): RoadmapParseResult | string {
   if (typeof input !== 'string') return 'Roadmap text is required';
   const text = input.replace(/\r\n?/g, '\n');
   const trimmedText = text.trim();
   if (!trimmedText) return 'Paste roadmap text before previewing';
   if (trimmedText.length > ROADMAP_TEXT_LIMIT) return `Roadmap text must be at most ${ROADMAP_TEXT_LIMIT.toLocaleString()} characters`;
 
+  if (creationMode === 'multi-group') return parseMultiRoadmap(trimmedText);
   const lines = trimmedText.split('\n');
   const versionBlocks = parseVersionBlocks(lines);
   const listBlocks = versionBlocks.length > 0 ? [] : parseListBlocks(lines);

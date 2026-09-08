@@ -121,7 +121,7 @@ const agentManager = new AgentManager();
 
   app.use('/api/projects', createProjectsRouter(projectRepo, taskRepo, groupRepo, agentManager));
   app.use('/api/orchestrations', createOrchestrationsRouter(taskRepo, projectRepo, agentManager));
-  app.use('/api/roadmap-intake', createRoadmapIntakeRouter(projectRepo));
+  app.use('/api/roadmap-intake', createRoadmapIntakeRouter(projectRepo, groupRepo, taskRepo));
   app.use('/api/tasks', createTaskRouter(taskRepo, agentManager, projectRepo, groupRepo));
   app.use('/api/tasks', createAgentRouter(taskRepo, agentManager, groupRepo, projectRepo));
   app.use('/api/tasks', createGitRouter(taskRepo, agentManager, projectRepo));

@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { ClipboardList, Loader2, Play, Trash2, X } from 'lucide-react';
-import type { AgentInfo, AgentType, ColumnId, Priority, Project, RoadmapCreationMode, RoadmapExecutionMode, RoadmapProposedTask } from '@/types';
+import type { AgentInfo, AgentType, ColumnId, Priority, Project, RoadmapCreationMode, RoadmapExecutionMode, RoadmapProposedTask, RoadmapProposedGroup } from '@/types';
+import { MultiGroupRoadmapPreview } from './MultiGroupRoadmapPreview';
 import { api } from '@/lib/api';
 import { AGENT_OPTIONS } from '@/lib/agent-config';
 import { PRIORITY_OPTIONS } from '@/lib/priority-config';
@@ -12,6 +13,7 @@ interface RoadmapIntakeDialogProps {
   open: boolean;
   onClose: () => void;
   project: Project;
+  onImportRoadmap: (data: Parameters<typeof api.importRoadmap>[0]) => Promise<unknown>;
   onCreateGroup: (group: Parameters<typeof api.createGroup>[0]) => Promise<unknown>;
   onCreateTasks: (tasks: {
     title: string;
@@ -28,11 +30,12 @@ interface RoadmapIntakeDialogProps {
   }[]) => Promise<unknown>;
 }
 
-export function RoadmapIntakeDialog({ open, onClose, project, onCreateTasks, onCreateGroup }: RoadmapIntakeDialogProps) {
+export function RoadmapIntakeDialog({ open, onClose, project, onCreateTasks, onCreateGroup, onImportRoadmap }: RoadmapIntakeDialogProps) {
   const [creationMode, setCreationMode] = useState<RoadmapCreationMode>('loose');
   const [groupName, setGroupName] = useState('');
   const [text, setText] = useState('');
   const [preview, setPreview] = useState<RoadmapProposedTask[]>([]);
+  const [groups, setGroups] = useState<RoadmapProposedGroup[]>([]);
   const [generatedTitles, setGeneratedTitles] = useState<Map<number, string>>(new Map());
   const [error, setError] = useState('');
   const [executionMode, setExecutionMode] = useState<RoadmapExecutionMode>('backlog');
@@ -51,6 +54,7 @@ export function RoadmapIntakeDialog({ open, onClose, project, onCreateTasks, onC
       setGroupName('');
       setText('');
       setPreview([]);
+      setGroups([]);
       setError('');
       setExecutionMode('backlog');
       setSubmitting(false);
@@ -74,10 +78,12 @@ export function RoadmapIntakeDialog({ open, onClose, project, onCreateTasks, onC
     try {
       const result = await api.previewRoadmapIntake({ text, projectId: project.id, creationMode });
       setPreview(result.tasks);
+      setGroups(result.groups ?? []);
       setGeneratedTitles(new Map(result.tasks.map((task) => [task.order, task.title])));
       setGroupName((name) => name || result.suggestedGroupName || 'Roadmap');
     } catch (err) {
       setPreview([]);
+      setGroups([]);
       setError((err as Error).message);
     } finally {
       setPreviewing(false);
@@ -93,6 +99,19 @@ export function RoadmapIntakeDialog({ open, onClose, project, onCreateTasks, onC
   };
 
   const handleCreate = async () => {
+    if (creationMode === 'multi-group') {
+      setSubmitting(true);
+      setError('');
+      try {
+        await onImportRoadmap({ projectId: project.id, groups });
+        onClose();
+      } catch (err) {
+        setError((err as Error).message);
+      } finally {
+        setSubmitting(false);
+      }
+      return;
+    }
     const accepted = preview.filter((task) => task.title.trim());
     if (accepted.length === 0) {
       setError('Keep at least one proposed task before creating cards');
@@ -203,7 +222,11 @@ export function RoadmapIntakeDialog({ open, onClose, project, onCreateTasks, onC
                 <textarea
                   id="roadmap-text"
                   value={text}
-                  onChange={(event) => setText(event.target.value)}
+                  disabled={submitting || previewing}
+                  onChange={(event) => {
+                    setText(event.target.value);
+                    if (creationMode === 'multi-group') { setGroups([]); setPreview([]); }
+                  }}
                   placeholder="v0.40 - Improve task parsing&#10;- Add retry controls&#10;1. Harden validation"
                   className="min-h-56 flex-1 resize-none rounded-lg border border-border bg-background px-3 py-2 text-sm focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
                 />
@@ -233,6 +256,11 @@ export function RoadmapIntakeDialog({ open, onClose, project, onCreateTasks, onC
                       onChange={(event) => {
                         const mode = event.target.value as RoadmapCreationMode;
                         setCreationMode(mode);
+                        if (mode === 'multi-group' || creationMode === 'multi-group') {
+                          setPreview([]);
+                          setGroups([]);
+                          return;
+                        }
                         setPreview((tasks) => tasks.map((task) => ({
                           ...task,
                           // Group order replaces the loose preview's synthetic chain.
@@ -245,6 +273,7 @@ export function RoadmapIntakeDialog({ open, onClose, project, onCreateTasks, onC
                     >
                       <option value="loose">Create loose cards</option>
                       <option value="group">Create as group</option>
+                      <option value="multi-group">Import multiple groups</option>
                     </select>
                   </label>
                   {creationMode === 'group' && (
@@ -261,7 +290,7 @@ export function RoadmapIntakeDialog({ open, onClose, project, onCreateTasks, onC
                     <p className="text-xs text-muted-foreground">{preview.length} child tasks · Run in the order shown. Reorder children in the group before running.</p>
                   </div>
                 )}
-                <div className="grid gap-2 sm:grid-cols-3">
+                {creationMode !== 'multi-group' && <div className="grid gap-2 sm:grid-cols-3">
                   <label className="space-y-1">
                     <span className="block text-xs font-medium text-muted-foreground">Execution mode</span>
                     <select
@@ -300,10 +329,12 @@ export function RoadmapIntakeDialog({ open, onClose, project, onCreateTasks, onC
                       ))}
                     </select>
                   </label>
-                </div>
+                </div>}
 
                 <div className="min-h-56 max-h-96 flex-none overflow-y-auto rounded-lg border border-border lg:min-h-0 lg:max-h-none lg:flex-1">
-                  {preview.length === 0 ? (
+                  {creationMode === 'multi-group' && groups.length > 0 ? (
+                    <MultiGroupRoadmapPreview groups={groups} onChange={setGroups} defaultAgent={project.defaultAgentType ?? 'copilot'} disabled={submitting} />
+                  ) : preview.length === 0 ? (
                     <div className="flex h-full min-h-56 items-center justify-center px-6 text-center text-sm text-muted-foreground">
                       Previewed cards appear here before anything is created.
                     </div>
@@ -360,11 +391,11 @@ export function RoadmapIntakeDialog({ open, onClose, project, onCreateTasks, onC
               <button
                 type="button"
                 onClick={handleCreate}
-                disabled={submitting || preview.length === 0}
+                disabled={submitting || previewing || (creationMode === 'multi-group' ? groups.length === 0 : preview.length === 0)}
                 className="flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-                {creationMode === 'group' ? `Create Group · ${preview.length} Tasks` : `Create ${preview.length || ''} Cards`}
+                {creationMode === 'multi-group' ? `Create ${groups.length} Groups · ${groups.reduce((count, group) => count + group.tasks.length, 0)} Tasks` : creationMode === 'group' ? `Create Group · ${preview.length} Tasks` : `Create ${preview.length || ''} Cards`}
               </button>
             </div>
           </motion.div>

@@ -87,6 +87,7 @@ export interface TaskProvenance {
   sourceMessage?: string;
   sourceTask?: string;
   requestedBy?: string;
+  /** Imported roadmap tasks use origin.roadmapAutoRun as their persisted automatic admission override. */
   origin?: Record<string, string | number | boolean | null>;
 }
 
@@ -228,11 +229,32 @@ export interface RoadmapProposedTask {
   dependsOnTaskIndexes?: number[];
 }
 
-export type RoadmapCreationMode = 'loose' | 'group';
+export interface RoadmapGroupSettings {
+  agentType?: AgentType;
+  autoRun?: boolean;
+  repoPath?: string;
+  baseBranch?: string;
+  priority?: Priority;
+  useWorktree?: boolean;
+}
+
+export interface RoadmapGroupTask extends RoadmapProposedTask, RoadmapGroupSettings {
+  ref: string;
+  dependencies: string[];
+  branchName?: string;
+}
+
+export interface RoadmapProposedGroup extends RoadmapGroupSettings {
+  title: string;
+  tasks: RoadmapGroupTask[];
+}
+
+export type RoadmapCreationMode = 'loose' | 'group' | 'multi-group';
 
 export type RoadmapExecutionMode = 'backlog' | 'first-card' | 'full-roadmap';
 
 export interface RoadmapPreview {
+  groups?: RoadmapProposedGroup[];
   suggestedGroupName?: string;
   project: {
     id: string;
