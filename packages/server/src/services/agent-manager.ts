@@ -1,3 +1,4 @@
+import { assertTaskDependencies, DependencyGateError, getTaskDependencyGate, withDependencyAdmissionLock } from './task-dependencies.js';
 import { verifyGroupBaseline } from './group-baseline.js';
 import { v4 as uuid } from 'uuid';
 import { execFileSync } from 'child_process';
@@ -154,7 +155,6 @@ const MAX_EVENT_LOG_TASKS = 200;
 const DELETED_TASK_TTL_MS = 60_000;
 
 const STREAM_BUFFER_FLUSH_MS = 40;
-const STOPPED_TASK_TTL_MS = 30_000;
 
 // Upper bound on accumulated assistant prose kept for summary extraction.
 // We only need the tail (the final <task-summary> block), so cap memory use.
@@ -351,8 +351,9 @@ export class AgentManager {
   private providers = new Map<AgentType, AgentProvider>();
   private sessions = new Map<string, ManagedSession>();
   private deletedTasks = new Set<string>();
-  /** Tasks stopped by user — prevents duplicate agent_complete from terminateOnce */
-  private stoppedTasks = new Set<string>();
+  /** Run identity prevents stopped admissions and late callbacks from affecting a retry. */
+  private runEpochs = new Map<string, number>();
+  private pendingAdmissions = new Map<string, number>();
   private eventLogs = new Map<string, AgentEvent[]>();
   private eventRepo: TaskRepository | null = null;
   private attachmentStore: AttachmentStore | null = null;
@@ -361,6 +362,9 @@ export class AgentManager {
   private streamBuffer = new Map<string, { event: AgentEvent; timer: ReturnType<typeof setTimeout> }>();
   private groupQueues = new Map<string, GroupQueue>();
   private pausedGroupAdmissions = new Set<string>();
+  private drainingGroups = new Set<string>();
+  private groupDrainRequested = new Set<string>();
+  private dependencyWarnings = new Map<string, string>();
   /** Per-repo mutex to serialize git operations (merge, checkout) */
   private repoLocks = new Map<string, Promise<void>>();
   /** Automatic no-change recovery attempts for the current task execution cycle. */
@@ -878,7 +882,61 @@ export class AgentManager {
     onWorktreeCreated?: (worktreePath: string) => void | Promise<void>,
   ): void {
     if (this.sessions.has(task.id)) return;
+    const epoch = (this.runEpochs.get(task.id) ?? 0) + 1;
+    this.runEpochs.set(task.id, epoch);
+    if (this.eventRepo) {
+      const repo = this.eventRepo;
+      this.pendingAdmissions.set(task.id, epoch);
+      void (async () => {
+        try {
+          await withDependencyAdmissionLock(async () => {
+            if (this.sessions.has(task.id) || this.runEpochs.get(task.id) !== epoch) return;
+            await assertTaskDependencies(task, repo);
+            const current = await repo.getById(task.id);
+            if (!current || this.runEpochs.get(task.id) !== epoch) return;
+            await assertTaskDependencies(current, repo);
+            this.startAgentChecked(current, onStatusChange, onWorktreeCreated, epoch);
+          });
+        } catch (error) {
+          if (this.runEpochs.get(task.id) !== epoch) return;
+          await this.deferDependencyBlockedTask(task, error);
+        } finally {
+          if (this.pendingAdmissions.get(task.id) === epoch) this.pendingAdmissions.delete(task.id);
+        }
+      })();
+      return;
+    }
+    this.startAgentChecked(task, onStatusChange, onWorktreeCreated, epoch);
+  }
 
+  private async deferDependencyBlockedTask(task: Task, error: unknown): Promise<void> {
+    const repo = this.eventRepo;
+    if (this.sessions.has(task.id)) return;
+    if (repo) {
+      const current = await repo.getById(task.id);
+      if (current?.runRequestedAt !== undefined) await repo.requestRun(task.id, current.runRequestedAt);
+      else await repo.clearRun(task.id);
+      if (current && !this.sessions.has(task.id) && current.agentStatus === 'planning') {
+        const pending = await repo.update(task.id, { agentStatus: 'idle', columnId: 'backlog' });
+        if (pending) broadcast({ type: 'task_updated', payload: pending });
+      }
+    }
+    for (const queue of this.groupQueues.values()) {
+      if (queue.runningTaskIds.delete(task.id) && !queue.pendingTaskIds.includes(task.id)) queue.pendingTaskIds.push(task.id);
+    }
+    this.emitEvent(task.id, { id: uuid(), taskId: task.id, type: 'error', timestamp: Date.now(), content: `Dependency gate: ${errorMessage(error)}` });
+  }
+
+  private startAgentChecked(
+    task: Task,
+    onStatusChange: (status: Task['agentStatus']) => void | Promise<void>,
+    onWorktreeCreated?: (worktreePath: string) => void | Promise<void>,
+    admissionEpoch?: number,
+  ): void {
+    if (this.sessions.has(task.id)) return;
+    const epoch = admissionEpoch ?? (this.runEpochs.get(task.id) ?? 0) + 1;
+    this.runEpochs.set(task.id, epoch);
+    const isCurrentRun = () => this.runEpochs.get(task.id) === epoch;
     const agentType = task.agentType || 'copilot';
     const sessionStartTime = Date.now();
     const noChangeRecoveryRetryCount = this.noChangeRecoveryRetries.get(task.id) ?? 0;
@@ -892,7 +950,7 @@ export class AgentManager {
     const terminateOnce = async (status: 'complete' | 'failed', errorMessage?: string) => {
       if (terminated) return;
       // If the task was stopped by the user, stopAgent already handled cleanup
-      if (this.stoppedTasks.has(task.id)) { terminated = true; return; }
+      if (!isCurrentRun()) { terminated = true; return; }
       terminated = true;
       this.noChangeRecoveryRetries.delete(task.id);
       const entry = this.sessions.get(task.id);
@@ -916,6 +974,9 @@ export class AgentManager {
         });
       }
 
+      // An event lookup can overlap a stop/retry; old runs cannot settle the new run.
+      const eventCount = (await this.getEvents(task.id)).length;
+      if (!isCurrentRun()) return;
       // Item 2: Broadcast agent_complete WS event
       broadcast({
         type: 'agent_complete',
@@ -924,7 +985,7 @@ export class AgentManager {
           status,
           agentType,
           duration,
-          eventCount: (await this.getEvents(task.id)).length,
+          eventCount,
         },
       });
 
@@ -1130,12 +1191,17 @@ export class AgentManager {
         let summaryBuffer = '';
         let resultBuffer = '';
 
-        const session = await provider.createSession({
+        const session = await withDependencyAdmissionLock(async () => {
+          if (this.eventRepo) await assertTaskDependencies(task, this.eventRepo);
+          verifyGroupBaseline(task);
+          if (!isCurrentRun()) throw new Error('Task was stopped before agent creation');
+          return provider.createSession({
           contextId: task.id,
           workingDirectory,
           repoPath: task.repoPath,
           systemPrompt,
           onEvent: (coreEvent: CoreAgentEvent) => {
+            if (!isCurrentRun()) return;
             const metadata: Record<string, unknown> = { ...coreEvent.metadata };
             let eventType = coreEvent.type;
             let content = coreEvent.content;
@@ -1210,8 +1276,10 @@ export class AgentManager {
               metadata,
             });
           },
+          });
         });
 
+        if (!isCurrentRun()) { await session.destroy().catch(() => {}); return; }
         this.sessions.set(task.id, { session, startTime: sessionStartTime, agentType });
         onStatusChange('executing');
 
@@ -1219,7 +1287,7 @@ export class AgentManager {
         // stay managed by Agent Board instead of escaping to a direct process.
         const taskTimeoutMs = resolveTaskTimeoutMs(task);
         const timeoutId = setTimeout(() => {
-          if (!this.sessions.has(task.id)) return;
+          if (!isCurrentRun() || !this.sessions.has(task.id)) return;
           const timeoutMsg = `Agent timed out after ${Math.round(taskTimeoutMs / 60000)} minutes`;
           console.warn(`[agent-manager] task ${task.id} timed out after ${taskTimeoutMs}ms`);
           this.emitEvent(task.id, {
@@ -1255,13 +1323,14 @@ export class AgentManager {
         }
 
         console.log(`[agent-manager] executing ${agentType} for task ${task.id}${agentAttachments?.length ? ` with ${agentAttachments.length} image(s)` : ''}`);
+        if (!isCurrentRun()) { await session.destroy().catch(() => {}); return; }
         const result = await session.execute(prompt, agentAttachments);
         console.log(`[agent-manager] ${agentType} ${result.status} for task ${task.id}${result.error ? `: ${result.error}` : ''}`);
 
         clearTimeout(timeoutId);
 
         // Primary completion path — status comes from the provider
-        if (this.sessions.has(task.id)) {
+        if (isCurrentRun() && this.sessions.has(task.id)) {
           this.sessions.delete(task.id);
           // On success, persist the agent-authored summary BEFORE the status
           // transition so the task-update broadcast carries it to clients.
@@ -1318,6 +1387,12 @@ export class AgentManager {
           session.destroy().catch(() => {});
         }
       } catch (err: unknown) {
+        if (!isCurrentRun()) return;
+        if (err instanceof DependencyGateError) {
+          this.sessions.delete(task.id);
+          await this.deferDependencyBlockedTask(task, err);
+          return;
+        }
         const message = errorMessage(err);
         const isCliMissing =
           message.includes('ENOENT') ||
@@ -1379,16 +1454,17 @@ export class AgentManager {
 
   async stopAgent(taskId: string): Promise<boolean> {
     const entry = this.sessions.get(taskId);
-    if (!entry) return false;
+    const pending = this.pendingAdmissions.delete(taskId);
+    if (!entry && !pending) return false;
+    const stoppedEpoch = (this.runEpochs.get(taskId) ?? 0) + 1;
+    this.runEpochs.set(taskId, stoppedEpoch);
+    if (!entry) return true;
 
     if (entry.timeoutId) clearTimeout(entry.timeoutId);
     const duration = Date.now() - entry.startTime;
     const { agentType } = entry;
     this.sessions.delete(taskId);
     this.noChangeRecoveryRetries.delete(taskId);
-    // Mark as stopped so terminateOnce (from the catch block) won't double-broadcast
-    this.stoppedTasks.add(taskId);
-    setTimeout(() => this.stoppedTasks.delete(taskId), STOPPED_TASK_TTL_MS);
 
     (async () => {
       try { await entry.session?.abort(); } catch { /* ignore */ }
@@ -1402,6 +1478,8 @@ export class AgentManager {
       metadata: { agentType, duration, error: 'Agent stopped by user.' },
     });
 
+    const eventCount = (await this.getEvents(taskId)).length;
+    if (this.runEpochs.get(taskId) !== stoppedEpoch) return true;
     // Broadcast agent_complete so WS listeners know the agent finished
     broadcast({
       type: 'agent_complete',
@@ -1410,7 +1488,7 @@ export class AgentManager {
         status: 'failed',
         agentType,
         duration,
-        eventCount: (await this.getEvents(taskId)).length,
+        eventCount,
       },
     });
 
@@ -1441,7 +1519,8 @@ export class AgentManager {
     const entries = [...this.sessions.entries()];
     this.sessions.clear();
 
-    for (const [, entry] of entries) {
+    for (const [taskId, entry] of entries) {
+      this.runEpochs.set(taskId, (this.runEpochs.get(taskId) ?? 0) + 1);
       if (entry.timeoutId) clearTimeout(entry.timeoutId);
       (async () => {
         try { await entry.session?.abort(); } catch { /* ignore */ }
@@ -1507,57 +1586,63 @@ export class AgentManager {
     this.drainGroupQueue(group.id);
   }
 
-  private drainGroupQueue(groupId: string): void {
-    const queue = this.groupQueues.get(groupId);
-    if (!queue) return;
+  /** Reconsider pending legacy queues after any prerequisite changes. */
+  reevaluateGroupQueues(): void {
+    for (const groupId of this.groupQueues.keys()) this.drainGroupQueue(groupId);
+    if (this.eventRepo) {
+      const repo = this.eventRepo;
+      void (async () => {
+        for (const taskId of this.sessions.keys()) {
+          const gate = await getTaskDependencyGate(repo, taskId);
+          if (!this.sessions.has(taskId)) continue;
+          if (gate.eligible) { this.dependencyWarnings.delete(taskId); continue; }
+          const reason = gate.reason || 'Prerequisite no longer satisfied';
+          if (this.dependencyWarnings.get(taskId) === reason) continue;
+          this.dependencyWarnings.set(taskId, reason);
+          this.emitEvent(taskId, { id: uuid(), taskId, type: 'error', timestamp: Date.now(),
+            content: `Dependency inconsistency while running: ${reason}. The active agent continues; review its repository inputs before integration.` });
+        }
+      })().catch(error => console.error('[dependencies] running-task check failed:', error));
+    }
+  }
 
-    // Use queueMicrotask to avoid reentrancy issues when startAgent
-    // synchronously calls onStatusChange('failed') for unavailable agents
-    const startNext = () => {
+  private drainGroupQueue(groupId: string): void {
+    if (this.drainingGroups.has(groupId)) { this.groupDrainRequested.add(groupId); return; }
+    this.drainingGroups.add(groupId);
+    void (async () => {
       const q = this.groupQueues.get(groupId);
       if (!q || this.pausedGroupAdmissions.has(groupId)) return;
-      if (q.runningTaskIds.size >= q.maxConcurrency || q.pendingTaskIds.length === 0) return;
-
-      const taskId = q.pendingTaskIds.shift()!;
-      const task = q.tasks.get(taskId);
-      if (!task) { startNext(); return; }
-
-      q.runningTaskIds.add(taskId);
-
-      const originalStatusCb = q.makeStatusCallback(task);
-      const wrappedStatusCb = async (status: Task['agentStatus']) => {
-        // Await status persistence so DB is consistent before completion check
-        await originalStatusCb(status);
-
-        if (status === 'complete' || status === 'failed') {
-          q.runningTaskIds.delete(taskId);
-          if (status === 'complete') {
-            q.completedTaskIds.add(taskId);
-          } else {
-            q.failedTaskIds.add(taskId);
-          }
-
-          // Notify completion (catch to prevent unhandled rejection crash)
-          Promise.resolve(q.onChildComplete(taskId)).catch((err: unknown) =>
-            console.error('[group] onChildComplete failed:', err),
-          );
-
-          // Clean up queue when fully drained
-          if (q.pendingTaskIds.length === 0 && q.runningTaskIds.size === 0) {
-            this.groupQueues.delete(groupId);
-          } else {
-            queueMicrotask(() => this.drainGroupQueue(groupId));
-          }
-        }
-      };
-
-      this.startAgent(task, wrappedStatusCb, q.makeWorktreeCallback(task));
-
-      // Start more if we haven't hit concurrency limit
-      startNext();
-    };
-
-    startNext();
+      for (const taskId of [...q.pendingTaskIds]) {
+        if (this.groupQueues.get(groupId) !== q || this.pausedGroupAdmissions.has(groupId)
+          || q.runningTaskIds.size >= q.maxConcurrency) break;
+        await withDependencyAdmissionLock(async () => {
+          const task = this.eventRepo ? await this.eventRepo.getById(taskId) : q.tasks.get(taskId);
+          if (!task || this.sessions.has(taskId)) return;
+          if (this.eventRepo && !(await getTaskDependencyGate(this.eventRepo, taskId)).eligible) return;
+          if (this.groupQueues.get(groupId) !== q || this.pausedGroupAdmissions.has(groupId)
+            || !q.pendingTaskIds.includes(taskId) || q.runningTaskIds.size >= q.maxConcurrency) return;
+          // Leave blocked tasks pending: an external completion will wake this queue.
+          q.pendingTaskIds = q.pendingTaskIds.filter(id => id !== taskId);
+          q.runningTaskIds.add(taskId);
+          const originalStatusCb = q.makeStatusCallback(task);
+          const wrappedStatusCb = async (status: Task['agentStatus']) => {
+            await originalStatusCb(status);
+            if (status === 'complete' || status === 'failed') {
+              q.runningTaskIds.delete(taskId);
+              (status === 'complete' ? q.completedTaskIds : q.failedTaskIds).add(taskId);
+              try { await q.onChildComplete(taskId); } catch (error) { console.error('[group] onChildComplete failed:', error); }
+              if (q.pendingTaskIds.length === 0 && q.runningTaskIds.size === 0) this.groupQueues.delete(groupId);
+              this.reevaluateGroupQueues();
+            }
+          };
+          this.startAgentChecked(task, wrappedStatusCb, q.makeWorktreeCallback(task));
+        });
+      }
+    })().catch(error => console.error('[group] dependency admission failed:', error))
+      .finally(() => {
+        this.drainingGroups.delete(groupId);
+        if (this.groupDrainRequested.delete(groupId)) this.drainGroupQueue(groupId);
+      });
   }
 
   async stopGroup(groupId: string): Promise<void> {

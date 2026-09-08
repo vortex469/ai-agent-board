@@ -1,3 +1,4 @@
+import { useDependencies } from './TaskDependencies';
 import { useMemo } from 'react';
 import { AlertTriangle, CheckCircle2, CircleDot, ClipboardList, Loader2, SkipForward } from 'lucide-react';
 import type { Task, ColumnId } from '@/types';
@@ -35,6 +36,7 @@ function emptyLabel(label: string) {
 }
 
 export function RoadmapProgress({ tasks, groups }: RoadmapProgressProps) {
+  const { gates } = useDependencies();
   const progress = useMemo(() => {
     const taskCards: RoadmapCard[] = tasks
       .filter((task) => !task.archived)
@@ -45,7 +47,7 @@ export function RoadmapProgress({ tasks, groups }: RoadmapProgressProps) {
         createdAt: task.createdAt,
         running: task.agentStatus === 'planning' || task.agentStatus === 'executing',
         blockedOrReview: task.agentStatus === 'failed' || task.columnId === 'review',
-        eligible: task.columnId === 'backlog' || (task.columnId === 'in-progress' && task.agentStatus === 'idle'),
+        eligible: gates[task.id]?.eligible === true && (task.columnId === 'backlog' || (task.columnId === 'in-progress' && task.agentStatus === 'idle')),
       }));
 
     const groupCards: RoadmapCard[] = groups
@@ -53,7 +55,7 @@ export function RoadmapProgress({ tasks, groups }: RoadmapProgressProps) {
       .map((group) => {
         const hasRunningChild = group.children.some((child) => child.agentStatus === 'planning' || child.agentStatus === 'executing');
         const hasFailedChild = group.children.some((child) => child.agentStatus === 'failed');
-        const hasIdleChild = group.children.some((child) => child.agentStatus === 'idle');
+        const hasIdleChild = group.children.some((child) => child.agentStatus === 'idle' && !child.archived && gates[child.id]?.eligible === true);
         return {
           id: group.id,
           title: group.title,
@@ -61,7 +63,7 @@ export function RoadmapProgress({ tasks, groups }: RoadmapProgressProps) {
           createdAt: group.createdAt,
           running: hasRunningChild,
           blockedOrReview: hasFailedChild || group.columnId === 'review',
-          eligible: group.columnId === 'backlog' || (group.columnId === 'in-progress' && hasIdleChild && !hasRunningChild),
+          eligible: hasIdleChild && (group.columnId === 'backlog' || (group.columnId === 'in-progress' && !hasRunningChild)),
         };
       });
 
@@ -73,16 +75,17 @@ export function RoadmapProgress({ tasks, groups }: RoadmapProgressProps) {
       blockedOrReview: cards.find((card) => card.blockedOrReview),
       nextEligible: cards.find((card) => card.eligible && !card.running && !card.blockedOrReview),
     };
-  }, [tasks, groups]);
+  }, [tasks, groups, gates]);
 
   const percent = progress.total > 0 ? Math.round((progress.completed / progress.total) * 100) : 0;
 
   return (
     <section
       aria-label="Roadmap progress"
+      data-roadmap-progress
       className="shrink-0 border-b border-border bg-background/95 px-3 py-3 max-lg:px-[max(0.75rem,env(safe-area-inset-left))] lg:px-6"
     >
-      <div className="grid gap-3 lg:grid-cols-[minmax(13rem,18rem)_1fr] lg:items-center">
+      <div className="roadmap-progress-layout grid gap-3 lg:grid-cols-[minmax(13rem,18rem)_1fr] lg:items-center">
         <div className="min-w-0">
           <div className="mb-2 flex items-center justify-between gap-3">
             <div className="flex min-w-0 items-center gap-2">
@@ -102,7 +105,7 @@ export function RoadmapProgress({ tasks, groups }: RoadmapProgressProps) {
           </div>
         </div>
 
-        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
+        <div className="roadmap-progress-metrics grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
           <div className="rounded-lg border border-border bg-card px-3 py-2">
             <div className="mb-1 flex items-center gap-1.5 text-[11px] font-medium uppercase text-muted-foreground">
               <CircleDot className="h-3.5 w-3.5" />

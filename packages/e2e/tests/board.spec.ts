@@ -384,11 +384,13 @@ test.describe('Task CRUD', () => {
     await expect(page.getByText('running').first()).toBeVisible();
     await expect(page.getByText('succeeded').first()).toBeVisible();
     await expect(page.getByText('failed').first()).toBeVisible();
+    await page.locator('details').filter({ hasText: `Focused tests passed: ${agentCase.label} command lifecycle projection` }).locator('summary').click();
     await expect(page.getByText(`Focused tests passed: ${agentCase.label} command lifecycle projection`)).toBeVisible();
   });
   }
 
-  test('repository evidence renders working-tree, committed, and no-change states', async ({ page }) => {
+  test('repository evidence renders working-tree, committed, and no-change states', async ({ page, context }) => {
+    await context.grantPermissions(['clipboard-read', 'clipboard-write']);
     const now = Date.now();
     const tasks = [
       {
@@ -531,8 +533,8 @@ test.describe('Task CRUD', () => {
     await page.getByRole('button', { name: /^Changes/ }).click();
     await expect(page.getByText('Working-tree changes present')).toBeVisible();
     await expect(page.getByText('2').first()).toBeVisible();
-    await expect(page.getByText('/tmp/agentboard-working-worktree')).toBeVisible();
-    await expect(page.getByText('task/repo-working')).toBeVisible();
+    await expect(page.getByText('/tmp/agentboard-working-worktree').last()).toBeVisible();
+    await expect(page.getByText('task/repo-working').last()).toBeVisible();
     await expect(page.getByText('main @ 1111111')).toBeVisible();
     await expect(page.getByText('packages/client/src/components/AgentPanel.tsx')).toBeVisible();
     await page.getByRole('button', { name: 'Copy changed file list' }).click();
@@ -589,6 +591,7 @@ test.describe('Task CRUD', () => {
         contentType: 'application/json',
         body: JSON.stringify({
           id: taskId,
+          projectId: 'default',
           title: taskTitle,
           description: 'Test description',
           priority: 'medium',
@@ -606,7 +609,8 @@ test.describe('Task CRUD', () => {
     const targetColumn = page.locator('[data-column="in-progress"]');
     await taskCard.scrollIntoViewIfNeeded();
 
-    const sourceBox = await taskCard.boundingBox();
+    const dragHandle = taskCard.getByRole('button', { name: `Drag ${taskTitle}`, exact: true });
+    const sourceBox = await dragHandle.boundingBox();
     const targetBox = await targetColumn.boundingBox();
     expect(sourceBox).not.toBeNull();
     expect(targetBox).not.toBeNull();

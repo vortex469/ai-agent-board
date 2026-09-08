@@ -1,3 +1,4 @@
+import { getTaskDependencyGate } from '../src/services/task-dependencies.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import Database from 'better-sqlite3';
@@ -131,7 +132,9 @@ test('full-roadmap blocks a legacy coding predecessor whose mocked merge has no 
     assert.equal((await f.taskRepo.getById(first.id))?.columnId, 'done');
     assert.deepEqual(f.started, [first.id]);
     assert.equal((await f.taskRepo.getById(third.id))?.columnId, 'backlog');
-    assert.match((await f.taskRepo.getEventsByTaskId(third.id)).map(event => event.content).join('\n'), /repository does not match|no recorded repository baseline/);
+    const gate = await getTaskDependencyGate(f.taskRepo, third.id);
+    assert.equal(gate.eligible, false);
+    assert.match(gate.reason ?? '', /repository integration|repository result/);
   } finally { await f.close(); }
 });
 

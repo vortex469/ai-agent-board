@@ -1,3 +1,5 @@
+import { broadcast } from '../websocket.js';
+import { withDependencyAdmissionLock } from '../services/task-dependencies.js';
 import { Router, Request, Response } from 'express';
 import path from 'path';
 import { startOrderedGroupChild, withOrderedGroupLock } from '../services/ordered-group.js';
@@ -384,13 +386,13 @@ export function createGroupsRouter(
         }
         if (group.roadmapExecutionMode) await taskRepo.clearRun(child.id);
         if (group.roadmapExecutionMode || child.agentStatus !== 'idle' || worktreePath !== child.worktreePath) {
-          await taskRepo.update(child.id, {
+          await withDependencyAdmissionLock(() => taskRepo.update(child.id, {
             agentStatus: 'idle',
             ...(group.roadmapExecutionMode ? { columnId: 'backlog' as const } : {}),
             startedAt: undefined,
             completedAt: undefined,
             worktreePath,
-          });
+          }));
         }
       }
       updates.startedAt = undefined;
@@ -445,7 +447,8 @@ export function createGroupsRouter(
     }
 
     // CASCADE delete handles children
-    await groupRepo.delete(id);
+    await withDependencyAdmissionLock(() => groupRepo.delete(id));
+    broadcast({ type: 'group_deleted', payload: { id } });
     res.status(204).send();
   }));
 
@@ -464,6 +467,8 @@ export function createGroupsRouter(
     }
 
     if (group.roadmapExecutionMode) {
+      const waiting = await groupRepo.update(id, { columnId: 'in-progress', startedAt: group.startedAt ?? Date.now(), completedAt: undefined });
+      if (waiting) broadcastGroupUpdate(waiting);
       await startOrderedGroupChild(id, groupRepo, taskRepo, agentManager, true, projectRepo);
       res.json({ ...(await groupRepo.getById(id)), children: await groupRepo.getChildTasks(id) });
       return;
@@ -501,7 +506,7 @@ export function createGroupsRouter(
     const children = await groupRepo.getChildTasks(id);
     for (const child of children) {
       if (child.agentStatus === 'planning' || child.agentStatus === 'executing') {
-        const t = await taskRepo.update(child.id, { agentStatus: 'failed' });
+        const t = await withDependencyAdmissionLock(() => taskRepo.update(child.id, { agentStatus: 'failed' }));
         if (t) broadcastTaskUpdate(t);
       }
     }
@@ -536,7 +541,7 @@ export function createGroupsRouter(
         const cleanup = agentManager.removeWorktree(child);
         if (cleanup.status !== 'blocked') worktreePath = undefined;
       }
-      const t = await taskRepo.update(child.id, { archived: true, worktreePath });
+      const t = await withDependencyAdmissionLock(() => taskRepo.update(child.id, { archived: true, worktreePath }));
       if (t) broadcastTaskUpdate(t);
     }
 
@@ -553,7 +558,7 @@ export function createGroupsRouter(
 
     const children = await groupRepo.getChildTasks(id);
     for (const child of children) {
-      const t = await taskRepo.update(child.id, { archived: false, agentStatus: 'idle', columnId: 'backlog' });
+      const t = await withDependencyAdmissionLock(() => taskRepo.update(child.id, { archived: false, agentStatus: 'idle', columnId: 'backlog' }));
       if (t) broadcastTaskUpdate(t);
     }
 

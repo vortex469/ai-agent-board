@@ -98,3 +98,21 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   opacity: 0.5;
 }
+
+/* Keep the board reachable in short landscape viewports. Metrics retain their
+   labels and values in a horizontally scrollable row. */
+@media (max-width: 1023px) and (max-height: 500px) and (orientation: landscape) {
+  [data-roadmap-progress] {
+    padding-top: 0.5rem;
+    padding-bottom: 0.5rem;
+  }
+  .roadmap-progress-layout {
+    grid-template-columns: minmax(8rem, 10rem) minmax(0, 1fr);
+    align-items: center;
+  }
+  .roadmap-progress-metrics {
+    grid-template-columns: repeat(5, minmax(9rem, 1fr));
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+  }
+}

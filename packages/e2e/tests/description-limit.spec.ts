@@ -17,7 +17,7 @@ for (const length of [100, 5_001, 20_000]) {
     const updated = await request.patch(`${API}/api/tasks/${task.id}`, { data: { description: 'y'.repeat(length) } });
     expect(updated.status()).toBe(200);
     expect((await updated.json()).description).toBe('y'.repeat(length));
-    expect((await (await request.get(`${API}/api/tasks/${task.id}`)).json()).description).toBe('y'.repeat(length));
+    expect((await (await request.get(`${API}/api/tasks`)).json()).find((item: { id: string }) => item.id === task.id).description).toBe('y'.repeat(length));
     const batch = await request.post(`${API}/api/tasks/batch`, { data: { tasks: [{ title: 'Batch boundary', description }] } });
     expect(batch.status()).toBe(201);
     const { tasks } = await batch.json();
@@ -40,7 +40,7 @@ test('20,001 characters fail cleanly without changing existing tasks or partiall
     expect(response.status()).toBe(400);
     expect((await response.json()).error).toContain('description must be at most 20000 characters');
   }
-  expect((await (await request.get(`${API}/api/tasks/${task.id}`)).json()).description).toBe('Original description');
+  expect((await (await request.get(`${API}/api/tasks`)).json()).find((item: { id: string }) => item.id === task.id).description).toBe('Original description');
   const tasks = await (await request.get(`${API}/api/tasks`)).json();
   expect(tasks.some((item: { title: string }) => item.title === 'Must not create')).toBe(false);
 });

@@ -1,3 +1,4 @@
+import type { TaskDependencyGate } from '../../../../shared/types';
 import type {
   Task,
   TaskGroup,
@@ -43,7 +44,7 @@ function withQuery(path: string, params: Record<string, string | boolean | undef
 }
 
 const BASE = '/api';
-const API_KEY = import.meta.env.VITE_API_KEY as string | undefined;
+const API_KEY = import.meta.env?.VITE_API_KEY as string | undefined;
 
 function authHeaders(): Record<string, string> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -104,6 +105,15 @@ export const api = {
     request<ProjectConfig>('/projects/config', { method: 'PATCH', body: JSON.stringify({ cloneRoot }) }),
 
   // --- Task CRUD ---
+  getTaskDependencies: (id: string) =>
+    request<TaskDependencyGate>(`/tasks/${encodeURIComponent(id)}/dependencies`),
+
+  addTaskDependency: (id: string, relatedTaskId: string) =>
+    request<unknown>(`/tasks/${encodeURIComponent(id)}/relationships`, { method: 'POST', body: JSON.stringify({ relatedTaskId, type: 'blocks', direction: 'blocked-by' }) }),
+
+  removeTaskDependency: (id: string, relatedTaskId: string) =>
+    request<void>(`/tasks/${encodeURIComponent(id)}/relationships/${encodeURIComponent(relatedTaskId)}`, { method: 'DELETE' }),
+
   getTasks: (includeArchived = false, projectId?: string) =>
     request<Task[]>(withQuery('/tasks', { includeArchived, projectId })),
 

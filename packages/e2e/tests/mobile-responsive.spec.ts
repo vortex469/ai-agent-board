@@ -127,9 +127,12 @@ async function expectTouchTarget(locator: Locator) {
 async function isInViewport(locator: Locator) {
   return locator.evaluate((el) => {
     const rect = el.getBoundingClientRect();
-    return rect.bottom > 0
+    const scroller = el.closest('[data-column-scroll]')?.getBoundingClientRect();
+    // Window intersection alone can count a card hidden behind column clipping
+    // or the rail navigation, stopping the real swipe loop too early.
+    return rect.top >= Math.max(0, scroller?.top ?? 0)
+      && rect.bottom <= Math.min(window.innerHeight, scroller?.bottom ?? window.innerHeight)
       && rect.right > 0
-      && rect.top < window.innerHeight
       && rect.left < window.innerWidth;
   });
 }
@@ -399,6 +402,7 @@ for (const vp of MOBILE_VIEWPORTS) {
       await expect(composer).toBeInViewport();
 
       await page.getByRole('button', { name: /^Changes/ }).click();
+      await page.getByText('Working-tree changes present').scrollIntoViewIfNeeded();
       await expect(page.getByText('Working-tree changes present')).toBeInViewport();
       await expect(page.getByText('/tmp/agentboard-mobile-evidence-worktree')).toBeVisible();
       await expect(page.getByText('packages/client/src/components/AgentPanel.tsx')).toBeVisible();
@@ -485,8 +489,8 @@ test.describe('Mobile portrait Done column overflow', () => {
     await expect(doneScroller).toBeVisible();
     await expect(doneScroller).toHaveCSS('overflow-y', 'auto');
 
-    const firstDone = page.getByRole('heading', { name: `${DONE_SCROLL_PREFIX} 01`, exact: true });
-    const lastDone = page.getByRole('heading', { name: `${DONE_SCROLL_PREFIX} ${DONE_SCROLL_COUNT}`, exact: true });
+    const firstDone = page.getByRole('heading', { name: new RegExp(`${DONE_SCROLL_PREFIX} 01$`) });
+    const lastDone = page.getByRole('heading', { name: new RegExp(`${DONE_SCROLL_PREFIX} ${DONE_SCROLL_COUNT}$`) });
     const lastDoneCard = page
       .locator('[data-column="done"] .group')
       .filter({ has: lastDone });
@@ -499,7 +503,9 @@ test.describe('Mobile portrait Done column overflow', () => {
     const startY = Math.min(scrollBox!.y + scrollBox!.height - 24, 740);
     const endY = scrollBox!.y + 80;
 
-    for (let i = 0; i < 8; i++) {
+    // Card heights vary with viewport/font wrapping; keep swiping until the
+    // last card is visible instead of assuming eight gestures cover 24 cards.
+    for (let i = 0; i < 40; i++) {
       await touchSwipe(page, x, startY, x + (i % 2 === 0 ? 2 : -2), endY, 6);
       if (await isInViewport(lastDone)) break;
     }

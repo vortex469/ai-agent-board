@@ -217,7 +217,15 @@ export class SqliteTaskRepository implements TaskRepository {
     }
   }
   async requestRun(id: string, at: number) { this.db.prepare('UPDATE tasks SET run_requested_at=?, run_claimed_at=NULL WHERE id=?').run(at,id); return this.getById(id); }
-  async claimRun(id: string, at: number) { const staleBefore=at-30_000; const r=this.db.prepare("UPDATE tasks SET run_claimed_at=? WHERE id=? AND run_requested_at IS NOT NULL AND (run_claimed_at IS NULL OR run_claimed_at < ?) AND agent_status IN ('idle','planning')").run(at,id,staleBefore); return r.changes ? this.getById(id) : undefined; }
+  async claimRun(id: string, at: number) {
+    const result = this.db.prepare(`UPDATE tasks SET run_claimed_at=? WHERE id=?
+      AND run_requested_at IS NOT NULL AND (run_claimed_at IS NULL OR run_claimed_at < ?)
+      AND agent_status IN ('idle','planning') AND NOT EXISTS (
+        SELECT 1 FROM task_dependencies d LEFT JOIN tasks p ON p.id=d.prerequisite_task_id
+        WHERE d.dependent_task_id=tasks.id AND (p.id IS NULL OR p.agent_status IS NOT 'complete' OR p.column_id IS NOT 'done')
+      )`).run(at, id, at - 30_000);
+    return result.changes ? this.getById(id) : undefined;
+  }
   async clearRun(id: string) { this.db.prepare('UPDATE tasks SET run_requested_at=NULL, run_claimed_at=NULL WHERE id=?').run(id); return this.getById(id); }
   async getPendingRuns(staleBefore = Date.now()-30_000) { return (this.db.prepare("SELECT * FROM tasks WHERE run_requested_at IS NOT NULL AND (run_claimed_at IS NULL OR run_claimed_at < ?) AND agent_status IN ('idle','planning') ORDER BY run_requested_at").all(staleBefore) as TaskRow[]).map(rowToTask); }
 
@@ -374,26 +382,46 @@ export class SqliteTaskRepository implements TaskRepository {
   }
 
   async deleteRelationship(taskId: string, relatedTaskId: string): Promise<boolean> {
-    const [left, right] = taskId < relatedTaskId ? [taskId, relatedTaskId] : [relatedTaskId, taskId];
-    const related = this.db.prepare('DELETE FROM task_relationships WHERE task_id = ? AND related_task_id = ?').run(left, right).changes;
-    const dependencies = this.db.prepare(`DELETE FROM task_dependencies
-      WHERE (prerequisite_task_id = ? AND dependent_task_id = ?) OR (prerequisite_task_id = ? AND dependent_task_id = ?)`)
-      .run(taskId, relatedTaskId, relatedTaskId, taskId).changes;
-    return related + dependencies > 0;
+    return this.db.transaction(() => {
+      const active = this.db.prepare(`SELECT 1 FROM tasks t JOIN task_dependencies d ON d.dependent_task_id=t.id
+        WHERE ((d.prerequisite_task_id=? AND d.dependent_task_id=?) OR (d.prerequisite_task_id=? AND d.dependent_task_id=?))
+        AND (t.agent_status IN ('planning','executing') OR (t.agent_status='idle' AND t.run_claimed_at IS NOT NULL))`)
+        .get(taskId, relatedTaskId, relatedTaskId, taskId);
+      if (active) throw new Error('cannot change dependencies while the dependent task is running or reserved');
+      const [left, right] = taskId < relatedTaskId ? [taskId, relatedTaskId] : [relatedTaskId, taskId];
+      const related = this.db.prepare('DELETE FROM task_relationships WHERE task_id = ? AND related_task_id = ?').run(left, right).changes;
+      const dependencies = this.db.prepare(`DELETE FROM task_dependencies
+        WHERE (prerequisite_task_id = ? AND dependent_task_id = ?) OR (prerequisite_task_id = ? AND dependent_task_id = ?)`)
+        .run(taskId, relatedTaskId, relatedTaskId, taskId).changes;
+      return related + dependencies > 0;
+    }).immediate();
   }
 
   async createDependency(prerequisiteTaskId: string, dependentTaskId: string, createdAt: number): Promise<{ relationship: TaskRelationship; created: boolean }> {
     if (prerequisiteTaskId === dependentTaskId) throw new Error('a task cannot depend on itself');
-    const result = this.db.prepare(`INSERT OR IGNORE INTO task_dependencies (prerequisite_task_id, dependent_task_id, created_at)
-      SELECT ?, ?, ? FROM tasks prerequisite JOIN tasks dependent ON dependent.id = ? WHERE prerequisite.id = ? AND prerequisite.project_id = dependent.project_id`)
-      .run(prerequisiteTaskId, dependentTaskId, createdAt, dependentTaskId, prerequisiteTaskId);
-    const row = this.db.prepare('SELECT created_at FROM task_dependencies WHERE prerequisite_task_id = ? AND dependent_task_id = ?')
-      .get(prerequisiteTaskId, dependentTaskId) as { created_at: number } | undefined;
-    if (!row) throw new Error('tasks must exist in the same project');
-    return {
-      relationship: { taskId: dependentTaskId, relatedTaskId: prerequisiteTaskId, type: 'blocks', direction: 'blocked-by', createdAt: row.created_at },
-      created: result.changes > 0,
-    };
+    return this.db.transaction(() => {
+      const dependent = this.db.prepare(`SELECT dependent.* FROM tasks prerequisite JOIN tasks dependent ON dependent.id=?
+        WHERE prerequisite.id=? AND prerequisite.project_id=dependent.project_id`).get(dependentTaskId, prerequisiteTaskId) as TaskRow | undefined;
+      if (!dependent) throw new Error('tasks must exist in the same project');
+      if (['planning', 'executing'].includes(dependent.agent_status)
+        || (dependent.agent_status === 'idle' && dependent.run_claimed_at != null)) {
+        throw new Error('cannot change dependencies while the dependent task is running or reserved');
+      }
+      // UNION, rather than UNION ALL, also terminates safely for pre-existing corrupt cycles.
+      const cycle = this.db.prepare(`WITH RECURSIVE descendants(id) AS (
+        SELECT dependent_task_id FROM task_dependencies WHERE prerequisite_task_id=?
+        UNION SELECT d.dependent_task_id FROM task_dependencies d JOIN descendants ON d.prerequisite_task_id=descendants.id
+      ) SELECT 1 FROM descendants WHERE id=? LIMIT 1`).get(dependentTaskId, prerequisiteTaskId);
+      if (cycle) throw new Error('dependency would create a cycle');
+      const result = this.db.prepare(`INSERT OR IGNORE INTO task_dependencies (prerequisite_task_id, dependent_task_id, created_at)
+        VALUES (?, ?, ?)`).run(prerequisiteTaskId, dependentTaskId, createdAt);
+      const row = this.db.prepare('SELECT created_at FROM task_dependencies WHERE prerequisite_task_id = ? AND dependent_task_id = ?')
+        .get(prerequisiteTaskId, dependentTaskId) as { created_at: number };
+      return {
+        relationship: { taskId: dependentTaskId, relatedTaskId: prerequisiteTaskId, type: 'blocks' as const, direction: 'blocked-by' as const, createdAt: row.created_at },
+        created: result.changes > 0,
+      };
+    }).immediate();
   }
 
   async getAttemptById(id: string): Promise<ExecutionAttempt | undefined> {

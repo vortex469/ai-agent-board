@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import type { Task, TaskGroup, ReconfigureTaskGroupInput } from '@/types';
 import { api, connectWS } from '@/lib/api';
 import { createTaskUpdateTracker } from '@/lib/task-update-tracker';
@@ -8,6 +8,7 @@ import type { Priority, RoadmapExecutionMode } from '@/types';
 const getProjectId = (value: { projectId?: string }) => value.projectId ?? 'default';
 
 export function useTaskGroups(projectId = 'default') {
+  const deletedGroupIds = useRef(new Set<string>());
   const [groups, setGroups] = useState<TaskGroupWithChildren[]>([]);
   const [error, setError] = useState<string | null>(null);
 
@@ -26,7 +27,7 @@ export function useTaskGroups(projectId = 'default') {
 
   // Fetch groups on mount
   useEffect(() => {
-    api.getGroups(false, projectId).then(setGroups).catch((err) => {
+    api.getGroups(false, projectId).then((groups) => setGroups(groups.filter(group => !deletedGroupIds.current.has(group.id)))).catch((err) => {
       setError(`Failed to load groups: ${err.message}`);
     });
   }, [projectId]);
@@ -35,8 +36,13 @@ export function useTaskGroups(projectId = 'default') {
   useEffect(() => {
     return connectWS(
       (msg) => {
+        if (msg.type === 'group_deleted') {
+          deletedGroupIds.current.add(msg.payload.id);
+          setGroups((prev) => prev.filter((group) => group.id !== msg.payload.id));
+          return;
+        }
         if (msg.type === 'group_updated') {
-          if (getProjectId(msg.payload) !== projectId) return;
+          if (getProjectId(msg.payload) !== projectId || deletedGroupIds.current.has(msg.payload.id)) return;
           setGroups((prev) => {
             const exists = prev.some((g) => g.id === msg.payload.id);
             if (exists) {
@@ -44,7 +50,7 @@ export function useTaskGroups(projectId = 'default') {
             }
             // New group — fetch full details (with children)
             api.getGroup(msg.payload.id).then((full) => {
-              if (getProjectId(full) !== projectId) return;
+              if (getProjectId(full) !== projectId || deletedGroupIds.current.has(full.id)) return;
               setGroups((p) => {
                 const alreadyExists = p.some((g) => g.id === full.id);
                 return alreadyExists ? p.map((g) => (g.id === full.id ? full : g)) : [...p, full];
@@ -58,7 +64,7 @@ export function useTaskGroups(projectId = 'default') {
           childUpdates.receive(msg.payload);
         }
       },
-      () => { api.getGroups(false, projectId).then(setGroups).catch(console.error); },
+      () => { api.getGroups(false, projectId).then((groups) => setGroups(groups.filter(group => !deletedGroupIds.current.has(group.id)))).catch(console.error); },
     );
   }, [projectId, childUpdates]);
 

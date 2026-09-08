@@ -1,3 +1,4 @@
+import { getTaskDependencyGate } from '../services/task-dependencies.js';
 import { Router, Request, Response } from 'express';
 import { startOrderedGroupChild } from '../services/ordered-group.js';
 import { spawnSync } from 'child_process';
@@ -15,7 +16,7 @@ import { MAX_TITLE_LENGTH, isValidAgentType, isValidPriority } from '@ai-agent-b
 import { errorMessage } from '../utils.js';
 import { getConfig, getCloneRoot, setCloneRoot } from '../config.js';
 import {
-  asyncHandler,
+  broadcastGroupUpdate, asyncHandler,
   broadcastProjectDelete,
   broadcastProjectUpdate,
   cloneRepo,
@@ -124,15 +125,7 @@ interface ParsedProjectDefaults {
 
 
 async function autoRunPrerequisitesAreDone(taskRepo: TaskRepository, taskId: string): Promise<boolean> {
-  const prerequisites = (await taskRepo.getRelationships(taskId))
-    .filter((relationship) => relationship.type === 'blocks' && relationship.direction === 'blocked-by');
-
-  for (const prerequisite of prerequisites) {
-    const task = await taskRepo.getById(prerequisite.relatedTaskId);
-    if (!task || task.columnId !== 'done' || task.agentStatus === 'failed') return false;
-  }
-
-  return true;
+  return (await getTaskDependencyGate(taskRepo, taskId)).eligible;
 }
 
 export async function tickProjectAutoRun(args: {
@@ -155,6 +148,26 @@ export async function tickProjectAutoRun(args: {
   const groups = args.groupRepo ? await args.groupRepo.getAll(true, project.id) : [];
   const groupChildren = args.groupRepo ? (await Promise.all(groups.map(group => args.groupRepo!.getChildTasks(group.id)))).flat() : [];
   const projectTasks = [...await taskRepo.getAll(true, project.id), ...groupChildren];
+
+  // Ordered groups own their concurrency. A running sibling group must not
+  // prevent another group's independent first child from entering execution.
+  if (args.groupRepo) {
+    for (const id of orderedBacklogIds) {
+      const group = groups.find(item => item.id === id);
+      if (!group || group.archived || !group.roadmapExecutionMode) continue;
+      const next = groupChildren.find(child => child.groupId === group.id && (child.columnId !== 'done' || child.agentStatus !== 'complete'));
+      if (group.roadmapExecutionMode === 'full-roadmap' && next?.columnId === 'backlog' && next.agentStatus === 'idle'
+        && !(await getTaskDependencyGate(taskRepo, next.id)).eligible && group.columnId === 'backlog') {
+        // Persist group run intent even while no child may reserve execution.
+        // Completion notifications can now resume this group without a browser tick.
+        const waiting = await args.groupRepo.update(group.id, { columnId: 'in-progress', startedAt: Date.now(), completedAt: undefined });
+        if (waiting) broadcastGroupUpdate(waiting);
+      }
+      const started = await startOrderedGroupChild(group.id, args.groupRepo, taskRepo, agentManager,
+        group.roadmapExecutionMode === 'full-roadmap', args.projectRepo);
+      if (started) return { started: true, task: started };
+    }
+  }
 
   if (projectTasks.some((task) =>
     agentManager.isRunning(task.id)

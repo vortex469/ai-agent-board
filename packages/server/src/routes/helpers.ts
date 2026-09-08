@@ -1,3 +1,4 @@
+import { getTaskDependencyGate, withDependencyAdmissionLock } from '../services/task-dependencies.js';
 import { withOrderedGroupLock } from '../services/group-lock.js';
 import { prepareOrderedGroupBaseline, recordOrderedGroupResult } from '../services/group-baseline.js';
 import { Request, Response, NextFunction } from 'express';
@@ -902,7 +903,7 @@ export async function triggerAutomaticDependentProgression(
   agentManager?: AgentManager,
   projectRepo?: ProjectRepository,
 ): Promise<Task | undefined> {
-  if (!agentManager || completedTask.columnId !== 'done' || completedTask.agentStatus === 'failed') {
+  if (!agentManager || completedTask.columnId !== 'done' || completedTask.agentStatus !== 'complete') {
     return undefined;
   }
   if (projectRepo && !await isProjectAutoRunEnabled(projectRepo, completedTask.projectId)) {
@@ -916,7 +917,7 @@ export async function triggerAutomaticDependentProgression(
   for (const relationship of dependents) {
     const dependent = await repo.getById(relationship.relatedTaskId);
     if (!dependent || dependent.archived) continue;
-    if (dependent.groupId) return undefined;
+    if (dependent.groupId) continue;
     if (dependent.columnId === 'done') continue;
     if (dependent.columnId !== 'backlog' && dependent.columnId !== 'in-progress') return undefined;
     if (dependent.agentStatus !== 'idle') return undefined;
@@ -924,14 +925,7 @@ export async function triggerAutomaticDependentProgression(
     if (dependent.runClaimedAt !== undefined) return undefined;
     if (agentManager.isRunning(dependent.id)) return undefined;
 
-    const prerequisites = (await repo.getRelationships(dependent.id))
-      .filter((item) => item.type === 'blocks' && item.direction === 'blocked-by');
-    for (const prerequisite of prerequisites) {
-      const prerequisiteTask = await repo.getById(prerequisite.relatedTaskId);
-      if (!prerequisiteTask || prerequisiteTask.columnId !== 'done' || prerequisiteTask.agentStatus === 'failed') {
-        return undefined;
-      }
-    }
+    if (!await taskPrerequisitesAreDone(repo, dependent.id)) continue;
 
     const agentInfo = agentManager.getAvailableAgents().find((agent) => agent.name === dependent.agentType);
     if (!agentInfo?.available) {
@@ -1167,39 +1161,42 @@ export async function startAgentForTask(
       if (current) await startAgentForTask(current, repo, agentManager, projectRepo, onSettled, true, resetEventHistory);
     });
   }
-  if (!await taskPrerequisitesAreDone(repo, task.id)) return;
-  try { await prepareOrderedGroupBaseline(task, repo); }
-  catch (error) {
-    await emitTaskLifecycleEvent(repo, task, 'error', `Ordered group blocked: ${errorMessage(error)}`);
-    return;
-  }
-
-  const claimed = await repo.claimRun(task.id, Date.now());
-  if (!claimed) return;
-  task = claimed;
-  if (resetEventHistory) await agentManager.resetEvents(task.id);
-  const updates: Partial<Task> = {
-    agentStatus: 'planning',
-    startedAt: Date.now(),
-    completedAt: undefined,
-  };
-  if (task.columnId === 'backlog') {
-    updates.columnId = 'in-progress';
-  }
-  const updated = await repo.update(task.id, updates);
-  if (updated) {
-    broadcastTaskUpdate(updated);
-    const onStatusChange = makeStatusCallback(repo, task.id, agentManager, updated, projectRepo);
-    agentManager.startAgent(
-      updated,
-      async (status) => {
-        if (status === 'complete' || status === 'failed') await repo.clearRun(task.id);
-        await onStatusChange(status);
-        if (status === 'complete' || status === 'failed') await onSettled?.();
-      },
-      makeWorktreeCallback(repo, task.id),
-    );
-  }
+  await withDependencyAdmissionLock(async () => {
+    if (!await taskPrerequisitesAreDone(repo, task.id)) return;
+    try { await prepareOrderedGroupBaseline(task, repo); }
+    catch (error) {
+      await emitTaskLifecycleEvent(repo, task, 'error', `Ordered group blocked: ${errorMessage(error)}`);
+      return;
+    }
+    if (!await taskPrerequisitesAreDone(repo, task.id)) return;
+    const claimed = await repo.claimRun(task.id, Date.now());
+    if (!claimed) return;
+    task = claimed;
+    if (!await taskPrerequisitesAreDone(repo, task.id)) { await repo.requestRun(task.id, task.runRequestedAt ?? Date.now()); return; }
+    if (resetEventHistory) await agentManager.resetEvents(task.id);
+    const updates: Partial<Task> = {
+      agentStatus: 'planning',
+      startedAt: Date.now(),
+      completedAt: undefined,
+    };
+    if (task.columnId === 'backlog') {
+      updates.columnId = 'in-progress';
+    }
+    const updated = await repo.update(task.id, updates);
+    if (updated) {
+      broadcastTaskUpdate(updated);
+      const onStatusChange = makeStatusCallback(repo, task.id, agentManager, updated, projectRepo);
+      agentManager.startAgent(
+        updated,
+        async (status) => {
+          if (status === 'complete' || status === 'failed') await repo.clearRun(task.id);
+          await onStatusChange(status);
+          if (status === 'complete' || status === 'failed') await onSettled?.();
+        },
+        makeWorktreeCallback(repo, task.id),
+      );
+    }
+  });
 }
 
 export async function startNextEligibleProjectAutoRunTask(
@@ -1207,6 +1204,7 @@ export async function startNextEligibleProjectAutoRunTask(
   projectRepo: ProjectRepository,
   projectId: string,
   agentManager: AgentManager,
+  dependentOnly = false,
 ): Promise<Task | undefined> {
   if (!await isProjectAutoRunEnabled(projectRepo, projectId)) return undefined;
 
@@ -1221,7 +1219,8 @@ export async function startNextEligibleProjectAutoRunTask(
     .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
 
   for (const task of tasks) {
-    if (!await taskPrerequisitesAreDone(repo, task.id)) continue;
+    const gate = await getTaskDependencyGate(repo, task.id);
+    if (!gate.eligible || (dependentOnly && gate.dependencies.length === 0)) continue;
 
     const agentInfo = agentManager.getAvailableAgents().find((agent) => agent.name === task.agentType);
     if (!agentInfo?.available) {
@@ -1248,11 +1247,5 @@ async function isProjectAutoRunEnabled(projectRepo: ProjectRepository, projectId
 }
 
 async function taskPrerequisitesAreDone(repo: TaskRepository, taskId: string): Promise<boolean> {
-  const prerequisites = (await repo.getRelationships(taskId))
-    .filter((relationship) => relationship.type === 'blocks' && relationship.direction === 'blocked-by');
-  for (const prerequisite of prerequisites) {
-    const task = await repo.getById(prerequisite.relatedTaskId);
-    if (!task || task.columnId !== 'done' || task.agentStatus === 'failed') return false;
-  }
-  return true;
+  return (await getTaskDependencyGate(repo, taskId)).eligible;
 }

@@ -321,7 +321,7 @@ test.describe('Roadmap intake UI', () => {
     expect(loose.filter((task: any) => !task.groupId)).toEqual([]);
     await page.getByRole('heading', { name: groupName, exact: true }).click();
     await expect(page.getByTestId('group-child')).toHaveCount(6);
-    await expect(page.getByText('0/6 complete', { exact: true })).toBeVisible();
+    await expect(page.getByText('0/6 complete', { exact: true }).last()).toBeVisible();
     await page.getByRole('button', { name: 'Move Preview up', exact: true }).click();
     await expect(page.getByTestId('group-child').first()).toContainText('Preview');
     const persisted = await (await request.get(`${API}/api/groups/${group.id}`)).json();
@@ -352,7 +352,7 @@ test.describe('Roadmap intake UI', () => {
       await expect(page.getByLabel('Title for roadmap item 1')).toHaveValue('Build parser');
       await page.getByLabel('Group Name').fill(`Group ${mode}`);
       await page.getByLabel('Execution mode').selectOption(mode);
-      await page.getByLabel('Agent', { exact: true }).selectOption('codex');
+      await page.getByRole('combobox', { name: 'Agent', exact: true }).selectOption('codex');
       await page.getByRole('button', { name: 'Create Group · 2 Tasks' }).click();
       await expect(page.getByRole('dialog', { name: 'Roadmap Intake' })).not.toBeVisible();
     }
@@ -369,7 +369,8 @@ test.describe('Roadmap intake UI', () => {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto('/');
     await waitForBoard(page);
-    await page.getByRole('button', { name: 'Roadmap Intake', exact: true }).click();
+    await page.getByRole('button', { name: 'Open menu' }).click();
+    await page.getByRole('button', { name: 'Roadmap', exact: true }).click();
     await page.getByLabel('Creation mode').selectOption('group');
     await page.getByLabel('Roadmap text').fill('- Parser\n- Preview\n- Creation\n- Ordering\n- Execution\n- Validation');
     await page.getByRole('button', { name: 'Preview Cards' }).click();

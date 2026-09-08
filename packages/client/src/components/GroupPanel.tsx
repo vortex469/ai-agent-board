@@ -1,3 +1,4 @@
+import { DependencyEditor, DependencyStatus, useDependencies } from './TaskDependencies';
 import { useMemo, useState } from 'react';
 import { GroupChildActions } from './GroupChildActions';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -34,6 +35,7 @@ function statusLabel(status: AgentStatus): string {
 }
 
 export function GroupPanel({ group, onClose, onRunGroup, onStopGroup, onRetryChild, onEditChild, onResetChild, onChildClick, onReorderChildren }: GroupPanelProps) {
+  const { gates } = useDependencies();
   const status = useMemo(() => group ? computeGroupStatus(group.children) : null, [group]);
   const [reordering, setReordering] = useState(false);
   const [reorderError, setReorderError] = useState('');
@@ -125,6 +127,7 @@ export function GroupPanel({ group, onClose, onRunGroup, onStopGroup, onRetryChi
             {status.failed > 0 && <span className="text-red-400">✕ {status.failed} failed</span>}
             {status.idle > 0 && <span>{status.idle} pending</span>}
           </div>
+          {!isRunning && status.idle > 0 && group.children.filter(child => child.agentStatus === 'idle' && !child.archived).every(child => gates[child.id]?.eligible === false) && <p role="status" className="mt-2 text-xs text-violet-300">Waiting for dependency synchronization</p>}
           {group.description && (
             <p className="mt-2 text-xs text-zinc-500">{group.description}</p>
           )}
@@ -145,7 +148,7 @@ export function GroupPanel({ group, onClose, onRunGroup, onStopGroup, onRetryChi
                 key={child.id}
                 data-testid="group-child"
                 className={cn(
-                  'flex items-center gap-3 border-b border-zinc-800 px-4 py-3 cursor-pointer hover:bg-zinc-800/50 transition-colors',
+                  'flex flex-wrap items-center gap-3 border-b border-zinc-800 px-4 py-3 cursor-pointer hover:bg-zinc-800/50 transition-colors',
                   child.agentStatus === 'executing' && 'bg-blue-500/5',
                   child.agentStatus === 'failed' && 'bg-red-500/5',
                 )}
@@ -186,6 +189,10 @@ export function GroupPanel({ group, onClose, onRunGroup, onStopGroup, onRetryChi
                   <GroupChildActions task={child} onEdit={onEditChild}
                     onRetry={(task) => onRetryChild(task.id)} onReset={onResetChild} />
                   <ChevronRight className="h-4 w-4 text-zinc-600" />
+                </div>
+                <div className="w-full min-w-0">
+                  <DependencyStatus task={child} gate={gates[child.id]} />
+                  <DependencyEditor task={child} />
                 </div>
               </div>
             );

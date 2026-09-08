@@ -344,5 +344,21 @@ export type WSMessage =
   | { type: 'agent_complete'; payload: AgentCompletePayload }
   | { type: 'agent_follow_up'; payload: AgentFollowUpPayload }
   | { type: 'group_updated'; payload: TaskGroup }
+  | { type: 'group_deleted'; payload: { id: string } }
   | { type: 'project_updated'; payload: Project }
   | { type: 'project_deleted'; payload: { id: string } };
+
+/** Authoritative server evaluation of durable task dependency relationships. */
+export interface DependencyGateEntry {
+  taskId: string;
+  title?: string;
+  groupId?: string;
+  groupTitle?: string;
+  status: 'Done' | 'Waiting' | 'Failed' | 'Blocked' | 'Missing';
+  reason?: string;
+}
+export interface TaskDependencyGate {
+  eligible: boolean;
+  dependencies: DependencyGateEntry[];
+  reason?: string;
+}

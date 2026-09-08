@@ -1,3 +1,4 @@
+import { getTaskDependencyGate, withDependencyAdmissionLock } from './task-dependencies.js';
 import type { TaskGroupRepository } from '../repositories/group-types.js';
 import type { ProjectRepository } from '../repositories/project-types.js';
 import type { TaskRepository } from '../repositories/types.js';
@@ -26,15 +27,14 @@ export async function startOrderedGroupChild(
     }
     if (child.archived || (requestedTaskId && requestedTaskId !== child.id)) return undefined;
     if (requestedTaskId && (child.agentStatus === 'failed' || child.columnId === 'review')) {
-      await taskRepo.update(child.id, { agentStatus: 'idle', columnId: 'backlog' });
+      await withDependencyAdmissionLock(() => taskRepo.update(child.id, { agentStatus: 'idle', columnId: 'backlog' }));
       child.agentStatus = 'idle';
       child.columnId = 'backlog';
     }
     if (child.columnId !== 'backlog' || child.agentStatus !== 'idle') return undefined;
-    for (const relationship of await taskRepo.getRelationships(child.id)) {
-      if (relationship.type !== 'blocks' || relationship.direction !== 'blocked-by') continue;
-      const prerequisite = await taskRepo.getById(relationship.relatedTaskId);
-      if (!prerequisite || prerequisite.columnId !== 'done' || prerequisite.agentStatus === 'failed') return undefined;
+    if (!(await getTaskDependencyGate(taskRepo, child.id)).eligible) {
+      if (group.columnId === 'in-progress' && child.runRequestedAt === undefined) await taskRepo.requestRun(child.id, Date.now());
+      return undefined;
     }
     if (!manager.getAvailableAgents().some(agent => agent.name === child.agentType && agent.available)) return undefined;
     await taskRepo.requestRun(child.id, Date.now());

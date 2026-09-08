@@ -1,3 +1,4 @@
+import { DependencyStatus, useDependencies } from './TaskDependencies';
 import { useMemo } from 'react';
 import type { Task } from '@/types';
 import { GroupChildActions } from './GroupChildActions';
@@ -23,6 +24,7 @@ interface TaskGroupCardProps {
 }
 
 export function TaskGroupCard({ group, onClickGroup, onRunGroup, onStopGroup, onDeleteGroup, onEditGroup, onChildClick, onEditChild, onRetryChild, onResetChild }: TaskGroupCardProps) {
+  const { gates } = useDependencies();
   const status = useMemo(() => computeGroupStatus(group.children), [group.children]);
   const isRunning = status.executing > 0 || status.planning > 0;
   const pct = status.total > 0 ? ((status.completed / status.total) * 100) : 0;
@@ -110,6 +112,10 @@ export function TaskGroupCard({ group, onClickGroup, onRunGroup, onStopGroup, on
         </div>
       </div>
 
+      {!isRunning && status.idle > 0 && group.children.filter(child => child.agentStatus === 'idle' && !child.archived).every(child => gates[child.id]?.eligible === false) && (
+        <p role="status" className="mb-2 text-xs text-violet-300">Waiting for dependency synchronization</p>
+      )}
+
       {/* Agent breakdown */}
       <div className="mb-2 flex flex-wrap gap-2">
         {agentCounts.map(([type, count]) => {
@@ -165,6 +171,7 @@ export function TaskGroupCard({ group, onClickGroup, onRunGroup, onStopGroup, on
                   </button>
                   {statusIcon(child.agentStatus, 'h-3 w-3')}
                 </div>
+                <DependencyStatus task={child} gate={gates[child.id]} />
                 {child.description && (
                   <p className="mt-0.5 text-[10px] leading-snug text-zinc-500 line-clamp-1">{child.description}</p>
                 )}

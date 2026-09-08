@@ -19,7 +19,8 @@ test('uses a persisted per-task timeout override', () => {
 });
 
 test('validates timeout bounds and preserves the accepted value', () => {
-  const valid = { title: 'Review', repoPath: '/tmp/repo', timeoutMinutes: 120 };
+  // Repository path policy is independent of timeout validation.
+  const valid = { title: 'Review', timeoutMinutes: 120 };
   assert.equal(validateTaskFields(valid), null);
   assert.equal(buildTask(valid).timeoutMinutes, 120);
   assert.match(validateTaskFields({ ...valid, timeoutMinutes: 0 }) || '', /between 1 and 240/);

@@ -254,7 +254,7 @@ test.describe('Local AI Workbench progression regression', () => {
     const firstOutput = eventText(firstEvents);
     const secondOutput = eventText(secondEvents);
     const firstAutoMerge = firstEvents.find((event) => event.content.includes('Auto-merged'));
-    const secondWorktree = secondEvents.find((event) => event.content.includes('git worktree'));
+    const secondWorktree = secondEvents.find((event) => /git worktree/i.test(event.content));
 
     expect(firstEvents.filter((event) => event.content.includes('Automatic recovery retry triggered'))).toHaveLength(1);
     expect(firstEvents.filter((event) => event.content.includes('DeepSeek Harness headless started'))).toHaveLength(2);

@@ -18,13 +18,13 @@ function makeDb() {
       priority TEXT, column_id TEXT, agent_status TEXT, agent_type TEXT, created_at INTEGER, started_at INTEGER,
       completed_at INTEGER, repo_path TEXT, branch_name TEXT, base_branch TEXT, use_worktree INTEGER,
       worktree_path TEXT, archived INTEGER, group_id TEXT, group_order INTEGER, summary TEXT, external_source TEXT,
-      external_key TEXT, provenance TEXT, run_requested_at INTEGER, run_claimed_at INTEGER, timeout_minutes INTEGER);
+      external_key TEXT, provenance TEXT, run_requested_at INTEGER, run_claimed_at INTEGER, timeout_minutes INTEGER, repository_baseline TEXT);
     CREATE UNIQUE INDEX identity ON tasks(external_source,external_key) WHERE external_source IS NOT NULL AND external_key IS NOT NULL;
     CREATE TABLE events(id TEXT,task_id TEXT,type TEXT,content TEXT,timestamp INTEGER,metadata TEXT);
     CREATE TABLE task_relationships(task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
       related_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, type TEXT NOT NULL DEFAULT 'related',
       created_at INTEGER NOT NULL, PRIMARY KEY(task_id,related_task_id), CHECK(task_id < related_task_id));
-    CREATE TABLE task_dependencies(prerequisite_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    CREATE TABLE task_dependencies(prerequisite_task_id TEXT NOT NULL,
       dependent_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, created_at INTEGER NOT NULL,
       PRIMARY KEY(prerequisite_task_id,dependent_task_id), CHECK(prerequisite_task_id <> dependent_task_id));
     CREATE TABLE execution_attempts(id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -113,7 +113,7 @@ test('dependent backlog card waits for its prerequisite', async () => {
   const repo = new SqliteTaskRepository(db);
   const started: string[] = [];
   try {
-    await repo.create(task('first', { columnId: 'review', agentStatus: 'complete' }));
+    await repo.create(task('first', { columnId: 'review', agentStatus: 'complete', useWorktree: false, repoPath: undefined }));
     await repo.create(task('second'));
     await repo.createDependency('first', 'second', 10);
     await repo.requestRun('second', 20);
@@ -131,7 +131,7 @@ test('completing prerequisite admits the dependent backlog card', async () => {
   const repo = new SqliteTaskRepository(db);
   const started: string[] = [];
   try {
-    await repo.create(task('first', { columnId: 'review', agentStatus: 'complete' }));
+    await repo.create(task('first', { columnId: 'review', agentStatus: 'complete', useWorktree: false, repoPath: undefined }));
     await repo.create(task('second'));
     await repo.createDependency('first', 'second', 10);
     await repo.requestRun('second', 20);

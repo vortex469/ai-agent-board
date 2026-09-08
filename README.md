@@ -51,6 +51,10 @@ For projects needing multiple parallel changes, **Task Groups** let you define a
 
 Groups appear as a single card on the board showing aggregate progress. Click to expand the **Group Panel** with per-child status, retry buttons for failures, and drill-through to individual agent panels. Groups auto-advance to "review" when all children complete successfully.
 
+Use **Edit dependencies** on a grouped task to select prerequisite tasks from the current group or other groups in the same project. Links store stable task IDs; cross-group links appear as **Synchronization gates** with Done, Waiting, Failed, Blocked, or Missing status. Cycles and changes to dependencies of running tasks are rejected by the server.
+
+A dependent task waits without reserving execution or creating a worktree until every prerequisite is successfully Done. Coding prerequisites must also have their repository results integrated into the dependent's configured base; existing stale branches or pinned baselines remain blocked for explicit recovery. Read-only prerequisites require successful completion but no Git integration. Auto Run reevaluates waiting groups on server lifecycle changes, and the UI updates over WebSocket. Reopening a prerequisite closes the gate for pending tasks and warns already-running dependents. Deleting a prerequisite retains its missing ID until the dependency is explicitly removed.
+
 ## Features
 
 - Kanban board with Backlog, In Progress, Review, Done columns

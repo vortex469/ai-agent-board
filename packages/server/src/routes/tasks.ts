@@ -1,3 +1,5 @@
+import { getTaskDependencyGate, withDependencyAdmissionLock, assertDependencyDoesNotCycle } from '../services/task-dependencies.js';
+import type { TaskGroupRepository } from '../repositories/group-types.js';
 import { Router, Request, Response } from 'express';
 import path from 'path';
 import type { Project, Task } from '../types.js';
@@ -13,7 +15,7 @@ import {
   triggerAutomaticBacklogProgression, triggerAutomaticDependentProgression,
 } from './helpers.js';
 
-export function createTaskRouter(repo: TaskRepository, agentManager: AgentManager, projectRepo: ProjectRepository): Router {
+export function createTaskRouter(repo: TaskRepository, agentManager: AgentManager, projectRepo: ProjectRepository, groupRepo?: TaskGroupRepository): Router {
   const router = Router();
 
   // GET /api/tasks
@@ -214,6 +216,18 @@ export function createTaskRouter(repo: TaskRepository, agentManager: AgentManage
     res.status(201).json({ tasks: created });
   }));
 
+  router.get('/:id/dependencies', asyncHandler(async (req: Request, res: Response) => {
+    const task = await repo.getById(paramId(req));
+    if (!task) { res.status(404).json({ error: 'task not found' }); return; }
+    const gate = await getTaskDependencyGate(repo, task.id);
+    const dependencies = await Promise.all(gate.dependencies.map(async (dependency) => {
+      const prerequisite = await repo.getById(dependency.taskId);
+      const group = prerequisite?.groupId && groupRepo ? await groupRepo.getById(prerequisite.groupId) : undefined;
+      return { ...dependency, title: prerequisite?.title, groupId: prerequisite?.groupId, groupTitle: group?.title };
+    }));
+    res.json({ ...gate, dependencies });
+  }));
+
   // First-class task relationships. References are exact ids or exact titles;
   // duplicate titles fail closed rather than guessing.
   router.get('/:id/relationships', asyncHandler(async (req: Request, res: Response) => {
@@ -229,11 +243,14 @@ export function createTaskRouter(repo: TaskRepository, agentManager: AgentManage
   router.post('/:id/relationships', asyncHandler(async (req: Request, res: Response) => {
     const task = await repo.getById(paramId(req));
     if (!task) { res.status(404).json({ error: 'task not found' }); return; }
-    const reference = req.body.relatedTask ?? req.body.relatedTaskId ?? req.body.relatedItem;
+    const reference = req.body.relatedTaskId ?? req.body.relatedTask ?? req.body.relatedItem;
     if (typeof reference !== 'string' || !reference.trim()) {
       res.status(400).json({ error: 'relatedTask is required (exact id or title)' }); return;
     }
-    const matches = await repo.resolve(reference, task.projectId);
+    const exact = req.body.relatedTaskId !== undefined ? await repo.getById(reference) : undefined;
+    const matches = req.body.relatedTaskId !== undefined
+      ? (exact?.projectId === task.projectId ? [exact] : [])
+      : await repo.resolve(reference, task.projectId);
     if (!matches.length) { res.status(404).json({ error: 'related task not found in this project' }); return; }
     if (matches.length > 1) {
       res.status(409).json({ error: 'related task reference is ambiguous', matches: matches.map(({ id, title }) => ({ id, title })) }); return;
@@ -243,21 +260,51 @@ export function createTaskRouter(repo: TaskRepository, agentManager: AgentManage
     if (type !== 'related' && type !== 'blocks') {
       res.status(400).json({ error: 'relationship type must be related or blocks' }); return;
     }
-    const result = type === 'blocks'
-      ? req.body.direction === 'blocks'
-        ? await repo.createDependency(task.id, matches[0].id, Date.now())
-        : await repo.createDependency(matches[0].id, task.id, Date.now())
-      : await repo.createRelationship(task.id, matches[0].id, Date.now());
-    res.status(result.created ? 201 : 200).set(result.created ? {} : { 'Idempotent-Replay': 'true' }).json(result.relationship);
+    try {
+      const result = await withDependencyAdmissionLock(async () => {
+        if (type === 'blocks') {
+          const dependentId = req.body.direction === 'blocks' ? matches[0].id : task.id;
+          if (agentManager.isRunning(dependentId)) throw new Error('cannot change dependencies while the dependent task is running or reserved');
+          const prerequisiteId = req.body.direction === 'blocks' ? task.id : matches[0].id;
+          await assertDependencyDoesNotCycle(repo, prerequisiteId, dependentId);
+          return req.body.direction === 'blocks'
+            ? repo.createDependency(task.id, matches[0].id, Date.now())
+            : repo.createDependency(matches[0].id, task.id, Date.now());
+        }
+        return repo.createRelationship(task.id, matches[0].id, Date.now());
+      });
+      broadcastTaskUpdate(task);
+      broadcastTaskUpdate(matches[0]);
+      res.status(result.created ? 201 : 200).set(result.created ? {} : { 'Idempotent-Replay': 'true' }).json(result.relationship);
+    } catch (error) {
+      res.status(409).json({ error: error instanceof Error ? error.message : 'Invalid dependency configuration' });
+    }
   }));
 
   router.delete('/:id/relationships/:relatedId', asyncHandler(async (req: Request, res: Response) => {
     const task = await repo.getById(paramId(req));
     if (!task) { res.status(404).json({ error: 'task not found' }); return; }
-    const matches = await repo.resolve(String(req.params.relatedId), task.projectId);
-    if (!matches.length) { res.status(404).json({ error: 'related task not found in this project' }); return; }
-    if (matches.length > 1) { res.status(409).json({ error: 'related task reference is ambiguous' }); return; }
-    if (!await repo.deleteRelationship(task.id, matches[0].id)) { res.status(404).json({ error: 'relationship not found' }); return; }
+    let relatedId = String(req.params.relatedId);
+    // Prefer durable IDs, including orphaned prerequisites; preserve legacy title references.
+    if (!(await repo.getRelationships(task.id)).some(relationship => relationship.relatedTaskId === relatedId)) {
+      const matches = await repo.resolve(relatedId, task.projectId);
+      if (!matches.length) { res.status(404).json({ error: 'related task not found in this project' }); return; }
+      if (matches.length > 1) { res.status(409).json({ error: 'related task reference is ambiguous' }); return; }
+      relatedId = matches[0].id;
+    }
+    try {
+      if (!await withDependencyAdmissionLock(async () => {
+        for (const relationship of await repo.getRelationships(task.id)) {
+          if (relationship.relatedTaskId !== relatedId || relationship.type !== 'blocks') continue;
+          const dependentId = relationship.direction === 'blocks' ? relationship.relatedTaskId : task.id;
+          if (agentManager.isRunning(dependentId)) throw new Error('cannot change dependencies while the dependent task is running or reserved');
+        }
+        return repo.deleteRelationship(task.id, relatedId);
+      })) { res.status(404).json({ error: 'relationship not found' }); return; }
+    } catch (error) {
+      res.status(409).json({ error: error instanceof Error ? error.message : 'Cannot change dependencies' }); return;
+    }
+    broadcastTaskUpdate(task);
     res.status(204).send();
   }));
 
@@ -373,6 +420,11 @@ export function createTaskRouter(repo: TaskRepository, agentManager: AgentManage
       }
     }
 
+    if (columnId === 'in-progress' || agentStatus === 'planning' || agentStatus === 'executing') {
+      const gate = await getTaskDependencyGate(repo, task.id);
+      if (!gate.eligible) { res.status(409).json({ error: gate.reason || 'Task dependencies are not satisfied', gate }); return; }
+    }
+
     // Build updates from validated fields
     const updates: Partial<Task> = {};
     if (title !== undefined) updates.title = title;
@@ -404,7 +456,14 @@ export function createTaskRouter(repo: TaskRepository, agentManager: AgentManage
       if (cleanup.status !== 'blocked') updates.worktreePath = undefined;
     }
 
-    let updated = await repo.update(task.id, updates);
+    let dependencyChanged = false;
+    let updated = await withDependencyAdmissionLock(async () => {
+      if (columnId === 'in-progress' || agentStatus === 'planning' || agentStatus === 'executing') {
+        if (!(await getTaskDependencyGate(repo, task.id)).eligible) { dependencyChanged = true; return undefined; }
+      }
+      return repo.update(task.id, updates);
+    });
+    if (dependencyChanged) { res.status(409).json({ error: 'Task dependencies changed before status update' }); return; }
     if (!updated) {
       res.status(500).json({ error: 'failed to update task' });
       return;
@@ -449,7 +508,7 @@ export function createTaskRouter(repo: TaskRepository, agentManager: AgentManage
     }
     agentManager.clearEvents(id);
     await repo.deleteEventsByTaskId(id);
-    await repo.delete(id);
+    await withDependencyAdmissionLock(() => repo.delete(id));
     broadcast({ type: 'task_deleted', payload: { id } });
     res.status(204).send();
   }));
@@ -475,7 +534,7 @@ export function createTaskRouter(repo: TaskRepository, agentManager: AgentManage
       const cleanup = agentManager.removeWorktree(task);
       if (cleanup.status !== 'blocked') updates.worktreePath = undefined;
     }
-    const updated = await repo.update(id, updates);
+    const updated = await withDependencyAdmissionLock(() => repo.update(id, updates));
     if (!updated) {
       res.status(500).json({ error: 'failed to archive task' });
       return;
@@ -496,7 +555,7 @@ export function createTaskRouter(repo: TaskRepository, agentManager: AgentManage
       res.status(400).json({ error: 'task is not archived' });
       return;
     }
-    const updated = await repo.update(id, { archived: false });
+    const updated = await withDependencyAdmissionLock(() => repo.update(id, { archived: false }));
     if (!updated) {
       res.status(500).json({ error: 'failed to unarchive task' });
       return;

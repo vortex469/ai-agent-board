@@ -1,3 +1,4 @@
+import { DependencyProvider } from './components/TaskDependencies';
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { X } from 'lucide-react';
@@ -455,6 +456,7 @@ function BoardPage({
   }, [error, clearError]);
 
   return (
+    <DependencyProvider tasks={tasks} groups={groups}>
     <div className="flex h-dvh flex-col overflow-hidden">
       <Header
         title={project.name === 'Default' ? 'AI Agent Board' : project.name}
@@ -584,6 +586,7 @@ function BoardPage({
         )}
       </AnimatePresence>
     </div>
+    </DependencyProvider>
   );
 }
 

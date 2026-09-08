@@ -1,6 +1,16 @@
 import { test, expect } from '@playwright/test';
-import type { Locator } from '@playwright/test';
+import type { APIRequestContext, Locator } from '@playwright/test';
 import { API, prepareTestRepo, waitForBoard } from './helpers';
+
+async function getGroupChild(request: APIRequestContext, groupId: string, taskId: string) {
+  const response = await request.get(`${API}/api/groups/${groupId}`);
+  expect(response.ok()).toBeTruthy();
+  const group = await response.json();
+  const child = group.children.find((candidate: { id: string }) => candidate.id === taskId);
+  expect(child).toBeTruthy();
+  return child;
+}
+
 
 for (const mobile of [false, true]) {
   test.describe(mobile ? 'Grouped recovery on touch' : 'Grouped recovery on desktop', () => {
@@ -85,7 +95,7 @@ for (const mobile of [false, true]) {
           await expect(savedCard.getByRole('button', { name: 'Edit task', exact: true })).toBeDisabled();
         }
         expect(runs).toBe(3);
-        const unchanged = await (await request.get(`${API}/api/tasks/${sibling.id}`)).json();
+        const unchanged = await getGroupChild(request, group.id, sibling.id);
         expect(unchanged.agentType).toBe('copilot');
         expect(unchanged.agentStatus).toBe('failed');
       } finally {
@@ -121,8 +131,7 @@ for (const mobile of [false, true]) {
         // but do not launch an external coding agent from this browser test.
         await page.route(`**/api/tasks/${child.id}/run`, async (route) => {
           runs++;
-          const current = await request.get(`${API}/api/tasks/${child.id}`);
-          await route.fulfill({ json: await current.json() });
+          await route.fulfill({ json: await getGroupChild(request, group.id, child.id) });
         });
         await page.goto('/');
         await waitForBoard(page);
@@ -138,7 +147,7 @@ for (const mobile of [false, true]) {
         await activate(dialog.getByRole('button', { name: /^Codex\b/ }));
         await activate(dialog.getByRole('button', { name: 'Save Changes' }));
         await expect(dialog).toBeHidden();
-        await expect.poll(async () => (await (await request.get(`${API}/api/tasks/${child.id}`)).json()).agentType).toBe('codex');
+        await expect.poll(async () => (await getGroupChild(request, group.id, child.id)).agentType).toBe('codex');
         await activate(page.getByTitle('Retry agent'));
         await expect.poll(() => runs).toBe(1);
         expect(configuredAgent).toBe('codex');
@@ -155,11 +164,11 @@ for (const mobile of [false, true]) {
         await activate(recoveredCard.getByRole('button', { name: 'Reset task', exact: true }));
         await expect(recoveredCard.getByRole('button', { name: 'Reset task', exact: true })).toHaveCount(0);
         await expect(page.getByTestId('group-child')).toHaveCount(0);
-        const reset = await (await request.get(`${API}/api/tasks/${child.id}`)).json();
+        const reset = await getGroupChild(request, group.id, child.id);
         expect(reset.agentStatus).toBe('idle');
         expect(reset.columnId).toBe('backlog');
         expect(reset.agentType).toBe('codex');
-        const unchanged = await (await request.get(`${API}/api/tasks/${sibling.id}`)).json();
+        const unchanged = await getGroupChild(request, group.id, sibling.id);
         expect(unchanged.agentStatus).toBe('failed');
         expect(unchanged.agentType).toBe('copilot');
         expect((await (await request.get(`${API}/api/groups/${group.id}`)).json()).columnId).toBe('backlog');
@@ -177,7 +186,7 @@ for (const mobile of [false, true]) {
         await activate(row.getByRole('button', { name: 'Reset task', exact: true }));
         await expect(row.getByRole('button', { name: 'Reset task', exact: true })).toHaveCount(0);
         await expect(row).toBeVisible();
-        const reviewReset = await (await request.get(`${API}/api/tasks/${child.id}`)).json();
+        const reviewReset = await getGroupChild(request, group.id, child.id);
         expect(reviewReset.agentStatus).toBe('idle');
         expect(reviewReset.columnId).toBe('in-progress');
         expect(runs).toBe(3);

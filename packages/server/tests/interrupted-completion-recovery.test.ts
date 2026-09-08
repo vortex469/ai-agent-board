@@ -1,14 +1,22 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
+import os from 'node:os';
 import test from 'node:test';
 import { randomUUID } from 'node:crypto';
 import type { AgentEvent, ExecutionAttempt, Task, TaskRelationship } from '../src/types.js';
 import type { ContinuationEligibility, OrchestrationAggregateResult, TaskRepository } from '../src/repositories/types.js';
-import { AgentManager } from '../src/services/agent-manager.js';
-import { reconcileInterruptedTaskCompletion } from '../src/routes/helpers.js';
+import type { AgentManager as AgentManagerInstance } from '../src/services/agent-manager.js';
+
+// Initialize path policy explicitly for isolated fixtures, independent of a
+// developer or production ALLOWED_REPO_ROOTS inherited by the test process.
+const previousAllowedRoots = process.env.ALLOWED_REPO_ROOTS;
+process.env.ALLOWED_REPO_ROOTS = process.cwd();
+const { AgentManager } = await import('../src/services/agent-manager.js');
+const { reconcileInterruptedTaskCompletion } = await import('../src/routes/helpers.js');
+if (previousAllowedRoots === undefined) delete process.env.ALLOWED_REPO_ROOTS;
+else process.env.ALLOWED_REPO_ROOTS = previousAllowedRoots;
 
 function git(args: string[], cwd: string): string {
   return execFileSync('git', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim();
@@ -24,7 +32,7 @@ function gitSucceeds(args: string[], cwd: string): boolean {
 }
 
 function fixture(): { repoPath: string; dispose(): void } {
-  const repoPath = mkdtempSync(path.join(os.tmpdir(), 'agentboard-recovery-repo-'));
+  const repoPath = mkdtempSync(path.join(process.cwd(), 'agentboard-recovery-repo-'));
   git(['init', '-b', 'main'], repoPath);
   git(['config', 'user.email', 'agentboard-tests@example.invalid'], repoPath);
   git(['config', 'user.name', 'Agent Board Tests'], repoPath);
@@ -174,7 +182,7 @@ class MemoryTaskRepo implements TaskRepository {
   }
 }
 
-function managerWithAvailableCodex(): AgentManager {
+function managerWithAvailableCodex(): AgentManagerInstance {
   const manager = new AgentManager();
   (manager as unknown as { availableAgents: Array<{ name: string; displayName: string; available: boolean }> }).availableAgents = [
     { name: 'codex', displayName: 'Fake Codex', available: true },
@@ -240,15 +248,17 @@ test('manually merged task branch with stale failed state recovers to Done', asy
   }
 });
 
-test('missing prunable worktree with valid merged branch is cleared during recovery', async () => {
+test('missing prunable worktree with valid merged branch is cleared during recovery', async (context) => {
+  // Match the managed-worktree direct-temp-child invariant within this workspace.
+  context.mock.method(os, 'tmpdir', () => process.cwd());
   const f = fixture();
   try {
     const task = baseTask(f.repoPath, 'recovery/missing-worktree', {
       agentStatus: 'failed',
       columnId: 'review',
-      worktreePath: path.join(os.tmpdir(), `agentboard-${randomUUID()}-ABC123`),
+      worktreePath: path.join(process.cwd(), `agentboard-${randomUUID()}-ABC123`),
     });
-    task.worktreePath = path.join(os.tmpdir(), `agentboard-${task.id}-ABC123`);
+    task.worktreePath = path.join(process.cwd(), `agentboard-${task.id}-ABC123`);
     const commit = commitTaskBranch(f.repoPath, task.branchName!);
     git(['merge', task.branchName!, '--no-edit'], f.repoPath);
     const repo = new MemoryTaskRepo([task]);

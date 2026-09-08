@@ -25,6 +25,7 @@ async function fixture() {
     isRunning: (id: string) => running.has(id), isGroupRunning: () => false,
     getAvailableAgents: () => ['copilot', 'codex', 'hermes'].map(name => ({ name, available: true })),
     startAgent: (task: Task, cb: (status: Task['agentStatus']) => Promise<void>) => { started.push(task); running.add(task.id); callbacks.set(task.id, cb); },
+    startAgentChecked: (task: Task, cb: (status: Task['agentStatus']) => Promise<void>) => { started.push(task); running.add(task.id); callbacks.set(task.id, cb); },
     stopGroup: async () => {},
     resetEvents: async (id: string) => { await taskRepo.deleteEventsByTaskId(id); },
   }) as unknown as AgentManager;
@@ -134,6 +135,7 @@ test('legacy queue waits during reconfiguration and launches refreshed pending a
     const group = await create(f, false);
     const children = await f.groupRepo.getChildTasks(group.id);
     f.manager.startGroup(group, children, task => async status => { await f.taskRepo.update(task.id, { agentStatus: status }); }, () => async () => {}, async () => {});
+    await new Promise(resolve => setImmediate(resolve));
     assert.equal(f.started.length, 1);
     const first = f.started[0];
     // A queue reservation protects startup even before an SDK session/status exists.

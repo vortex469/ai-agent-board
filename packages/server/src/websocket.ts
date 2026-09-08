@@ -68,7 +68,14 @@ export function createWSS(server: Server): WebSocketServer {
   return wss;
 }
 
+const observers = new Set<(message: WSMessage) => void>();
+export function observeBroadcasts(observer: (message: WSMessage) => void): () => void {
+  observers.add(observer);
+  return () => { observers.delete(observer); };
+}
+
 export function broadcast(message: WSMessage): void {
+  for (const observer of observers) observer(message);
   if (!wss) return;
   const data = JSON.stringify(message);
   wss.clients.forEach((client) => {

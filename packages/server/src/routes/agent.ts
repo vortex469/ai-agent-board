@@ -1,3 +1,4 @@
+import { getTaskDependencyGate, withDependencyAdmissionLock } from '../services/task-dependencies.js';
 import { startOrderedGroupChild } from '../services/ordered-group.js';
 import { Router, Request, Response } from 'express';
 import path from 'path';
@@ -93,7 +94,7 @@ export function createAgentRouter(
     if (useWorktree !== undefined) updates.useWorktree = useWorktree;
     if (agentType !== undefined) updates.agentType = agentType;
 
-    const updated = await repo.update(id, updates);
+    const updated = await withDependencyAdmissionLock(() => repo.update(id, updates));
     if (!updated) {
       res.status(500).json({ error: 'failed to update task' });
       return;
@@ -119,6 +120,9 @@ export function createAgentRouter(
       return;
     }
 
+    const gate = await getTaskDependencyGate(repo, task.id);
+    if (!gate.eligible) { res.status(409).json({ error: gate.reason || 'Task dependencies are not satisfied', gate }); return; }
+
     const orderedGroup = task.groupId && groupRepo ? await groupRepo.getById(task.groupId) : undefined;
     if (task.groupId && groupRepo && orderedGroup?.roadmapExecutionMode) {
       const children = await groupRepo.getChildTasks(task.groupId);
@@ -130,49 +134,57 @@ export function createAgentRouter(
       return;
     }
 
-    // Persist intent before claiming; a crash between these operations is recovered at startup.
-    agentManager.resetEvents(task.id);
-    await repo.requestRun(task.id, Date.now());
-    const claimed = await repo.claimRun(task.id, Date.now());
-    if (!claimed) { res.status(409).json({ error: 'run already claimed' }); return; }
-
-    const updates: Partial<Task> = {
-      agentStatus: 'planning',
-      startedAt: Date.now(),
-      completedAt: undefined,
-    };
-    if (task.columnId === 'backlog') {
-      updates.columnId = 'in-progress';
-    }
-    const updated = await repo.update(task.id, updates);
-    if (!updated) {
-      res.status(404).json({ error: 'task not found' });
-      return;
-    }
-    broadcastTaskUpdate(updated);
-
-    // E8: If this task belongs to a group in 'review', move group back to in-progress
-    if (updated.groupId && groupRepo) {
-      const group = await groupRepo.getById(updated.groupId);
-      if (group && group.columnId === 'review') {
-        const movedGroup = await groupRepo.update(group.id, {
-          columnId: 'in-progress',
-          completedAt: undefined,
-        });
-        if (movedGroup) broadcastGroupUpdate(movedGroup);
+    await withDependencyAdmissionLock(async () => {
+      const currentGate = await getTaskDependencyGate(repo, task.id);
+      if (!currentGate.eligible) { res.status(409).json({ error: currentGate.reason, gate: currentGate }); return; }
+      // Persist intent before claiming; a crash between these operations is recovered at startup.
+      agentManager.resetEvents(task.id);
+      await repo.requestRun(task.id, Date.now());
+      const claimed = await repo.claimRun(task.id, Date.now());
+      if (!claimed) { res.status(409).json({ error: 'run already claimed' }); return; }
+      if (!(await getTaskDependencyGate(repo, task.id)).eligible) {
+        await repo.clearRun(task.id);
+        res.status(409).json({ error: 'Task dependencies changed before execution' }); return;
       }
-    }
 
-    agentManager.startAgent(
-      updated,
-      async (status) => {
-        if (status === 'complete' || status === 'failed') await repo.clearRun(task.id);
-        await makeStatusCallback(repo, task.id, agentManager, updated, projectRepo)(status);
-      },
-      makeWorktreeCallback(repo, task.id),
-    );
+      const updates: Partial<Task> = {
+        agentStatus: 'planning',
+        startedAt: Date.now(),
+        completedAt: undefined,
+      };
+      if (task.columnId === 'backlog') {
+        updates.columnId = 'in-progress';
+      }
+      const updated = await repo.update(task.id, updates);
+      if (!updated) {
+        res.status(404).json({ error: 'task not found' });
+        return;
+      }
+      broadcastTaskUpdate(updated);
 
-    res.json(updated);
+      // E8: If this task belongs to a group in 'review', move group back to in-progress
+      if (updated.groupId && groupRepo) {
+        const group = await groupRepo.getById(updated.groupId);
+        if (group && group.columnId === 'review') {
+          const movedGroup = await groupRepo.update(group.id, {
+            columnId: 'in-progress',
+            completedAt: undefined,
+          });
+          if (movedGroup) broadcastGroupUpdate(movedGroup);
+        }
+      }
+
+      agentManager.startAgent(
+        updated,
+        async (status) => {
+          if (status === 'complete' || status === 'failed') await repo.clearRun(task.id);
+          await makeStatusCallback(repo, task.id, agentManager, updated, projectRepo)(status);
+        },
+        makeWorktreeCallback(repo, task.id),
+      );
+
+      res.json(updated);
+    });
   }));
 
   // POST /api/tasks/:id/stop
@@ -192,6 +204,7 @@ export function createAgentRouter(
       res.status(409).json({ error: 'no running agent for this task' });
       return;
     }
+    await repo.clearRun(task.id);
     const updated = await repo.update(task.id, { agentStatus: 'failed' });
     if (!updated) {
       res.status(404).json({ error: 'task not found' });

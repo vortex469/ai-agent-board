@@ -106,3 +106,19 @@ test('reattaching an existing stale worktree fails ancestry verification', async
     assert.throws(() => f.manager.setupWorktree(p3), /not contained/);
   } finally { f.close(); }
 });
+
+test('ordered successor pins current integrated base including changes beyond its immediate predecessor', async () => {
+  const f = await fixture();
+  try {
+    const p1 = await f.start();
+    const predecessorCommit = await f.finish(p1);
+    fs.writeFileSync(path.join(f.root, 'external-group-result'), 'integrated external prerequisite');
+    git(f.root, 'add', 'external-group-result');
+    git(f.root, 'commit', '-m', 'integrate another group result');
+    const integratedBase = git(f.root, 'rev-parse', 'HEAD');
+    const p2 = await f.start();
+    assert.equal(p2.repositoryBaseline?.predecessorCommit, predecessorCommit);
+    assert.equal(p2.repositoryBaseline?.startCommit, integratedBase);
+    assert.equal(git(p2.worktreePath!, 'rev-parse', 'HEAD'), integratedBase);
+  } finally { f.close(); }
+});

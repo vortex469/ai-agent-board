@@ -1,17 +1,28 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import path from 'node:path';
 import { createServer } from 'node:http';
 import express from 'express';
 import Database from 'better-sqlite3';
 import { SqliteTaskRepository } from '../src/repositories/sqlite.js';
 import { PostgresTaskRepository } from '../src/repositories/postgres.js';
 import { migrateSqliteDatabase } from '../src/db.js';
-import { createTaskRouter } from '../src/routes/tasks.js';
-import { createOrchestrationsRouter, extractOrchestrationOutput } from '../src/routes/orchestrations.js';
-import { autoProgressCompletedTask, startAgentForTask, triggerAutomaticDependentProgression } from '../src/routes/helpers.js';
+
+
+
 import type { Task, Project, ExecutionAttempt } from '../src/types.js';
 import type { ProjectRepository } from '../src/repositories/project-types.js';
 import type { AgentManager } from '../src/services/agent-manager.js';
+
+const previousAllowedRoots = process.env.ALLOWED_REPO_ROOTS;
+process.env.ALLOWED_REPO_ROOTS = process.cwd();
+const { createTaskRouter } = await import('../src/routes/tasks.js');
+const { createOrchestrationsRouter, extractOrchestrationOutput } = await import('../src/routes/orchestrations.js');
+const { autoProgressCompletedTask, startAgentForTask, triggerAutomaticDependentProgression } = await import('../src/routes/helpers.js');
+if (previousAllowedRoots === undefined) delete process.env.ALLOWED_REPO_ROOTS;
+else process.env.ALLOWED_REPO_ROOTS = previousAllowedRoots;
 
 function makeDb() {
   const db = new Database(':memory:');
@@ -21,13 +32,13 @@ function makeDb() {
       priority TEXT, column_id TEXT, agent_status TEXT, agent_type TEXT, created_at INTEGER, started_at INTEGER,
       completed_at INTEGER, repo_path TEXT, branch_name TEXT, base_branch TEXT, use_worktree INTEGER,
       worktree_path TEXT, archived INTEGER, group_id TEXT, group_order INTEGER, summary TEXT, external_source TEXT,
-      external_key TEXT, provenance TEXT, run_requested_at INTEGER, run_claimed_at INTEGER, timeout_minutes INTEGER);
+      external_key TEXT, provenance TEXT, run_requested_at INTEGER, run_claimed_at INTEGER, timeout_minutes INTEGER, repository_baseline TEXT);
     CREATE UNIQUE INDEX identity ON tasks(external_source,external_key) WHERE external_source IS NOT NULL AND external_key IS NOT NULL;
     CREATE TABLE events(id TEXT,task_id TEXT,type TEXT,content TEXT,timestamp INTEGER,metadata TEXT);
     CREATE TABLE task_relationships(task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
       related_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, type TEXT NOT NULL DEFAULT 'related',
       created_at INTEGER NOT NULL, PRIMARY KEY(task_id,related_task_id), CHECK(task_id < related_task_id));
-    CREATE TABLE task_dependencies(prerequisite_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    CREATE TABLE task_dependencies(prerequisite_task_id TEXT NOT NULL,
       dependent_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, created_at INTEGER NOT NULL,
       PRIMARY KEY(prerequisite_task_id,dependent_task_id), CHECK(prerequisite_task_id <> dependent_task_id));
     CREATE TABLE execution_attempts(id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -40,8 +51,8 @@ function makeDb() {
 
 const task = (id: string, projectId = 'project-a', title = id): Task => ({
   id, projectId, title, description: '', priority: 'medium', columnId: 'backlog', agentStatus: 'idle',
-  agentType: 'hermes', createdAt: Number(id.replace(/\D/g, '')) || 1, repoPath: '/tmp/agentboard-test-repo', baseBranch: 'main',
-  branchName: `agent/${id}`, useWorktree: true,
+  agentType: 'hermes', createdAt: Number(id.replace(/\D/g, '')) || 1, baseBranch: 'main',
+  branchName: `agent/${id}`, useWorktree: false,
 });
 
 const attempt = (id: string, taskId: string, key = id): ExecutionAttempt => ({
@@ -52,7 +63,7 @@ const attempt = (id: string, taskId: string, key = id): ExecutionAttempt => ({
 
 const nextTurn = () => new Promise<void>((resolve) => setImmediate(resolve));
 
-const project: Project = { id: 'project-a', name: 'Project A', aliases: ['alpha'], repoPath: '/tmp/agentboard-test-repo', isDefault: false, createdAt: 1, updatedAt: 1, autoRunEnabled: true };
+const project: Project = { id: 'project-a', name: 'Project A', aliases: ['alpha'], repoPath: process.cwd(), isDefault: false, createdAt: 1, updatedAt: 1, autoRunEnabled: true };
 const projects = {
   getById: async (id: string) => id === project.id ? project : undefined,
   resolve: async (ref: string) => ['project-a', 'Project A', 'alpha'].some((v) => v.toLowerCase() === ref.trim().toLowerCase()) ? [project] : [],
@@ -150,7 +161,7 @@ test('SQLite relationships are symmetric, idempotent, same-project, and cascade'
   } finally { db.close(); }
 });
 
-test('SQLite dependencies are directional, idempotent, same-project, and cascade', async () => {
+test('SQLite dependencies are directional, idempotent, same-project, and retain missing gates', async () => {
   const db = makeDb();
   const repo = new SqliteTaskRepository(db);
   try {
@@ -168,6 +179,8 @@ test('SQLite dependencies are directional, idempotent, same-project, and cascade
     assert.equal((await repo.createDependency('first', 'second', 999)).created, false);
     await assert.rejects(repo.createDependency('other-project', 'second', 1), /same project/);
     await repo.delete('first');
+    assert.equal((await repo.getRelationships('second'))[0].relatedTaskId, 'first');
+    await repo.delete('second');
     assert.deepEqual(await repo.getRelationships('second'), []);
   } finally { db.close(); }
 });
@@ -414,8 +427,9 @@ test('automatic dependent progression leaves claimed cards for safe resume recov
   } as unknown as AgentManager;
   try {
     await repo.create({ ...task('first'), columnId: 'done', agentStatus: 'complete' });
-    await repo.create({ ...task('second'), runRequestedAt: 20, runClaimedAt: 21 });
+    await repo.create(task('second'));
     await repo.createDependency('first', 'second', 30);
+    await repo.update('second', { runRequestedAt: 20, runClaimedAt: 21 });
 
     const first = await repo.getById('first');
     assert(first);
@@ -437,8 +451,9 @@ test('safe resume reclaims a stale queued dependent after prerequisites are done
   } as unknown as AgentManager;
   try {
     await repo.create({ ...task('first'), columnId: 'done', agentStatus: 'complete' });
-    await repo.create({ ...task('second'), runRequestedAt: 20, runClaimedAt: 21 });
+    await repo.create(task('second'));
     await repo.createDependency('first', 'second', 30);
+    await repo.update('second', { runRequestedAt: 20, runClaimedAt: 21 });
 
     const stale = await repo.getPendingRuns(30_022);
     assert.deepEqual(stale.map((item) => item.id), ['second']);
@@ -534,6 +549,7 @@ test('auto progression requires focused test and hostile review evidence before 
   const repo = new SqliteTaskRepository(db);
   const started: string[] = [];
   let merges = 0;
+  const repoPath = mkdtempSync(path.join(process.cwd(), '.dependency-evidence-'));
   const manager = {
     ...agents,
     getMergeReadiness: () => ({ ready: true }),
@@ -542,8 +558,11 @@ test('auto progression requires focused test and hostile review evidence before 
     startAgent: (startedTask: Task) => { started.push(startedTask.id); },
   } as unknown as AgentManager;
   try {
-    await repo.create({ ...task('first'), columnId: 'in-progress', agentStatus: 'executing', worktreePath: '/worktree/first' });
-    await repo.create(task('second'));
+  execFileSync('git', ['init', '-b', 'main', repoPath]);
+  execFileSync('git', ['-C', repoPath, '-c', 'user.name=Test', '-c', 'user.email=test@example.test', 'commit', '--allow-empty', '-m', 'baseline']);
+  execFileSync('git', ['-C', repoPath, 'branch', 'agent/first']);
+    await repo.create({ ...task('first'), useWorktree: true, repoPath, columnId: 'in-progress', agentStatus: 'executing', worktreePath: '/worktree/first' });
+    await repo.create({ ...task('second'), repoPath });
     await repo.createDependency('first', 'second', 10);
     await repo.requestRun('second', 20);
     await repo.update('first', { summary: '## Completed\nImplemented the change.' });
@@ -610,7 +629,7 @@ test('auto progression requires focused test and hostile review evidence before 
     assert.deepEqual(started, ['second']);
     assert.equal((await repo.getById('first'))?.columnId, 'done');
     assert.equal((await repo.getById('second'))?.columnId, 'in-progress');
-  } finally { db.close(); }
+  } finally { db.close(); rmSync(repoPath, { recursive: true, force: true }); }
 });
 
 test('auto progression reports interpreter environment errors clearly', async () => {
@@ -624,7 +643,7 @@ test('auto progression reports interpreter environment errors clearly', async ()
     removeWorktree: () => ({ status: 'removed' }),
   } as unknown as AgentManager;
   try {
-    await repo.create({ ...task('python-card'), columnId: 'in-progress', agentStatus: 'executing', worktreePath: '/worktree/python-card' });
+    await repo.create({ ...task('python-card'), useWorktree: true, columnId: 'in-progress', agentStatus: 'executing', worktreePath: '/worktree/python-card' });
     await repo.update('python-card', {
       summary: '## Remaining\nEnvironment error: no suitable Python interpreter exists for pytest.',
     });
@@ -1186,6 +1205,7 @@ test('Postgres repository persists directional dependency writes and replays con
   const pool = {
     query: async (sql: string, params?: unknown[]) => {
       calls.push({ sql, params });
+      if (sql.startsWith('SELECT dependent.*')) return { rows: [{ agent_status: 'idle', run_claimed_at: null }], rowCount: 1 };
       if (sql.startsWith('INSERT INTO task_dependencies')) {
         if (!inserted) { inserted = true; return { rows: [{ created_at: '55' }], rowCount: 1 }; }
         return { rows: [], rowCount: 0 };
@@ -1194,12 +1214,13 @@ test('Postgres repository persists directional dependency writes and replays con
       return { rows: [], rowCount: 0 };
     },
   };
-  const repo = new PostgresTaskRepository(pool as never);
+  const repo = new PostgresTaskRepository({ connect: async () => ({ ...pool, release: () => undefined }) } as never);
   assert.equal((await repo.createDependency('z-task', 'a-task', 55)).created, true);
   assert.equal((await repo.createDependency('z-task', 'a-task', 99)).created, false);
   const inserts = calls.filter(({ sql }) => sql.startsWith('INSERT INTO task_dependencies'));
   assert.deepEqual(inserts[0].params, ['z-task', 'a-task', 55]);
-  assert.match(inserts[0].sql, /prerequisite\.project_id=dependent\.project_id/);
+  assert.match(calls.find(({ sql }) => sql.startsWith('SELECT dependent.*'))!.sql, /prerequisite\.project_id=dependent\.project_id/);
+  assert.equal(calls.filter(({ sql }) => sql.includes('pg_advisory_xact_lock')).length, 2);
 });
 
 test('Postgres orchestration aggregate commits successful work and rolls back relation failures', async () => {
@@ -1298,4 +1319,39 @@ test('Postgres create orchestration checks attempt replay before writes and retu
   ]);
   assert.equal(calls.some((sql) => /^\s*(INSERT|UPDATE|DELETE)\b/.test(sql)), false);
   assert.equal(released, true);
+});
+
+test('dependency API rejects an in-memory reservation before its planning status is persisted', async () => {
+  const db = makeDb(); const repo = new SqliteTaskRepository(db);
+  try {
+    await repo.create(task('prerequisite')); await repo.create(task('dependent'));
+    const manager = { ...agents, isRunning: (id: string) => id === 'dependent' } as unknown as AgentManager;
+    await withApi(repo, async base => {
+      const response = await fetch(`${base}/api/tasks/dependent/relationships`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ relatedTaskId: 'prerequisite', type: 'blocks', direction: 'blocked-by' }),
+      });
+      assert.equal(response.status, 409);
+      assert.deepEqual(await repo.getRelationships('dependent'), []);
+    }, manager);
+  } finally { db.close(); }
+});
+
+test('dependency API surfaces and allows repair of a missing stable prerequisite ID', async () => {
+  const db = makeDb(); const repo = new SqliteTaskRepository(db);
+  try {
+    await repo.create(task('dependent'));
+    db.pragma('foreign_keys=OFF');
+    db.prepare('INSERT INTO task_dependencies VALUES (?, ?, ?)').run('deleted-id', 'dependent', 1);
+    db.pragma('foreign_keys=ON');
+    await withApi(repo, async base => {
+      const gate = await (await fetch(`${base}/api/tasks/dependent/dependencies`)).json() as { eligible: boolean; dependencies: Array<{taskId: string; status: string}> };
+      assert.equal(gate.eligible, false);
+      assert.equal(gate.dependencies[0].taskId, 'deleted-id');
+      assert.equal(gate.dependencies[0].status, 'Missing');
+      const removed = await fetch(`${base}/api/tasks/dependent/relationships/deleted-id`, { method: 'DELETE' });
+      assert.equal(removed.status, 204);
+      assert.equal((await repo.getRelationships('dependent')).length, 0);
+    });
+  } finally { db.close(); }
 });

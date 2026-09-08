@@ -203,10 +203,25 @@ export function migrateSqliteDatabase(db: Database.Database): void {
       created_at           INTEGER NOT NULL,
       PRIMARY KEY (prerequisite_task_id, dependent_task_id),
       CHECK (prerequisite_task_id <> dependent_task_id),
-      FOREIGN KEY (prerequisite_task_id) REFERENCES tasks(id) ON DELETE CASCADE,
       FOREIGN KEY (dependent_task_id) REFERENCES tasks(id) ON DELETE CASCADE
     )
   `);
+  // Keep a deleted prerequisite's stable ID: cascading it away would silently unlock dependents.
+  const dependencyForeignKeys = db.pragma('foreign_key_list(task_dependencies)') as Array<{ from: string }>;
+  if (dependencyForeignKeys.some((key) => key.from === 'prerequisite_task_id')) {
+    db.transaction(() => {
+      db.exec(`CREATE TABLE task_dependencies_preserved (
+        prerequisite_task_id TEXT NOT NULL,
+        dependent_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (prerequisite_task_id, dependent_task_id),
+        CHECK (prerequisite_task_id <> dependent_task_id)
+      )`);
+      db.exec('INSERT INTO task_dependencies_preserved SELECT prerequisite_task_id, dependent_task_id, created_at FROM task_dependencies');
+      db.exec('DROP TABLE task_dependencies');
+      db.exec('ALTER TABLE task_dependencies_preserved RENAME TO task_dependencies');
+    }).immediate();
+  }
   db.exec(`CREATE INDEX IF NOT EXISTS idx_task_dependencies_dependent ON task_dependencies(dependent_task_id)`);
   db.exec(`
     CREATE TABLE IF NOT EXISTS execution_attempts (
@@ -650,13 +665,27 @@ export async function initPostgresDatabase(pool: Pool): Promise<void> {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_task_relationships_related ON task_relationships(related_task_id)`);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS task_dependencies (
-      prerequisite_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+      prerequisite_task_id TEXT NOT NULL,
       dependent_task_id    TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
       created_at           BIGINT NOT NULL,
       PRIMARY KEY (prerequisite_task_id, dependent_task_id),
       CHECK (prerequisite_task_id <> dependent_task_id)
     )
   `);
+  // Remove legacy prerequisite foreign keys (including installations with custom names).
+  // Dependent deletion still cascades; prerequisite deletion deliberately leaves a missing gate.
+  await pool.query(`DO $$
+    DECLARE dependency_constraint RECORD;
+    BEGIN
+      FOR dependency_constraint IN
+        SELECT c.conname FROM pg_constraint c
+        JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey)
+        WHERE c.conrelid = 'task_dependencies'::regclass AND c.contype = 'f'
+          AND a.attname = 'prerequisite_task_id'
+      LOOP
+        EXECUTE format('ALTER TABLE task_dependencies DROP CONSTRAINT IF EXISTS %I', dependency_constraint.conname);
+      END LOOP;
+    END $$`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_task_dependencies_dependent ON task_dependencies(dependent_task_id)`);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS execution_attempts (

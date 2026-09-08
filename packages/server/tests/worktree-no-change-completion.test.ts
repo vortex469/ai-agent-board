@@ -106,9 +106,12 @@ test('managed local AI coding run receives repository mutation contract in final
   const manager = new AgentManager();
   const events: AgentEvent[] = [];
   manager.initEventPersistence({
+    getById: async (id: string) => id === t.id ? t : undefined,
+    getRelationships: async () => [],
+    clearRun: async () => {},
     insertEvent: async (event: AgentEvent) => { events.push(event); },
     getEventsByTaskId: async (taskId: string) => events.filter((event) => event.taskId === taskId),
-    update: async () => undefined,
+    update: async (id: string, changes: Partial<Task>) => id === t.id ? Object.assign(t, changes) : undefined,
   } as unknown as Parameters<AgentManager['initEventPersistence']>[0]);
   let finalPrompt = '';
   registerDshProvider(
@@ -172,9 +175,12 @@ test('managed local AI automatically retries once after no repository changes an
   const manager = new AgentManager();
   const events: AgentEvent[] = [];
   manager.initEventPersistence({
+    getById: async (id: string) => id === t.id ? t : undefined,
+    getRelationships: async () => [],
+    clearRun: async () => {},
     insertEvent: async (event: AgentEvent) => { events.push(event); },
     getEventsByTaskId: async (taskId: string) => events.filter((event) => event.taskId === taskId),
-    update: async () => undefined,
+    update: async (id: string, changes: Partial<Task>) => id === t.id ? Object.assign(t, changes) : undefined,
   } as unknown as Parameters<AgentManager['initEventPersistence']>[0]);
   let attempts = 0;
   const worktreePaths: string[] = [];
@@ -239,9 +245,12 @@ test('managed local AI fails safely before launch when prompt exceeds context bu
   const manager = new AgentManager();
   const events: AgentEvent[] = [];
   manager.initEventPersistence({
+    getById: async (id: string) => id === t.id ? t : undefined,
+    getRelationships: async () => [],
+    clearRun: async () => {},
     insertEvent: async (event: AgentEvent) => { events.push(event); },
     getEventsByTaskId: async (taskId: string) => events.filter((event) => event.taskId === taskId),
-    update: async () => undefined,
+    update: async (id: string, changes: Partial<Task>) => id === t.id ? Object.assign(t, changes) : undefined,
   } as unknown as Parameters<AgentManager['initEventPersistence']>[0]);
   let attempts = 0;
   registerDshProvider(manager, (_workingDirectory, child) => {
@@ -290,9 +299,13 @@ test('managed worktree completion gate stops after two consecutive no-change att
   const manager = new AgentManager();
   const events: AgentEvent[] = [];
   manager.initEventPersistence({
+    getById: async (id: string) => id === t.id ? t : undefined,
+    getRelationships: async () => [],
+    clearRun: async () => {},
     insertEvent: async (event: AgentEvent) => { events.push(event); },
     getEventsByTaskId: async (taskId: string) => events.filter((event) => event.taskId === taskId),
-  } as Parameters<AgentManager['initEventPersistence']>[0]);
+    update: async (id: string, changes: Partial<Task>) => id === t.id ? Object.assign(t, changes) : undefined,
+  } as unknown as Parameters<AgentManager['initEventPersistence']>[0]);
   let attempts = 0;
   const prompts: string[] = [];
   const provider = {
@@ -349,9 +362,12 @@ test('managed local AI DSH exit 0 passes when the task branch already has a comm
   const manager = new AgentManager();
   const events: AgentEvent[] = [];
   manager.initEventPersistence({
+    getById: async (id: string) => id === t.id ? t : undefined,
+    getRelationships: async () => [],
+    clearRun: async () => {},
     insertEvent: async (event: AgentEvent) => { events.push(event); },
     getEventsByTaskId: async (taskId: string) => events.filter((event) => event.taskId === taskId),
-    update: async () => undefined,
+    update: async (id: string, changes: Partial<Task>) => id === t.id ? Object.assign(t, changes) : undefined,
   } as unknown as Parameters<AgentManager['initEventPersistence']>[0]);
   registerDshProvider(manager, (workingDirectory, child) => {
     writeFileSync(path.join(workingDirectory, 'already-committed.txt'), 'committed by agent\n');
@@ -391,9 +407,12 @@ test('managed local AI DSH exit 0 commits worktree changes before completion', a
   const manager = new AgentManager();
   const events: AgentEvent[] = [];
   manager.initEventPersistence({
+    getById: async (id: string) => id === t.id ? t : undefined,
+    getRelationships: async () => [],
+    clearRun: async () => {},
     insertEvent: async (event: AgentEvent) => { events.push(event); },
     getEventsByTaskId: async (taskId: string) => events.filter((event) => event.taskId === taskId),
-    update: async () => undefined,
+    update: async (id: string, changes: Partial<Task>) => id === t.id ? Object.assign(t, changes) : undefined,
   } as unknown as Parameters<AgentManager['initEventPersistence']>[0]);
   registerDshProvider(manager, (workingDirectory, child) => {
     writeFileSync(path.join(workingDirectory, 'dsh-output.txt'), 'changed by dsh\n');
@@ -433,9 +452,12 @@ test('read-only task without a managed worktree is not rejected for lacking repo
   const manager = new AgentManager();
   const events: AgentEvent[] = [];
   manager.initEventPersistence({
+    getById: async (id: string) => id === t.id ? t : undefined,
+    getRelationships: async () => [],
+    clearRun: async () => {},
     insertEvent: async (event: AgentEvent) => { events.push(event); },
     getEventsByTaskId: async (taskId: string) => events.filter((event) => event.taskId === taskId),
-    update: async () => undefined,
+    update: async (id: string, changes: Partial<Task>) => id === t.id ? Object.assign(t, changes) : undefined,
   } as unknown as Parameters<AgentManager['initEventPersistence']>[0]);
   registerDshProvider(manager, (_workingDirectory, child) => {
     child.stdout.write('<task-summary>\n## Completed\nRead-only inspection completed.\n</task-summary>\n');

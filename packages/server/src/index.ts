@@ -1,3 +1,4 @@
+import { installDependencyScheduler } from './services/dependency-scheduler.js';
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -121,7 +122,7 @@ const agentManager = new AgentManager();
   app.use('/api/projects', createProjectsRouter(projectRepo, taskRepo, groupRepo, agentManager));
   app.use('/api/orchestrations', createOrchestrationsRouter(taskRepo, projectRepo, agentManager));
   app.use('/api/roadmap-intake', createRoadmapIntakeRouter(projectRepo));
-  app.use('/api/tasks', createTaskRouter(taskRepo, agentManager, projectRepo));
+  app.use('/api/tasks', createTaskRouter(taskRepo, agentManager, projectRepo, groupRepo));
   app.use('/api/tasks', createAgentRouter(taskRepo, agentManager, groupRepo, projectRepo));
   app.use('/api/tasks', createGitRouter(taskRepo, agentManager, projectRepo));
   app.use('/api/templates', createTemplateRouter(templateRepo));
@@ -235,6 +236,8 @@ const agentManager = new AgentManager();
     console.warn(`[server] recovered orphaned task ${task.id} "${task.title}" (was ${task.agentStatus})`);
   }
 
+  const stopDependencyScheduler = installDependencyScheduler(taskRepo, groupRepo, projectRepo, agentManager);
+
   // Reclaim stale dispatch leases continuously, not only after a restart.
   const dispatchInterval = setInterval(() => {
     void (async () => {
@@ -268,6 +271,7 @@ const agentManager = new AgentManager();
 
   // Graceful shutdown
   function shutdown() {
+    stopDependencyScheduler();
     console.log('[server] shutting down...');
     clearInterval(dispatchInterval);
     agentManager.shutdownAll();

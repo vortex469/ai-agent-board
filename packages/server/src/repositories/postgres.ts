@@ -181,7 +181,28 @@ export class PostgresTaskRepository implements TaskRepository {
     }
   }
   async requestRun(id:string,at:number) { const {rows}=await this.pool.query<TaskRow>('UPDATE tasks SET run_requested_at=$1,run_claimed_at=NULL WHERE id=$2 RETURNING *',[at,id]); return rows[0]?rowToTask(rows[0]):undefined; }
-  async claimRun(id:string,at:number) { const staleBefore=at-30_000; const {rows}=await this.pool.query<TaskRow>("UPDATE tasks SET run_claimed_at=$1 WHERE id=$2 AND run_requested_at IS NOT NULL AND (run_claimed_at IS NULL OR run_claimed_at < $3) AND agent_status IN ('idle','planning') RETURNING *",[at,id,staleBefore]); return rows[0]?rowToTask(rows[0]):undefined; }
+  async claimRun(id: string, at: number) {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      // Use the graph-edit lock before taking a fresh statement snapshot. Otherwise an
+      // edge inserted while UPDATE waits for a row lock could escape the claim check.
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended('task-dependency-graph', 0))");
+      await client.query(`SELECT p.id FROM tasks p JOIN task_dependencies d ON d.prerequisite_task_id=p.id
+        WHERE d.dependent_task_id=$1 ORDER BY p.id FOR UPDATE OF p`, [id]);
+      const { rows } = await client.query<TaskRow>(`UPDATE tasks SET run_claimed_at=$1 WHERE id=$2
+        AND run_requested_at IS NOT NULL AND (run_claimed_at IS NULL OR run_claimed_at < $3)
+        AND agent_status IN ('idle','planning') AND NOT EXISTS (
+          SELECT 1 FROM task_dependencies d LEFT JOIN tasks p ON p.id=d.prerequisite_task_id
+          WHERE d.dependent_task_id=tasks.id AND (p.id IS NULL OR p.agent_status IS DISTINCT FROM 'complete' OR p.column_id IS DISTINCT FROM 'done')
+        ) RETURNING *`, [at, id, at - 30_000]);
+      await client.query('COMMIT');
+      return rows[0] ? rowToTask(rows[0]) : undefined;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally { client.release(); }
+  }
   async clearRun(id:string) { const {rows}=await this.pool.query<TaskRow>('UPDATE tasks SET run_requested_at=NULL,run_claimed_at=NULL WHERE id=$1 RETURNING *',[id]); return rows[0]?rowToTask(rows[0]):undefined; }
   async getPendingRuns(staleBefore=Date.now()-30_000) { const {rows}=await this.pool.query<TaskRow>("SELECT * FROM tasks WHERE run_requested_at IS NOT NULL AND (run_claimed_at IS NULL OR run_claimed_at < $1) AND agent_status IN ('idle','planning') ORDER BY run_requested_at",[staleBefore]); return rows.map(rowToTask); }
 
@@ -391,27 +412,61 @@ export class PostgresTaskRepository implements TaskRepository {
   }
 
   async deleteRelationship(taskId: string, relatedTaskId: string): Promise<boolean> {
-    const [left, right] = taskId < relatedTaskId ? [taskId, relatedTaskId] : [relatedTaskId, taskId];
-    const related = (await this.pool.query('DELETE FROM task_relationships WHERE task_id=$1 AND related_task_id=$2', [left, right])).rowCount ?? 0;
-    const dependencies = (await this.pool.query(`DELETE FROM task_dependencies
-      WHERE (prerequisite_task_id=$1 AND dependent_task_id=$2) OR (prerequisite_task_id=$2 AND dependent_task_id=$1)`, [taskId, relatedTaskId])).rowCount ?? 0;
-    return related + dependencies > 0;
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended('task-dependency-graph', 0))");
+      const { rows: dependents } = await client.query<TaskRow>(`SELECT t.* FROM tasks t JOIN task_dependencies d ON d.dependent_task_id=t.id
+        WHERE (d.prerequisite_task_id=$1 AND d.dependent_task_id=$2) OR (d.prerequisite_task_id=$2 AND d.dependent_task_id=$1)
+        ORDER BY t.id FOR UPDATE OF t`, [taskId, relatedTaskId]);
+      if (dependents.some((t) => ['planning', 'executing'].includes(t.agent_status) || (t.agent_status === 'idle' && t.run_claimed_at != null))) {
+        throw new Error('cannot change dependencies while the dependent task is running or reserved');
+      }
+      const [left, right] = taskId < relatedTaskId ? [taskId, relatedTaskId] : [relatedTaskId, taskId];
+      const related = (await client.query('DELETE FROM task_relationships WHERE task_id=$1 AND related_task_id=$2', [left, right])).rowCount ?? 0;
+      const dependencies = (await client.query(`DELETE FROM task_dependencies
+        WHERE (prerequisite_task_id=$1 AND dependent_task_id=$2) OR (prerequisite_task_id=$2 AND dependent_task_id=$1)`, [taskId, relatedTaskId])).rowCount ?? 0;
+      await client.query('COMMIT');
+      return related + dependencies > 0;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally { client.release(); }
   }
 
   async createDependency(prerequisiteTaskId: string, dependentTaskId: string, createdAt: number): Promise<{ relationship: TaskRelationship; created: boolean }> {
     if (prerequisiteTaskId === dependentTaskId) throw new Error('a task cannot depend on itself');
-    const { rows } = await this.pool.query<{ created_at: string }>(`INSERT INTO task_dependencies(prerequisite_task_id,dependent_task_id,created_at)
-      SELECT $1,$2,$3 FROM tasks prerequisite JOIN tasks dependent ON dependent.id=$2 WHERE prerequisite.id=$1 AND prerequisite.project_id=dependent.project_id
-      ON CONFLICT(prerequisite_task_id,dependent_task_id) DO NOTHING RETURNING created_at`, [prerequisiteTaskId, dependentTaskId, createdAt]);
-    const persisted = rows[0] ?? (await this.pool.query<{ created_at: string }>(
-      'SELECT created_at FROM task_dependencies WHERE prerequisite_task_id=$1 AND dependent_task_id=$2',
-      [prerequisiteTaskId, dependentTaskId],
-    )).rows[0];
-    if (!persisted) throw new Error('tasks must exist in the same project');
-    return {
-      relationship: { taskId: dependentTaskId, relatedTaskId: prerequisiteTaskId, type: 'blocks', direction: 'blocked-by', createdAt: Number(persisted.created_at) },
-      created: rows.length > 0,
-    };
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      // Serialize graph edits so concurrent edges cannot each pass validation and form a cycle.
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended('task-dependency-graph', 0))");
+      const { rows: tasks } = await client.query<TaskRow>(`SELECT dependent.* FROM tasks prerequisite JOIN tasks dependent ON dependent.id=$2
+        WHERE prerequisite.id=$1 AND prerequisite.project_id=dependent.project_id FOR UPDATE OF dependent, prerequisite`, [prerequisiteTaskId, dependentTaskId]);
+      const dependent = tasks[0];
+      if (!dependent) throw new Error('tasks must exist in the same project');
+      if (['planning', 'executing'].includes(dependent.agent_status) || (dependent.agent_status === 'idle' && dependent.run_claimed_at != null)) {
+        throw new Error('cannot change dependencies while the dependent task is running or reserved');
+      }
+      const { rows: cycles } = await client.query(`WITH RECURSIVE descendants(id) AS (
+        SELECT dependent_task_id FROM task_dependencies WHERE prerequisite_task_id=$1
+        UNION SELECT d.dependent_task_id FROM task_dependencies d JOIN descendants ON d.prerequisite_task_id=descendants.id
+      ) SELECT 1 FROM descendants WHERE id=$2 LIMIT 1`, [dependentTaskId, prerequisiteTaskId]);
+      if (cycles.length) throw new Error('dependency would create a cycle');
+      const { rows } = await client.query<{ created_at: string }>(`INSERT INTO task_dependencies(prerequisite_task_id,dependent_task_id,created_at)
+        VALUES($1,$2,$3) ON CONFLICT(prerequisite_task_id,dependent_task_id) DO NOTHING RETURNING created_at`, [prerequisiteTaskId, dependentTaskId, createdAt]);
+      const persisted = rows[0] ?? (await client.query<{ created_at: string }>(
+        'SELECT created_at FROM task_dependencies WHERE prerequisite_task_id=$1 AND dependent_task_id=$2', [prerequisiteTaskId, dependentTaskId],
+      )).rows[0];
+      await client.query('COMMIT');
+      return {
+        relationship: { taskId: dependentTaskId, relatedTaskId: prerequisiteTaskId, type: 'blocks', direction: 'blocked-by', createdAt: Number(persisted.created_at) },
+        created: rows.length > 0,
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally { client.release(); }
   }
 
   async getAttemptById(id: string): Promise<ExecutionAttempt | undefined> {

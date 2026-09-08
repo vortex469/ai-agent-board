@@ -79,7 +79,7 @@ export async function prepareOrderedGroupBaseline(task: Task, repo: TaskReposito
   }
   if (!task.repoPath) throw new Error('Ordered coding task requires a repository');
   const baseline = task.repositoryBaseline ?? {
-    startCommit: predecessorCommit ?? git(task.repoPath, 'rev-parse', '--verify', `${task.baseBranch || 'main'}^{commit}`),
+    startCommit: git(task.repoPath, 'rev-parse', '--verify', `${task.baseBranch || 'main'}^{commit}`),
     predecessorTaskId: predecessor?.id,
     predecessorBranch: predecessor?.branchName,
     predecessorCommit,

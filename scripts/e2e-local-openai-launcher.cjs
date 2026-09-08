@@ -71,7 +71,29 @@ const cwd = process.cwd();
 const attempt = stateCount(cwd);
 
 const orderedStep = taskText.match(/E2E Ordered roadmap P([123])/);
-if (orderedStep) {
+const synchronizationStep = taskText.match(/E2E Synchronization (A1|A2|B1|B2)/);
+if (synchronizationStep) {
+  const step = synchronizationStep[1];
+  const startedAt = Date.now();
+  const baseline = git(['rev-parse', 'HEAD']);
+  const prerequisite = step === 'A2' ? 'A1' : step === 'B2' ? 'A2' : undefined;
+  if (prerequisite) {
+    const file = `src/synchronization-${prerequisite}.json`;
+    if (!existsSync(path.join(cwd, file))) throw new Error(`Missing synchronized result ${prerequisite}`);
+    const commit = git(['log', '-1', '--format=%H', '--', file]);
+    git(['merge-base', '--is-ancestor', commit, baseline]);
+    git(['merge-base', '--is-ancestor', commit, 'main']);
+  }
+  // Keep independent roots alive together long enough to observe real overlap.
+  setTimeout(() => {
+    writeFile(`src/synchronization-${step}.json`, JSON.stringify({ baseline, startedAt, finishedAt: Date.now() }));
+    git(['add', `src/synchronization-${step}.json`]);
+    git(['commit', '-m', `Synchronization ${step} result`]);
+    emitTestEvidence('npm test -- --synchronization', `Focused tests passed: ${step} verified synchronized baseline`);
+    process.stdout.write('<task-summary>\n## Completed\nFocused tests passed: synchronization baseline verified.\nHostile review passed: prerequisite ancestry checked.\n</task-summary>\n');
+    setTimeout(() => process.exit(0), 150);
+  }, prerequisite ? 150 : 2000);
+} else if (orderedStep) {
   const step = Number(orderedStep[1]);
   const baseline = git(['rev-parse', 'HEAD']);
   // Read real predecessor output from this isolated worktree before writing anything.
